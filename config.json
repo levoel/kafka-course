@@ -1,0 +1,31 @@
+{
+  "id": "kafka-course",
+  "title": "Apache Kafka Deep-Dive",
+  "description": "Ультимативный курс по Apache Kafka — от архитектуры KRaft до production operations и design patterns",
+  "author": "Lev Neganov",
+  "difficulty": "advanced",
+  "language": "ru",
+  "version": "1.0.0",
+  "modules": [
+    { "id": "00-course-intro", "title": "Введение в курс" },
+    { "id": "01-kafka-architecture", "title": "Архитектура Kafka" },
+    { "id": "02-producers", "title": "Producers" },
+    { "id": "03-consumers", "title": "Consumers" },
+    { "id": "04-kafka-internals", "title": "Внутреннее устройство" },
+    { "id": "05-kafka-connect", "title": "Kafka Connect" },
+    { "id": "06-schema-registry", "title": "Schema Registry" },
+    { "id": "07-kafka-streams", "title": "Kafka Streams" },
+    { "id": "08-ksqldb", "title": "ksqlDB" },
+    { "id": "09-security", "title": "Безопасность" },
+    { "id": "10-production-ops", "title": "Production Operations" },
+    { "id": "11-multi-dc", "title": "Multi-DC и репликация" },
+    { "id": "12-design-patterns", "title": "Design Patterns" },
+    { "id": "13-capstone", "title": "Capstone Project" }
+  ],
+  "tags": ["kafka", "streaming", "distributed-systems", "data-engineering", "kraft"],
+  "estimatedHours": 40,
+  "pricing": {
+    "type": "paid",
+    "priceStars": 500
+  }
+}

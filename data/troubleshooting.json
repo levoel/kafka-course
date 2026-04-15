@@ -1,0 +1,17 @@
+{
+  "title": "Решение проблем Apache Kafka",
+  "description": "Частые ошибки и проблемы при работе с Apache Kafka.",
+  "filters": {
+    "primary": {
+      "label": "Область",
+      "field": "area",
+      "options": []
+    },
+    "secondary": {
+      "label": "Категория",
+      "field": "category",
+      "options": []
+    }
+  },
+  "entries": []
+}
