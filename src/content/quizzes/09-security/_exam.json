@@ -1,0 +1,363 @@
+{
+  "lessonSlug": "09-security/_exam",
+  "moduleId": "09-security",
+  "examTitle": "Экзамен: Безопасность Kafka",
+  "passThreshold": 70,
+  "_meta": {
+    "idPrefix": "kafka-m09-exam",
+    "description": "13 applied/analytical scenario-based questions covering all 6 lessons of Module 09. Security is a critical CCDAK domain."
+  },
+  "questions": [
+    {
+      "id": "kafka-m09-exam-q1",
+      "type": "multiple-choice",
+      "question": "Kafka-кластер (Kafka 4.0, KRaft) настроен с security.protocol=SASL_PLAINTEXT для всех listeners, включая внешний. Команда безопасности требует немедленно устранить критическую уязвимость. Что является уязвимостью и какой минимальный набор изменений её устраняет?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Уязвимость: SASL_PLAINTEXT не поддерживает SCRAM. Исправление: перейти на PLAIN механизм."
+        },
+        {
+          "id": "b",
+          "text": "Уязвимость: SASL credentials (включая SCRAM challenge/response) передаются по незашифрованному каналу через интернет. Перехват трафика возможен. Исправление: (1) добавить SSL keystore/truststore на брокеры, (2) изменить listener.security.protocol.map=EXTERNAL:SASL_SSL, (3) обновить client конфиги на security.protocol=SASL_SSL."
+        },
+        {
+          "id": "c",
+          "text": "Уязвимость: PLAINTEXT listener открыт на том же порту. Исправление: закрыть PLAINTEXT listener."
+        },
+        {
+          "id": "d",
+          "text": "Уязвимость: allow.everyone.if.no.acl.found не задан. Исправление: установить false."
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "SASL_PLAINTEXT через интернет — критическая уязвимость: весь трафик (включая challenge/response, данные топиков) передаётся в открытом виде. Даже SCRAM не защищает от перехвата данных (только от прямой кражи пароля). Для external listener через интернет обязателен TLS: SASL_SSL = SASL аутентификация + TLS шифрование канала. Изменение требует: SSL keystore (сертификат брокера) + SSL truststore (CA для верификации клиентов), изменение protocol map, rolling restart брокеров, обновление client конфигов. SASL_PLAINTEXT допустим только во внутренней изолированной сети (Kubernetes network policy, security groups).",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 1: Обзор аутентификации — раздел 'Security Protocol: четыре варианта'"
+    },
+    {
+      "id": "kafka-m09-exam-q2",
+      "type": "multiple-choice",
+      "question": "Kafka-кластер мигрирует с SASL/PLAIN на SASL/SCRAM без downtime. Текущее состояние: 50 клиентов, все используют PLAIN. Как правильно выполнить миграцию по шагам?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Шаг 1: Удалить PLAIN из enabled mechanisms. Шаг 2: Добавить SCRAM. Шаг 3: Rolling restart. Шаг 4: Мигрировать клиентов."
+        },
+        {
+          "id": "b",
+          "text": "Шаг 1: Добавить SCRAM к enabled mechanisms (оба активны). Шаг 2: Rolling restart брокеров. Шаг 3: Создать SCRAM credentials для всех 50 пользователей через kafka-configs.sh. Шаг 4: Мигрировать клиентов по одному на SCRAM. Шаг 5: После полной миграции — убрать PLAIN. Шаг 6: Rolling restart."
+        },
+        {
+          "id": "c",
+          "text": "Шаг 1: Создать SCRAM credentials. Шаг 2: Мигрировать всех клиентов одновременно. Шаг 3: Rolling restart брокеров с новым конфигом."
+        },
+        {
+          "id": "d",
+          "text": "Миграция с PLAIN на SCRAM требует полной остановки кластера — zero-downtime невозможна"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Правильная zero-downtime миграция PLAIN → SCRAM: (1) Добавить SCRAM к enabled: listener.name.sasl_ssl.sasl.enabled.mechanisms=PLAIN,SCRAM-SHA-256. Оба механизма активны — существующие клиенты продолжают работать с PLAIN. (2) Rolling restart: по одному брокеру, без downtime. (3) Создать SCRAM credentials: kafka-configs.sh --alter --add-config 'SCRAM-SHA-256=[...]' для каждого из 50 пользователей. Работает без рестарта (KRaft metadata). (4) Мигрировать клиентов поодиночке: каждый клиент обновляет sasl.mechanism=SCRAM-SHA-256 — брокер поддерживает оба, нет конфликтов. (5) После полной миграции: убрать PLAIN из enabled. Rolling restart. Вариант A опасен: если убрать PLAIN до создания SCRAM credentials — все клиенты теряют доступ мгновенно.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 3: SASL-механизмы — раздел 'Миграция с PLAIN на SCRAM без downtime'"
+    },
+    {
+      "id": "kafka-m09-exam-q3",
+      "type": "multiple-choice",
+      "question": "Broker SSL config: ssl.client.auth=required. Client получает ошибку 'PKIX path building failed: unable to find valid certification path to requested target'. Какова причина и решение?",
+      "options": [
+        {
+          "id": "a",
+          "text": "ssl.client.auth=required на брокере — клиент не отправил свой сертификат. Нужно добавить ssl.keystore.location."
+        },
+        {
+          "id": "b",
+          "text": "CA сертификат, подписавший broker certificate, отсутствует в client truststore. Клиент не может построить цепочку доверия до CA. Решение: добавить CA сертификат (и intermediate CAs если есть) в client.truststore.jks через keytool -importcert."
+        },
+        {
+          "id": "c",
+          "text": "Брокерский сертификат истёк. Нужно перевыпустить сертификат."
+        },
+        {
+          "id": "d",
+          "text": "ssl.endpoint.identification.algorithm=https не совпадает с hostname брокера"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "'PKIX path building failed' — стандартная Java ошибка валидации сертификата: JVM не может построить chain of trust от брокерского сертификата до доверенного CA. Причина: CA сертификат (который подписал broker certificate) не добавлен в client truststore.jks. Алгоритм: (1) Определить CA который подписал брокерский сертификат: openssl x509 -in broker-cert.pem -text | grep 'Issuer'. (2) Добавить этот CA в client truststore: keytool -importcert -keystore client.truststore.jks -alias broker-ca -file ca-cert.pem. (3) Если multi-level PKI — добавить все intermediate CAs по цепочке. Вариант A ('PKIX path building') — это ошибка при ПРОВЕРКЕ брокерского сертификата клиентом, не при отсутствии клиентского сертификата (это другая ошибка: 'peer not authenticated').",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 2: SSL/TLS — раздел 'Troubleshooting SSL'"
+    },
+    {
+      "id": "kafka-m09-exam-q4",
+      "type": "multiple-choice",
+      "question": "Сервис payment-processor настроен с enable.idempotence=true, transactional.id=payments-txn и производит в топик 'payments-enriched'. При запуске получает ClusterAuthorizationException. ACL для User:payment-processor: Topic:Write+Describe на 'payments-enriched'. Что отсутствует?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Group:Read на consumer group — сервис не может commit offsets"
+        },
+        {
+          "id": "b",
+          "text": "Topic:Read на 'payments-enriched' — producer также читает для idempotence"
+        },
+        {
+          "id": "c",
+          "text": "TransactionalId:Write на 'payments-txn' + Cluster:IdempotentWrite. Transactional producer требует оба: Write на transactional.id для initTransactions(), и IdempotentWrite на кластере для idempotent produce (enable.idempotence=true включается автоматически при transactional.id)."
+        },
+        {
+          "id": "d",
+          "text": "Cluster:Create для авто-создания топика 'payments-enriched'"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Transactional producer требует расширенный набор ACL: (1) Topic:Write на целевой топик — ЕСТЬ. (2) Topic:Describe на целевой топик — ЕСТЬ. (3) TransactionalId:Write на 'payments-txn' — при transactional.id=payments-txn broker проверяет ACL на TransactionalId ресурс. Без этого ACL broker отклоняет initTransactions() с ClusterAuthorizationException. НЕТ. (4) Cluster:IdempotentWrite — при enable.idempotence=true (автоматически при transactional.id) broker проверяет IdempotentWrite на Cluster. НЕТ. ClusterAuthorizationException в данном контексте указывает на проблему с Cluster-level ACL (IdempotentWrite) или TransactionalId ACL. Оба отсутствуют. kafka-acls.sh --add --allow-principal User:payment-processor --operation Write --transactional-id payments-txn + --operation IdempotentWrite --cluster.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 4: Авторизация с ACL — раздел 'Transactional producer (минимальный набор ACL)'"
+    },
+    {
+      "id": "kafka-m09-exam-q5",
+      "type": "multiple-choice",
+      "question": "Многопользовательский Kafka-кластер обслуживает 20 команд. Команда 'data-team' подаёт жалобу: их аналитический consumer работает нестабильно и часто получает высокий lag. Prometheus показывает: ThrottleTimeMs для data-team = 3000ms (среднее). Другие 19 команд работают нормально. Какова причина и решение?",
+      "options": [
+        {
+          "id": "a",
+          "text": "У data-team слишком мало партиций — нужно увеличить partition count"
+        },
+        {
+          "id": "b",
+          "text": "data-team превышает consumer_byte_rate квоту. Broker throttle-ит их FetchResponse на 3 секунды после каждого запроса. Аналитический consumer читает большие объёмы — квота слишком мала. Решение: увеличить квоту для data-team: kafka-configs.sh --alter --add-config 'consumer_byte_rate=52428800' --entity-type users --entity-name data-team (50 MB/s вместо текущего лимита)."
+        },
+        {
+          "id": "c",
+          "text": "data-team использует неверный fetch.min.bytes — нужно уменьшить до 1"
+        },
+        {
+          "id": "d",
+          "text": "data-team имеет слишком много consumer instances — нужно уменьшить consumer group size"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "ThrottleTimeMs.Mean=3000ms для data-team — это прямое указание на quota throttling. Broker возвращает throttle_time_ms=3000 в FetchResponse, Kafka consumer автоматически паузирует следующий fetch на 3 секунды. При типичном fetch.max.wait.ms=500ms паузы 3000ms создают порядок magnitude замедление: consumer получает данные каждые 3+ секунд вместо 0.5 секунды. Отсюда рост lag. Другие 19 команд работают нормально — это не проблема кластера. Решение: увеличить consumer_byte_rate для data-team. Перед этим — договориться с data-team о пиковом потреблении и установить разумную квоту, которая не мешает другим. Если кластер перегружен — рассмотреть выделенный кластер для аналитики.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 5: Квоты — разделы 'Типы квот' и 'Механизм throttling'"
+    },
+    {
+      "id": "kafka-m09-exam-q6",
+      "type": "multiple-choice",
+      "question": "Security архитектор проектирует ACL модель для e-commerce платформы. 8 микросервисов: orders-svc (пишет orders.*), payments-svc (пишет payments.*), inventory-svc (читает orders.*, пишет inventory.*), notifications-svc (читает все топики для отправки уведомлений). Какая ACL стратегия масштабируема и безопасна?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Один общий principal 'ecommerce-app' с Write на все топики — проще администрировать"
+        },
+        {
+          "id": "b",
+          "text": "PREFIXED ACL per service: User:orders-svc получает Write+Describe на PREFIXED 'orders.', User:payments-svc на PREFIXED 'payments.', User:inventory-svc Read на PREFIXED 'orders.' + Write+Describe на PREFIXED 'inventory.'. User:notifications-svc Read на PREFIXED '' (все топики). Отдельный principal per service."
+        },
+        {
+          "id": "c",
+          "text": "LITERAL ACL для каждого топика: orders.created, orders.updated, payments.processed — создать ACL для каждого. При добавлении нового топика — добавить ACL."
+        },
+        {
+          "id": "d",
+          "text": "allow.everyone.if.no.acl.found=true для всех сервисов одной платформы — они все доверенные"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "PREFIXED ACL per service — масштабируемая и безопасная стратегия: (1) orders-svc: Write+Describe на PREFIXED 'orders.' — сервис может создавать любые orders.* топики без изменения ACL. (2) payments-svc: Write+Describe на PREFIXED 'payments.'. (3) inventory-svc: Read+Describe на PREFIXED 'orders.' + Write+Describe на PREFIXED 'inventory.' — чёткие boundaries. (4) notifications-svc: Read+Describe на PREFIXED '' (все) — широкий но обоснованный доступ для читателя уведомлений. Отдельный principal per service: если payments-svc скомпрометирован — отзываем только его credentials, inventory-svc и orders-svc не затронуты. Вариант A (один общий) — любая компрометация открывает всё. Вариант D (allow.everyone) отключает авторизацию.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 4: Авторизация с ACL — раздел 'ACL-стратегия для production'"
+    },
+    {
+      "id": "kafka-m09-exam-q7",
+      "type": "multiple-choice",
+      "question": "Компания переходит с SASL/SCRAM на SASL/OAUTHBEARER с Keycloak. При тестировании Kafka client получает: 'SaslAuthenticationException: Authentication failed: the token was rejected'. Broker log показывает: 'JWT validation failed: Invalid audience claim'. Что является причиной и как исправить?",
+      "options": [
+        {
+          "id": "a",
+          "text": "JWT токен истёк (expired). Kafka client не обновляет токены автоматически — нужен кастомный TokenRefresher."
+        },
+        {
+          "id": "b",
+          "text": "В JWT токене claim 'aud' (audience) не совпадает с sasl.oauthbearer.expected.audience на брокере. Keycloak выпускает токен с audience='kafka-client', но брокер ожидает 'kafka-broker'. Исправление: настроить Keycloak Audience mapper для добавления 'kafka-broker' в aud claim токена, или изменить sasl.oauthbearer.expected.audience на брокере."
+        },
+        {
+          "id": "c",
+          "text": "sasl.oauthbearer.jwks.endpoint.url неверный — брокер не может получить публичные ключи для верификации подписи"
+        },
+        {
+          "id": "d",
+          "text": "Keycloak Client не имеет scope 'kafka:write' — нужно добавить scope в client конфиг"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "'Invalid audience claim' — строго специфическая ошибка: OAuthBearerValidatorCallbackHandler проверяет claim 'aud' в JWT и сравнивает с sasl.oauthbearer.expected.audience. Несовпадение = reject. Это protection против token confusion attack: токен выпущен для одного сервиса, но предъявляется другому. Решение: (1) В Keycloak добавить Audience Mapper в Client: Mappers → Add Mapper → Audience → включить 'kafka-broker' в aud. Или (2) изменить sasl.oauthbearer.expected.audience=kafka-client на брокере, если 'kafka-client' — правильный audience. Вариант A неверен: JWT refresh автоматически реализован в OAuthBearerLoginCallbackHandler. Вариант C (неверный JWKS URL) дал бы 'JWT signature verification failed', не 'Invalid audience'.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 3: SASL-механизмы — раздел 'SASL/OAUTHBEARER'"
+    },
+    {
+      "id": "kafka-m09-exam-q8",
+      "type": "multiple-choice",
+      "question": "Kafka-кластер использует mTLS (ssl.client.auth=required) для аутентификации. Нет SASL. Команда хочет выдать разные ACL для разных клиентов. Как определяется Kafka principal при mTLS и какой формат используется в ACL командах?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Principal = IP-адрес клиента. ACL: --allow-principal Host:10.0.1.15"
+        },
+        {
+          "id": "b",
+          "text": "Principal = CN (Common Name) из клиентского сертификата, формат User:CN. Если CN='payment-service', то principal = User:payment-service. ACL: kafka-acls.sh --allow-principal User:payment-service"
+        },
+        {
+          "id": "c",
+          "text": "Principal = SHA256 fingerprint сертификата. ACL: --allow-principal Cert:fingerprint"
+        },
+        {
+          "id": "d",
+          "text": "mTLS не поддерживает ACL — нужен SASL для авторизации"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "При mTLS (ssl.client.auth=required) Kafka извлекает principal из клиентского TLS сертификата. По умолчанию используется CN (Common Name) — поле 'CN=' в Distinguished Name сертификата. Principal формат: User:<CN>. Например, сертификат с dname='CN=payment-service,O=Acme,C=RU' → principal = User:payment-service. ACL создаётся стандартно: kafka-acls.sh --add --allow-principal User:payment-service --operation Write --topic payments. Важное следствие: каждый mTLS клиент должен иметь уникальный CN в своём сертификате — это его identity в Kafka ACL. Для более гибкого маппинга (например использовать SAN вместо CN) можно реализовать кастомный KafkaPrincipalBuilder через principal.builder.class.",
+      "bloomLevel": "conceptual",
+      "studyHint": "Урок 4: Авторизация с ACL — раздел 'ACL и SASL principal mapping'"
+    },
+    {
+      "id": "kafka-m09-exam-q9",
+      "type": "multiple-choice",
+      "question": "Kafka-кластер настроен с authorizer.class.name=org.apache.kafka.metadata.authorizer.StandardAuthorizer, allow.everyone.if.no.acl.found=false. Брокер только запустился. Контроллер пытается выполнить операцию LeaderAndIsr (внутренняя репликация). Без super.users — что произойдёт?",
+      "options": [
+        {
+          "id": "a",
+          "text": "LeaderAndIsr выполнится успешно — внутренние операции не проверяются ACL"
+        },
+        {
+          "id": "b",
+          "text": "LeaderAndIsr будет отклонён ACL authorizer: broker principal не имеет ACL на Cluster:ClusterAction. Без super.users и без явного ACL для брокерских principals кластер не может нормально работать — репликация и controller операции блокируются."
+        },
+        {
+          "id": "c",
+          "text": "LeaderAndIsr выполнится, но залогируется DENIED в authorizer log"
+        },
+        {
+          "id": "d",
+          "text": "StandardAuthorizer автоматически разрешает inter-broker операции — ACL проверка пропускается для CONTROLLER listener"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "StandardAuthorizer с allow.everyone.if.no.acl.found=false применяет deny-by-default для ВСЕХ операций, включая внутренние broker-to-broker. Контроллер аутентифицируется как свой principal (через mTLS или SASL) и пытается выполнить LeaderAndIsr — это операция Cluster:ClusterAction. Без ACL и без super.users: DENIED → кластер не функционирует. Правильная конфигурация: super.users=User:kafka-controller;User:kafka-broker — эти principals bypass всех ACL проверок. В production конфигурации super.users обязателен для broker principals. Вариант D неверен: StandardAuthorizer не делает исключений для CONTROLLER listener автоматически — нужна явная конфигурация.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 4: Авторизация с ACL — раздел 'Authorizer в Kafka 4.0 (KRaft)'"
+    },
+    {
+      "id": "kafka-m09-exam-q10",
+      "type": "multiple-choice",
+      "question": "Compliance аудитор запрашивает: 'предоставьте все случаи, когда User:contractor-123 пытался читать топик payments за последние 30 дней, включая отклонённые попытки'. Как получить эту информацию?",
+      "options": [
+        {
+          "id": "a",
+          "text": "kafka-consumer-groups.sh --describe -- предоставит историю consumer group для contractor-123"
+        },
+        {
+          "id": "b",
+          "text": "grep в kafka-authorizer.log по 'contractor-123' и 'payments'. Файл содержит все authorization решения: 'Principal = User:contractor-123 is Allowed/Denied Operation = Read ... Topic:LITERAL:payments'. При ротации логов за 30 дней — агрегировать из archived файлов или SIEM если настроен."
+        },
+        {
+          "id": "c",
+          "text": "Проверить kafka.server:type=BrokerTopicMetrics,name=BytesOutPerSec,topic=payments — JMX покажет кто читал"
+        },
+        {
+          "id": "d",
+          "text": "Получить offset history из __consumer_offsets topic для contractor-123"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "kafka.authorizer.logger — единственный правильный источник для compliance аудита. Каждая authorization попытка логируется с полем Principal, Operation, Resource, host, результат (Allowed/Denied). Запрос: (1) В SIEM (Splunk/Elasticsearch): query по principal='User:contractor-123' AND resource='payments' AND time_range=last_30_days. (2) В файлах: grep 'contractor-123' /var/log/kafka/kafka-authorizer*.log | grep payments — агрегировать из rotated файлов. CRITICAL: если authorizer log не был включён за этот период — данные недоступны ретроспективно. Это обоснование почему audit log должен включаться ДО добавления пользователей в кластер. Вариант A (consumer-groups) показывает только успешное participation в group, не попытки. Вариант C (JMX metrics) агрегированные, без разбивки по пользователям.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 5: Квоты и аудит-логирование — раздел 'Аудит-логирование'"
+    },
+    {
+      "id": "kafka-m09-exam-q11",
+      "type": "multiple-choice",
+      "question": "Инженер создаёт сертификаты для Kafka: один CA, сертификаты для 3 брокеров и 10 клиентских сервисов. Broker truststore должен содержать клиентские сертификаты для mTLS (ssl.client.auth=required). Нужно ли добавлять сертификат каждого из 10 клиентов в broker truststore?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Да, каждый из 10 клиентских сертификатов должен быть импортирован в broker truststore"
+        },
+        {
+          "id": "b",
+          "text": "Нет. Достаточно добавить в broker truststore сертификат CA, которым подписаны клиентские сертификаты. Брокер проверяет chain of trust до этого CA — если клиентский сертификат подписан доверенным CA, он принимается. При добавлении нового клиента ничего менять в broker truststore не нужно."
+        },
+        {
+          "id": "c",
+          "text": "Broker truststore не нужен при mTLS — достаточно ssl.client.auth=required"
+        },
+        {
+          "id": "d",
+          "text": "Нужно добавить в broker truststore промежуточные CA, но не конечные сертификаты клиентов"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "PKI (Public Key Infrastructure) работает через цепочку доверия. Broker truststore содержит сертификаты ДОВЕРЕННЫХ CA — не конечных сертификатов. При handshake: клиент предоставляет свой сертификат → broker проверяет его подпись через CA в своём truststore → если CA в truststore подписал клиентский сертификат — проверка успешна. Преимущество: (1) Scalability — добавление нового клиента = выпустить сертификат, подписанный тем же CA. Broker truststore не меняется. (2) Revocation — отозвать сертификат клиента = добавить в CRL (Certificate Revocation List) или через OCSP. Вариант A (добавлять каждый сертификат) = ручная работа при каждом добавлении клиента + большой truststore. Вариант D частично верен: промежуточные CA тоже нужны для полной chain, но и они — CA, не конечные сертификаты.",
+      "bloomLevel": "conceptual",
+      "studyHint": "Урок 2: SSL/TLS — раздел 'Keystore и Truststore: два хранилища'"
+    },
+    {
+      "id": "kafka-m09-exam-q12",
+      "type": "multiple-choice",
+      "question": "При quota throttling в Kafka — что происходит с сообщениями, которые клиент пытается отправить во время throttle периода? Выберите точное описание механизма.",
+      "options": [
+        {
+          "id": "a",
+          "text": "Broker отбрасывает (drops) сообщения превышающие квоту — клиент получает RECORD_TOO_LARGE или QUOTA_VIOLATION error"
+        },
+        {
+          "id": "b",
+          "text": "Broker буферизует входящие сообщения в memory queue до окончания throttle периода — потенциальный OOM"
+        },
+        {
+          "id": "c",
+          "text": "Broker возвращает успешный response с throttle_time_ms в header. Kafka client читает throttle_time_ms и паузирует следующую отправку. Сообщения НЕ теряются — они задерживаются в client-side буфере. Effective throughput снижается до квоты."
+        },
+        {
+          "id": "d",
+          "text": "Broker закрывает TCP соединение при превышении квоты — клиент reconnect-ится после паузы"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Kafka quota throttling — client-side cooperative механизм: (1) Client отправляет ProduceRequest. (2) Broker ПРИНИМАЕТ запрос, ОБРАБАТЫВАЕТ и записывает данные. (3) Broker возвращает ProduceResponse с throttle_time_ms=N в header. Данные УЖЕ записаны в лог. (4) Kafka client библиотека (Kafka Producer, Consumer) встроенно парсит throttle_time_ms и добавляет задержку перед следующим запросом. (5) Следующий ProduceRequest отправляется через N миллисекунд. Данные не теряются, соединение не разрывается. Effective throughput = (batch_size / (processing_time + throttle_time)). Broker НЕ буферизует и НЕ отбрасывает — он throttle-ит через response metadata. Это важно понимать для диагностики: если ThrottleTimeMs высокий, данные в кластере, просто produce rate замедлен.",
+      "bloomLevel": "conceptual",
+      "studyHint": "Урок 5: Квоты и аудит — раздел 'Механизм throttling: как брокер замедляет клиента'"
+    },
+    {
+      "id": "kafka-m09-exam-q13",
+      "type": "multiple-choice",
+      "question": "Новый Kafka 4.0 KRaft-кластер. Безопасник проводит полный security review. Какой набор конфигурации соответствует всем security best practices для production?",
+      "options": [
+        {
+          "id": "a",
+          "text": "security.protocol=SASL_PLAINTEXT, sasl.mechanism=SCRAM-SHA-256, authorizer.class.name=StandardAuthorizer, allow.everyone.if.no.acl.found=false, super.users=User:admin"
+        },
+        {
+          "id": "b",
+          "text": "security.protocol=SASL_SSL, sasl.mechanism=SCRAM-SHA-256 (или OAUTHBEARER), ssl.enabled.protocols=TLSv1.3,TLSv1.2, ssl.endpoint.identification.algorithm=https, authorizer.class.name=org.apache.kafka.metadata.authorizer.StandardAuthorizer, allow.everyone.if.no.acl.found=false, super.users=User:admin;User:kafka-broker, kafka.authorizer.logger level=INFO"
+        },
+        {
+          "id": "c",
+          "text": "security.protocol=SSL, ssl.client.auth=required, authorizer.class.name=kafka.security.authorizer.AclAuthorizer, allow.everyone.if.no.acl.found=true"
+        },
+        {
+          "id": "d",
+          "text": "security.protocol=SASL_SSL, sasl.mechanism=PLAIN, allow.everyone.if.no.acl.found=false"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Полный production security checklist выполнен только в варианте B: (1) SASL_SSL: аутентификация + шифрование — правильно. (2) SCRAM-SHA-256 или OAUTHBEARER: безопасные mechanisms — правильно. (3) ssl.enabled.protocols=TLSv1.3,TLSv1.2: запрет устаревших TLS версий — правильно. (4) ssl.endpoint.identification.algorithm=https: hostname verification, защита MITM — правильно. (5) org.apache.kafka.metadata.authorizer.StandardAuthorizer: KRaft-нативный, правильный класс для Kafka 4.0 — правильно. (6) allow.everyone.if.no.acl.found=false: deny-by-default — правильно. (7) super.users с broker principal: кластер функционирует — правильно. (8) authorizer logger INFO: audit trail — правильно. Вариант A: SASL_PLAINTEXT критически неверен для production. Вариант C: AclAuthorizer удалён в Kafka 4.0 + allow=true. Вариант D: PLAIN механизм неподходящий для prod (без динамической ротации).",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 6: Итоги модуля — раздел 'Production Security Checklist'"
+    }
+  ]
+}
