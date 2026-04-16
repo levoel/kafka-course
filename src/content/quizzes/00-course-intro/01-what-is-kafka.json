@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "00-course-intro/01-what-is-kafka",
+  "moduleId": "00-course-intro",
+  "_meta": {
+    "idPrefix": "kafka-m00-01",
+    "description": "Use IDs: kafka-m00-01-q1, q2, q3 for MC; kafka-m00-01-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m00-01-q1",
+      "type": "multiple-choice",
+      "question": "Какая фундаментальная структура данных лежит в основе Apache Kafka?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Append-only commit log — неизменяемая последовательность записей, в которую данные добавляются только в конец"
+        },
+        {
+          "id": "b",
+          "text": "Очередь FIFO с удалением сообщения после подтверждения потребителем"
+        },
+        {
+          "id": "c",
+          "text": "Хэш-таблица, индексированная по ключам сообщений для быстрого поиска"
+        },
+        {
+          "id": "d",
+          "text": "Граф зависимостей между топиками для маршрутизации сообщений"
+        }
+      ],
+      "correctAnswer": "a",
+      "explanation": "Kafka построена на append-only commit log — той же структуре данных, что используется в WAL PostgreSQL, Raft log в распределённых системах, MySQL binlog. Данные добавляются только в конец, не изменяются и не удаляются сразу после чтения. Потребители читают log, продвигая свой offset, но не удаляют записи. Данные хранятся до истечения retention.ms или retention.bytes.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m00-01-q2",
+      "type": "multiple-choice",
+      "question": "Три consumer group (A, B, C) читают один и тот же топик. Consumer group A коммитит offset 1000. Что произойдёт с offset группы B, которая находилась на offset 500?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Offset группы B автоматически перепрыгнет на 1000 вслед за группой A"
+        },
+        {
+          "id": "b",
+          "text": "Offset группы B не изменится — каждая consumer group ведёт свой offset независимо"
+        },
+        {
+          "id": "c",
+          "text": "Группа B получит ошибку — одновременное чтение несколькими группами невозможно"
+        },
+        {
+          "id": "d",
+          "text": "Сообщения 500–1000 будут удалены, группа B пропустит их"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Каждая consumer group хранит свой offset в служебном топике __consumer_offsets. Commit offset группы A (1000) никак не влияет на offset группы B (500) или C. Группа B продолжит читать с offset 500. Это ключевое преимущество Kafka перед традиционными брокерами: несколько независимых потребителей читают одни данные в своём темпе, не мешая друг другу.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m00-01-q3",
+      "type": "multiple-choice",
+      "question": "Команда хочет построить систему аудита, где каждое событие о заказе должно быть обработано тремя независимыми сервисами (billing, analytics, notifications), а новый сервис, добавленный через 6 месяцев, должен обработать все прошлые события. Какой инструмент лучше всего подходит?",
+      "options": [
+        {
+          "id": "a",
+          "text": "RabbitMQ — для гибкой маршрутизации через exchanges и bindings к трём очередям"
+        },
+        {
+          "id": "b",
+          "text": "Apache Kafka — для replay событий новым сервисом и независимых consumer groups"
+        },
+        {
+          "id": "c",
+          "text": "ActiveMQ — для надёжной JMS-доставки с persistence"
+        },
+        {
+          "id": "d",
+          "text": "Redis Streams — для низкой latency при высокой нагрузке"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Kafka идеально подходит для этого сценария по двум причинам: (1) три сервиса читают топик независимо через разные consumer groups — не нужны три копии сообщений; (2) retention-based хранение позволяет новому сервису через 6 месяцев прочитать события с offset 0 (--from-beginning) и обработать всю историю. RabbitMQ удаляет сообщения после первого чтения, что исключает replay и независимость нескольких групп без fan-out exchange. Redis Streams не предназначен для долгосрочного хранения.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m00-01-q4",
+      "type": "true-false",
+      "question": "Kafka удаляет сообщение после того, как потребитель его прочитал.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. Kafka хранит сообщения в append-only log согласно настройкам retention.ms (по умолчанию 7 дней) или retention.bytes. Потребитель читает сообщение, продвигая свой offset, но сообщение остаётся в log. Это принципиальное отличие от традиционных message broker (RabbitMQ, ActiveMQ), которые удаляют сообщение после получения ACK от потребителя.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

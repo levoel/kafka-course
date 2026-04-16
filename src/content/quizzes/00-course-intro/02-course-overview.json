@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "00-course-intro/02-course-overview",
+  "moduleId": "00-course-intro",
+  "_meta": {
+    "idPrefix": "kafka-m00-02",
+    "description": "Use IDs: kafka-m00-02-q1, q2, q3 for MC; kafka-m00-02-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m00-02-q1",
+      "type": "multiple-choice",
+      "question": "Сколько модулей содержит курс Apache Kafka Deep-Dive?",
+      "options": [
+        {
+          "id": "a",
+          "text": "10 модулей"
+        },
+        {
+          "id": "b",
+          "text": "12 модулей"
+        },
+        {
+          "id": "c",
+          "text": "14 модулей"
+        },
+        {
+          "id": "d",
+          "text": "18 модулей"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Курс состоит из 14 модулей: Модуль 00 (Введение, бесплатный) и Модули 01–13 (платная часть). Модули охватывают весь стек от базовой архитектуры (01) до production operations (10), multi-DC репликации (11), design patterns (12) и заканчиваются Capstone Project (13).",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m00-02-q2",
+      "type": "multiple-choice",
+      "question": "Студент хочет выполнить code challenge по Kafka Producer в браузере. Какая технология обеспечивает выполнение Python-кода без установки Python на компьютер?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Node.js с kafka-node библиотекой на сервере"
+        },
+        {
+          "id": "b",
+          "text": "Java аплет с реальным KafkaProducer"
+        },
+        {
+          "id": "c",
+          "text": "Pyodide — Python-рантайм, скомпилированный в WebAssembly, с kafka_sim.py"
+        },
+        {
+          "id": "d",
+          "text": "Docker-контейнер с Python, запущенный на серверах платформы"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Browser code challenges используют Pyodide (версия 0.29.3) — Python-рантайм, скомпилированный в WebAssembly. Код выполняется полностью локально в браузере через Web Worker. Kafka API эмулируется библиотекой kafka_sim.py, которая автоматически подгружается перед выполнением кода студента. Это обеспечивает zero-latency выполнение без серверного roundtrip.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m00-02-q3",
+      "type": "multiple-choice",
+      "question": "В каком модуле курса подробно рассматривается KRaft-архитектура Kafka 4.0 — Raft-консенсус, metadata log и leader election?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Модуль 00 (Введение в курс)"
+        },
+        {
+          "id": "b",
+          "text": "Модуль 01 (Архитектура Kafka)"
+        },
+        {
+          "id": "c",
+          "text": "Модуль 04 (Внутреннее устройство)"
+        },
+        {
+          "id": "d",
+          "text": "Модуль 10 (Production Operations)"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Модуль 01 (Архитектура Kafka) посвящён фундаментальным концепциям: KRaft-контроллер (Raft quorum, metadata log, epoch fencing, leader election), брокеры, топики, партиции, репликация и ISR. KRaft является центральной темой модуля, потому что без понимания механизма координации метаданных невозможно правильно конфигурировать и эксплуатировать Kafka 4.0 кластер.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m00-02-q4",
+      "type": "true-false",
+      "question": "Code challenges курса требуют установки Java на компьютер студента.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. Code challenges выполняются в браузере через Pyodide (Python в WebAssembly). Java не требуется ни для browser challenges (Python + kafka_sim.py), ни для просмотра уроков. Java внутри Docker-контейнеров нужна только если студент запускает Docker-лабораторию — но даже в этом случае Java уже включена в образ apache/kafka:4.0.0.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

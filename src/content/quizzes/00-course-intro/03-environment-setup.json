@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "00-course-intro/03-environment-setup",
+  "moduleId": "00-course-intro",
+  "_meta": {
+    "idPrefix": "kafka-m00-03",
+    "description": "Use IDs: kafka-m00-03-q1, q2, q3 for MC; kafka-m00-03-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m00-03-q1",
+      "type": "multiple-choice",
+      "question": "Какая переменная окружения в docker-compose.yml переключает Kafka 4.0 в режим KRaft и определяет роль узла?",
+      "options": [
+        {
+          "id": "a",
+          "text": "KAFKA_NODE_ID — задаёт уникальный идентификатор брокера"
+        },
+        {
+          "id": "b",
+          "text": "KAFKA_PROCESS_ROLES — определяет роли узла: broker, controller или broker,controller"
+        },
+        {
+          "id": "c",
+          "text": "KAFKA_CONTROLLER_QUORUM_VOTERS — перечисляет участников Raft quorum"
+        },
+        {
+          "id": "d",
+          "text": "KAFKA_LISTENERS — задаёт адреса для входящих соединений"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "KAFKA_PROCESS_ROLES — это ключевая настройка KRaft-режима. Значение 'broker' означает только брокер (хранит данные), 'controller' — только контроллер (участвует в Raft quorum), 'broker,controller' — combined mode (один узел выполняет обе роли). Именно наличие этой переменной сигнализирует Kafka 4.0, что нужно использовать KRaft вместо ZooKeeper. KAFKA_NODE_ID задаёт идентификатор, KAFKA_CONTROLLER_QUORUM_VOTERS перечисляет участников quorum — они нужны, но не являются главным переключателем режима.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m00-03-q2",
+      "type": "multiple-choice",
+      "question": "Студент запускает команду: kafka-topics.sh --zookeeper localhost:2181 --list. Kafka 4.0 возвращает ошибку. Почему?",
+      "options": [
+        {
+          "id": "a",
+          "text": "ZooKeeper запущен на неправильном порту — надо использовать localhost:2182"
+        },
+        {
+          "id": "b",
+          "text": "Флаг --zookeeper удалён в Kafka 4.0; правильный флаг — --bootstrap-server localhost:9092"
+        },
+        {
+          "id": "c",
+          "text": "ZooKeeper не запущен — нужно добавить контейнер ZooKeeper в docker-compose.yml"
+        },
+        {
+          "id": "d",
+          "text": "kafka-topics.sh переименован в kafka-topics-kraft.sh в Kafka 4.0"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Флаг --zookeeper был удалён из всех CLI-инструментов Kafka в версии 4.0 вместе с полным удалением ZooKeeper из Kafka. В Kafka 4.0 все CLI-инструменты (kafka-topics.sh, kafka-configs.sh, kafka-acls.sh и другие) используют --bootstrap-server для подключения к брокеру напрямую. Правильная команда: kafka-topics.sh --bootstrap-server localhost:9092 --list. ZooKeeper не только не запущен — он не нужен в принципе.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m00-03-q3",
+      "type": "multiple-choice",
+      "question": "Что означает значение KAFKA_PROCESS_ROLES=broker,controller в docker-compose.yml?",
+      "options": [
+        {
+          "id": "a",
+          "text": "На одной машине запущены два отдельных процесса: один брокер и один контроллер"
+        },
+        {
+          "id": "b",
+          "text": "Один узел одновременно хранит данные (роль broker) и участвует в Raft quorum для управления метаданными (роль controller)"
+        },
+        {
+          "id": "c",
+          "text": "Узел работает как брокер в рабочее время и переключается в режим контроллера в нерабочее время"
+        },
+        {
+          "id": "d",
+          "text": "Broker и controller — синонимы; дублирование слова означает режим высокой доступности"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "KAFKA_PROCESS_ROLES=broker,controller означает 'combined mode' — один JVM-процесс выполняет обе роли одновременно. В роли broker он хранит данные топиков, обслуживает producers и consumers через порт 9092. В роли controller он участвует в Raft quorum вместе с другими контроллерами через CONTROLLER listener (порт 9093) и управляет метаданными кластера. Combined mode удобен для разработки и небольших кластеров. В production часто выделяют dedicated controller-узлы (только controller) и отдельные broker-узлы (только broker).",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m00-03-q4",
+      "type": "true-false",
+      "question": "Для запуска Kafka 4.0 в Docker необходим отдельный контейнер ZooKeeper в docker-compose.yml.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. Kafka 4.0 полностью удалила ZooKeeper. Официальный образ apache/kafka:4.0.0 использует KRaft-протокол (Kafka Raft) — реализацию Raft-консенсуса, встроенную в брокеры. Для запуска достаточно одного контейнера kafka с переменными KAFKA_PROCESS_ROLES=broker,controller, KAFKA_CONTROLLER_QUORUM_VOTERS и KAFKA_NODE_ID. Добавление ZooKeeper-контейнера не только не нужно, но Kafka 4.0 его и не поддерживает — свойство zookeeper.connect не существует в конфигурации Kafka 4.0.",
+      "bloomLevel": "applied"
+    }
+  ]
+}
