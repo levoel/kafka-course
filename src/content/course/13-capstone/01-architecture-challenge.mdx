@@ -1,0 +1,436 @@
+---
+title: "Архитектурный challenge: E-commerce Streaming"
+description: "Проектирование полной стриминговой архитектуры для системы выполнения заказов интернет-магазина. Упражнение на создание архитектурного документа без запуска кластера."
+order: 1
+difficulty: "advanced"
+estimatedTime: 45
+topics: ["Architecture Design", "System Design", "Capstone"]
+free: false
+---
+
+# Архитектурный challenge: E-commerce Streaming
+
+Это упражнение на проектирование архитектурного документа. Вам **не нужен** запущенный кластер Kafka. Ваш результат — архитектурный документ, описывающий решение.
+
+<Callout type="note">
+Данный challenge является упражнением на бумажном носителе. Никакого Docker, никакого запуска кода — только архитектурные решения и их обоснование. Ваш deliverable: структурированный документ с обоснованием каждого выбора. Такой документ является portfolio-артефактом, демонстрирующим производственную компетентность.
+</Callout>
+
+---
+
+## Контекст задачи
+
+Вы — ведущий data-инженер крупного интернет-магазина. Компания переходит с монолитной архитектуры на микросервисы и требует построить стриминговую платформу, которая станет основой всей операционной деятельности.
+
+<DiagramContainer title="Обзор системы: E-commerce Streaming Platform" color="blue">
+  <div className="space-y-4 p-2">
+    <div className="text-sm text-slate-400 text-center mb-4">Сервисы, данные которых вы должны интегрировать</div>
+    <FlowRow>
+      <FlowNode
+        variant="source"
+        tooltip="Order Service: публикует события жизненного цикла заказа. Источник всех downstream событий. Требует exactly-once для платёжной цепочки."
+      >
+        Order Service
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="process"
+        tooltip="Apache Kafka: центральная шина событий. Все сервисы общаются только через Kafka — никаких прямых HTTP-вызовов между сервисами в операционном контуре."
+      >
+        Kafka
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="sink"
+        tooltip="Payment Service: обрабатывает платежи асинхронно. Idempotent consumer обязателен — дублирование платежа недопустимо."
+      >
+        Payment Service
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="process"
+        tooltip="Inventory Service: резервирует и освобождает складские остатки по событиям платежей."
+      >
+        Inventory Service
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="process"
+        tooltip="Kafka Streams App: обогащает заказы данными клиентов для аналитики и отчётности."
+      >
+        Streams App
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="sink"
+        tooltip="Analytics: real-time дашборды (заказы в минуту, выручка, топ-продукты). Читает из обогащённого топика."
+      >
+        Analytics
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="process"
+        tooltip="Notification Service: email и SMS уведомления. Читает события заказов и инвентаря для отправки подтверждений."
+      >
+        Notification Service
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="sink"
+        tooltip="Kafka Connect JDBC Sink: реплицирует обогащённые данные в PostgreSQL для ежедневных финансовых отчётов."
+      >
+        PostgreSQL (Finance)
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="sink"
+        tooltip="Kafka Connect Elasticsearch Sink: обновляет поисковый индекс продуктов в Elasticsearch для команды поиска."
+      >
+        Elasticsearch (Search)
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+---
+
+## Функциональные требования
+
+Ваша архитектура должна обеспечить следующие сценарии:
+
+1. **Order Service** публикует события заказа: `created`, `updated`, `confirmed`, `cancelled`
+2. **Payment Service** обрабатывает платежи асинхронно по событию создания заказа
+3. **Inventory Service** резервирует и освобождает складские остатки после подтверждения платежа
+4. **Notification Service** отправляет email/SMS подтверждения клиентам
+5. **Аналитическая команда** требует real-time дашборды: заказы в минуту, выручка, топ-продукты
+6. **Команда поиска** требует near-real-time обновления каталога продуктов в Elasticsearch
+7. **Финансовая команда** требует ежедневные отчёты сверки из PostgreSQL
+
+## Нефункциональные требования
+
+Это ограничения, которые определяют технические решения:
+
+| Требование | Значение | Затронутый модуль курса |
+|------------|----------|------------------------|
+| Exactly-once для платежей | Никаких двойных списаний | Модуль 02 (Producers), Модуль 04 (Internals) |
+| RPO менее 30 секунд | Потеря данных не более 30 сек | Модуль 11 (Multi-DC) |
+| RTO менее 10 минут | Восстановление за 10 мин | Модуль 11 (Multi-DC) |
+| Пиковая пропускная способность | 10 000 заказов в секунду | Модуль 02, Модуль 10 (Ops) |
+| Avro-схемы с обратной совместимостью | Все топики | Модуль 06 (Schema Registry) |
+| Audit trail | Все изменения состояния восстановимы | Модуль 04, Модуль 12 (Patterns) |
+| SASL/SCRAM + ACL per service | Каждый сервис — отдельный principal | Модуль 09 (Security) |
+
+---
+
+## Структура архитектурного документа
+
+Ваш документ должен содержать шесть разделов. Ниже — детальные инструкции по каждому.
+
+---
+
+### Раздел 1: Каталог топиков
+
+**Что включить:**
+
+Для каждого топика укажите:
+- Полное имя топика (следуя соглашению `{domain}.{entity}.{event-type}` из Модуля 12)
+- Количество партиций с обоснованием (от пропускной способности или числа consumers)
+- Политику retention и cleanup
+- Avro-схему (минимальные поля: id, timestamp, key)
+- Владелец (consumer group или сервис)
+
+**Подсказки для расчёта партиций:**
+
+При 10 000 заказов/сек и допущении 1 000 сообщений/сек на партицию (при 1 KB сообщениях и Kafka max throughput ~10 MB/s per partition):
+
+```
+Минимальное число партиций = ceil(пиковый_throughput / throughput_per_partition)
+= ceil(10 000 / 1 000) = 10
+Округляем до кратного числу брокеров: 12 партиций
+```
+
+**Какие топики создать** (минимальный список):
+- `orders.order.created` — события создания заказов
+- `orders.order.confirmed` — подтверждённые заказы
+- `orders.order.cancelled` — отменённые заказы
+- `payments.payment.charged` — успешные списания
+- `payments.payment.refunded` — возвраты
+- `inventory.item.reserved` — резервирование товара
+- `orders.order.enriched` — обогащённые заказы (output Kafka Streams)
+- `saga.order-fulfillment.state` — состояние саги выполнения заказа
+
+<Callout type="tip">
+Схема топика `orders.order.enriched` должна включать поля из `orders.order.created` плюс данные клиента из `customers.customer.profile`. Этот топик — output Kafka Streams topology (join orders с customers KTable). Используйте `log.cleanup.policy=compact` — нам нужно последнее обогащённое состояние по каждому orderId, а не вся история.
+</Callout>
+
+**Ссылки на курс:** Модуль 06 (Schema Registry, Subject naming strategy), Модуль 12 (Topic Governance, naming conventions)
+
+---
+
+### Раздел 2: Архитектура сервисов
+
+**Что включить:**
+
+Для каждого из 5 микросервисов:
+- Какие топики читает (с именем consumer group)
+- Какие топики пишет
+- Стратегия идемпотентности (dedup по ключу, `enable.idempotence=true`, или transactional producer)
+- Какой паттерн из Модуля 12 применяется: Event Sourcing, CQRS, Outbox, или Saga?
+
+**Ключевые решения:**
+
+**Order Service:** Использует ли event sourcing для агрегата заказа? Как гарантирует надёжную публикацию в Kafka при сбое (transactional outbox)?
+
+**Payment Service:** Как достигается exactly-once? Idempotent consumer + dedup по `orderId`? Или Kafka транзакции с `transactional.id`? Обоснуйте выбор.
+
+**Saga:** При 4+ сервисах в цепочке выполнения заказа — хореография или оркестрация? Запишите своё решение и аргументы. Какие компенсирующие транзакции нужны при сбое на шаге 3 (резервирование инвентаря)?
+
+**Ссылки на курс:** Модуль 02-03 (Producers/Consumers, API), Модуль 12 (Design Patterns: Event Sourcing, Outbox, Saga)
+
+---
+
+### Раздел 3: Стриминговый конвейер
+
+**Что включить:**
+
+**Kafka Streams topology:**
+- Исходный топик(и)
+- KTable (какие данные, ключ)
+- JOIN или агрегация
+- Выходной топик
+- Используйте псевдокод topology (не обязателен компилируемый код)
+
+**Kafka Connect pipeline:**
+- JDBC Sink: из какого топика, в какую таблицу PostgreSQL, batch size, poll interval
+- Elasticsearch Sink: из какого топика, в какой индекс, как формируется document id
+
+**Ссылки на курс:** Модуль 05 (Kafka Connect, JDBC/Elasticsearch Sinks), Модуль 07 (Kafka Streams DSL, KTable JOIN)
+
+---
+
+### Раздел 4: Дизайн безопасности
+
+**Что включить:**
+
+**SASL/SCRAM-SHA-256:** Каждый сервис имеет уникальные credentials. Перечислите principals.
+
+**ACL матрица** (минимум):
+
+| Principal | Операция | Resource | Pattern |
+|-----------|----------|----------|---------|
+| order-service | Write, Describe | orders.* | PREFIXED |
+| payment-service | Read, Describe | orders.order.created | LITERAL |
+| payment-service | Write, Describe | payments.* | PREFIXED |
+| inventory-service | Read, Describe | payments.payment.charged | LITERAL |
+| inventory-service | Write, Describe | inventory.* | PREFIXED |
+| analytics-connector | Read, Describe | orders.order.enriched | LITERAL |
+| search-connector | Read, Describe | products.* | PREFIXED |
+
+**Ссылки на курс:** Модуль 09 (Security: SASL/SCRAM, ACL, StandardAuthorizer)
+
+---
+
+### Раздел 5: Multi-DC и Disaster Recovery
+
+**Что включить:**
+
+**MirrorMaker 2 topology:**
+- Выбор: active-passive или active-active? Для данного сценария e-commerce (один основной DC, один DR) рекомендуется active-passive.
+- Какие топики реплицировать?
+- `DefaultReplicationPolicy` или `IdentityReplicationPolicy`? Обоснуйте.
+- `sync.group.offsets.enabled` и его значение для автоматического failover.
+
+**RPO/RTO анализ:**
+
+Запишите конкретные цифры:
+- RPO = задержка репликации MM2 (типично 2–5 секунд при правильной конфигурации, значительно меньше 30-секундного требования)
+- RTO = сумма компонентов: обнаружение сбоя + failover DNS + перевод offset + перезапуск сервисов
+
+**Runbook failover** (нумерованные шаги):
+1. Мониторинг фиксирует недоступность DC-1
+2. Остановка producers, направленных на DC-1
+3. Ожидание дренирования MM2 лага (или принятие текущего RPO)
+4. Проверка офсетов на DC-2 (автоматически через `sync.group.offsets.enabled=true`)
+5. Обновление DNS / load balancer на DC-2
+6. Запуск consumers на DC-2 (читают `dc1.{topic}` при DefaultReplicationPolicy)
+7. Проверка метрик: UnderReplicatedPartitions = 0, consumer lag стабилен
+
+**Ссылки на курс:** Модуль 11 (Multi-DC, MirrorMaker 2, Active-Passive topology, Offset Translation)
+
+---
+
+### Раздел 6: Мониторинг и ёмкость
+
+**Что включить:**
+
+**Ключевые JMX метрики (минимальный набор):**
+
+| Компонент | Метрика | Алерт-порог |
+|-----------|---------|-------------|
+| Брокер | `UnderReplicatedPartitions` | больше 0 на 5 мин |
+| Брокер | `RequestHandlerAvgIdlePercent` | менее 0.30 |
+| Producer | `record-error-rate` | больше 0 |
+| Consumer | `records-lag-max` | более 5 000 |
+| MM2 | `replication-latency-ms-avg` | более 10 000 мс |
+| Kafka Streams | `process-latency-avg-ms` | более 1 000 мс |
+
+**Ёмкостный план:**
+
+Запишите расчёты для пиковой нагрузки 10 000 заказов/сек:
+
+```
+Средний размер события: 500 байт
+Суточный объём: 10 000 × 500 × 86 400 = ~432 ГБ/день
+С RF=3: 432 × 3 = ~1,3 ТБ/день на диске (суммарно по всем брокерам)
+Retention 30 дней: 1,3 × 30 = ~39 ТБ суммарно
+
+Минимум: 3 брокера, рекомендую 6 для запаса
+На брокер: 39 / 6 = ~6,5 ТБ диска + 30% headroom = ~8 ТБ SSD
+RAM на брокер: 6 ГБ JVM heap + 24 ГБ page cache = 32 ГБ
+```
+
+**Ссылки на курс:** Модуль 10 (Production Ops: JMX, Prometheus, Capacity Planning)
+
+---
+
+## Критерии оценки
+
+<DiagramContainer title="Критерии оценки архитектурного документа" color="slate">
+  <div className="space-y-3 p-2">
+    <FlowColumn>
+      <DataBox
+        label="1. Полнота"
+        tooltip="Все 6 разделов заполнены. Каждый топик имеет обоснование partition count. ACL матрица покрывает все сервисы. RPO/RTO рассчитаны с числами."
+      >
+        Все 6 разделов. Топики с обоснованием. ACL для всех сервисов. RPO/RTO с цифрами.
+      </DataBox>
+      <DataBox
+        label="2. Обоснованность решений"
+        tooltip="Каждое ключевое решение сопровождается аргументацией: почему orchestration вместо choreography, почему active-passive вместо active-active, почему DefaultReplicationPolicy."
+      >
+        Каждое решение обоснованно. Альтернативы рассмотрены.
+      </DataBox>
+      <DataBox
+        label="3. Применение концепций курса"
+        tooltip="Правильно применены паттерны из Модулей 11-12: MM2 конфигурация корректна, outbox pattern использует транзакцию БД, saga с компенсирующими транзакциями."
+      >
+        Корректное применение MM2, Outbox, Saga, Security, Streams.
+      </DataBox>
+      <DataBox
+        label="4. Реалистичность"
+        tooltip="Цифры соответствуют реальным характеристикам Kafka: 1 MB/s per partition consumer throughput — разумное допущение. Latency числа (RPO 2-5s) совпадают с задокументированными характеристиками MM2."
+      >
+        Числа и пороги соответствуют реальным производственным значениям.
+      </DataBox>
+    </FlowColumn>
+  </div>
+</DiagramContainer>
+
+<Callout type="tip">
+Не стремитесь охватить всё идеально. Сосредоточьтесь на принимаемых решениях и их ОБОСНОВАНИИ. Хорошо обоснованный простой дизайн лучше необоснованного сложного. Один well-justified architectural decision с анализом trade-offs весит больше, чем три решения без объяснений.
+</Callout>
+
+---
+
+## Шаблон документа
+
+Используйте следующий шаблон для своего архитектурного документа:
+
+```
+# Архитектура E-commerce Streaming Platform
+
+## Дата: [дата]
+## Автор: [имя]
+## Версия: 1.0
+
+---
+
+## Раздел 1: Каталог топиков
+
+| Топик | Партиции | Retention | Cleanup | Схема | Владелец |
+|-------|----------|-----------|---------|-------|----------|
+| orders.order.created | 12 | 30d | delete | OrderCreated.avsc | order-service |
+| ... | | | | | |
+
+Обоснование partition count:
+...
+
+---
+
+## Раздел 2: Архитектура сервисов
+
+### Order Service
+- Пишет в: ...
+- Паттерн: Transactional Outbox (потому что...)
+- Consumer group: не применимо (только producer)
+
+### Payment Service
+- Читает: ...
+- Пишет в: ...
+- Exactly-once стратегия: ... (потому что...)
+
+### Saga: хореография или оркестрация?
+Решение: ...
+Обоснование: ...
+
+---
+
+## Раздел 3: Стриминговый конвейер
+
+Kafka Streams topology:
+...
+
+---
+
+## Раздел 4: ACL матрица
+
+| Principal | Topic | Operations |
+|-----------|-------|------------|
+| order-service | orders.* (PREFIXED) | Write, Describe |
+...
+
+---
+
+## Раздел 5: Multi-DC
+
+Topology: Active-Passive MM2
+RPO: ... секунд (потому что...)
+RTO: ... минут (breakdown: ...)
+
+Failover runbook:
+1. ...
+2. ...
+
+---
+
+## Раздел 6: Мониторинг и ёмкость
+
+Ключевые алерты:
+...
+
+Ёмкость (расчёт):
+...
+```
+
+---
+
+## Связь с модулями курса
+
+Задание интегрирует знания из всех предыдущих модулей:
+
+| Модуль | Применение в задании |
+|--------|---------------------|
+| Модуль 01: Архитектура | Понимание репликации, ISR, лидерства партиций |
+| Модуль 02: Producers | `acks`, `transactional.id`, `enable.idempotence` |
+| Модуль 03: Consumers | Consumer groups, `auto.offset.reset`, lag |
+| Модуль 04: Internals | `log.cleanup.policy`, log compaction, retention |
+| Модуль 05: Connect | JDBC Sink, Elasticsearch Sink, Debezium Outbox |
+| Модуль 06: Schema Registry | Avro, BACKWARD compatibility, TopicNameStrategy |
+| Модуль 07: Kafka Streams | KTable JOIN, Streams topology |
+| Модуль 08: ksqlDB | Real-time аналитические запросы (если используется) |
+| Модуль 09: Security | SASL/SCRAM, ACL, StandardAuthorizer |
+| Модуль 10: Production Ops | JMX метрики, алерты, capacity planning |
+| Модуль 11: Multi-DC | MM2, active-passive, offset translation |
+| Модуль 12: Design Patterns | Event Sourcing, CQRS, Outbox, Saga |

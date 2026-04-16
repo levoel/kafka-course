@@ -1,0 +1,207 @@
+---
+title: "Итоги курса Apache Kafka Deep-Dive"
+description: "Заключение курса: ключевые выводы из всех 13 модулей, что изучить дальше, и куда двигаться после освоения production Kafka."
+order: 3
+difficulty: "intermediate"
+estimatedTime: 15
+topics: ["Course Summary", "Learning Path", "Next Steps"]
+free: false
+---
+
+# Итоги курса Apache Kafka Deep-Dive
+
+Вы прошли весь курс Apache Kafka Deep-Dive. Это финальный модуль, который подводит итоги тринадцати модулей и указывает направление дальнейшего развития.
+
+---
+
+## Путь, который вы прошли
+
+<DiagramContainer title="Структура курса: от основ к производственным системам" color="blue">
+  <div className="space-y-4 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">Прогрессия знаний: каждый модуль строится на предыдущих</div>
+    <FlowRow>
+      <FlowNode
+        variant="source"
+        tooltip="Модули 01-04: Фундамент. KRaft архитектура, API producers и consumers, внутреннее устройство: log segments, compaction, индексы. Без этого фундамента невозможно понять производительность и надёжность."
+      >
+        Модули 01-04: Ядро
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="process"
+        tooltip="Модули 05-06: Интеграционный слой. Kafka Connect для подключения внешних систем без кода (сотни готовых connectors). Schema Registry для управления эволюцией схем с контрактами совместимости."
+      >
+        Модули 05-06: Интеграция
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="process"
+        tooltip="Модули 07-08: Обработка потоков. Kafka Streams DSL: stateful операции, KTable, windowing, joins — прямо внутри JVM без внешней системы. ksqlDB: SQL поверх Kafka для команд без Java-кода."
+      >
+        Модули 07-08: Стриминг
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="process"
+        tooltip="Модули 09-10: Production-ready. Безопасность: SASL, TLS, ACL, квоты. Production ops: JMX метрики, мониторинг, capacity planning, partition reassignment. Разрыв между 'знаю API' и 'умею эксплуатировать'."
+      >
+        Модули 09-10: Production
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="process"
+        tooltip="Модули 11-12: Масштабирование. Multi-DC с MirrorMaker 2: RPO/RTO планирование, offset translation, active-passive топологии. Design patterns: Event Sourcing, CQRS, Outbox, Saga — архитектурные подходы для сложных систем."
+      >
+        Модули 11-12: Масштаб
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="sink"
+        tooltip="Модуль 13: Синтез. E-commerce capstone challenge: применение знаний всех 12 модулей в одной архитектурной задаче. Portfolio-артефакт, демонстрирующий production компетентность."
+      >
+        Модуль 13: Синтез
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+---
+
+## Ключевые выводы курса
+
+### Модули 01-04: Архитектура и ядро
+
+| Концепция | Практическое применение |
+|-----------|------------------------|
+| KRaft (без ZooKeeper) | Kafka 4.0 полностью на KRaft. Контроллер встроен в брокер. Развёртывание проще. |
+| Partition leadership, ISR | UnderReplicatedPartitions > 0 = потенциальная проблема. Первый алерт в production. |
+| `acks=all` + ISR | Гарантия durability: каждая запись подтверждена всеми ISR-репликами. |
+| Log segments, compaction | `log.cleanup.policy=compact` для changelog топиков. `delete` для event streams. |
+| Producer idempotence | `enable.idempotence=true` — exactly-once within single partition, бесплатно. |
+| Consumer group rebalancing | Cooperative Sticky Assignor — минимальный rebalancing при масштабировании. |
+
+### Модули 05-06: Connect и Schema Registry
+
+| Концепция | Практическое применение |
+|-----------|------------------------|
+| Kafka Connect | Сотни готовых connectors. JDBC Source/Sink, Elasticsearch, S3. Не пишите producer/consumer когда есть connector. |
+| Debezium CDC | Capture Database Events через WAL. Основа transactional outbox pattern. |
+| Avro + Schema Registry | Контракт между producer и consumer. Эволюция схем без breaking changes: BACKWARD compatibility. |
+| TopicNameStrategy | `{topic}-value` — один schema subject per topic. Стандарт для большинства случаев. |
+
+### Модули 07-08: Stream Processing
+
+| Концепция | Практическое применение |
+|-----------|------------------------|
+| KTable vs KStream | KStream: события (append). KTable: снепшоты (upsert по ключу). |
+| Stream-Table JOIN | Обогащение событий справочными данными без синхронных HTTP вызовов. |
+| Windowed aggregations | Tumbling: неперекрывающиеся окна. Hopping: перекрывающиеся. Session: по активности. |
+| ksqlDB | SQL для аналитики и простых трансформаций. Kafka Streams для сложной логики с тестами. |
+
+### Модули 09-10: Security и Production Ops
+
+| Концепция | Практическое применение |
+|-----------|------------------------|
+| SASL/SCRAM-SHA-256 | Динамические credentials без restart. Каждый сервис — отдельный principal. |
+| StandardAuthorizer | Kafka 4.0 KRaft authorizer. `allow.everyone.if.no.acl.found=false` в production. |
+| JMX + Prometheus | Три критических метрики: UnderReplicatedPartitions, RequestHandlerAvgIdlePercent, consumer lag. |
+| JVM heap = 6 ГБ | Никогда не увеличивать. Больше heap = GC паузы = latency spikes. |
+| Partition reassignment | Всегда с `--throttle`. После завершения — удалить throttle + preferred leader election. |
+
+### Модули 11-12: Multi-DC и Паттерны
+
+| Концепция | Практическое применение |
+|-----------|------------------------|
+| MirrorMaker 2 | Три connector'а: MirrorSource (данные), MirrorCheckpoint (offsets), MirrorHeartbeat (мониторинг). |
+| Active-passive | DR для одного основного DC. RPO = MM2 lag (~2-5 сек). RTO = ~7-10 мин. |
+| `sync.group.offsets.enabled=true` | Автоматический перенос consumer group offsets на DR кластер. Нет ручного offset translation. |
+| Transactional Outbox | Atomicity между БД и Kafka без distributed transactions. Debezium CDC = production-ready реализация. |
+| Saga Orchestration | При 4+ сервисах: оркестрация даёт централизованную логику компенсации и наблюдаемость. |
+
+---
+
+## Что изучить дальше
+
+Курс Apache Kafka Deep-Dive дал вам знания для проектирования, развёртывания и эксплуатации production Kafka систем. Следующие шаги зависят от направления специализации:
+
+<DiagramContainer title="Дальнейшие пути развития после Kafka Deep-Dive" color="slate">
+  <div className="space-y-4 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="source"
+        tooltip="Apache Flink: продвинутая потоковая обработка. Stateful streaming с гарантиями exactly-once через checkpointing. DataStream API для сложных topologies, Table API/SQL для аналитики. Flink превосходит Kafka Streams при cross-partition операциях и сложных joins."
+      >
+        Apache Flink
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="process"
+        tooltip="Strimzi (Kubernetes Operator): автоматизация Kafka на Kubernetes. KafkaNodePool, KafkaMirrorMaker2, KafkaConnect как Kubernetes Custom Resources. Rolling upgrades, auto-scaling, cert-manager интеграция."
+      >
+        Strimzi / Kubernetes
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="sink"
+        tooltip="Confluent Cloud: managed Kafka + Schema Registry + ksqlDB + Flink. Elastically scalable. Для команд, которые хотят platform без операционной нагрузки. CCDAK сертификация для карьерного роста."
+      >
+        Confluent Cloud / CCDAK
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="process"
+        tooltip="Debezium Deep-Dive (отдельный курс): CDC для PostgreSQL, MySQL, MongoDB. EventRouter SMT, Outbox pattern в деталях, schema evolution с Avro. Продолжение темы из Модуля 05."
+      >
+        Debezium Deep-Dive
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="process"
+        tooltip="OpenTelemetry + Distributed Tracing: наблюдаемость для event-driven систем. Jaeger/Tempo для трассировки через Kafka. W3C TraceContext headers в Kafka records для сквозной трассировки saga."
+      >
+        OpenTelemetry + Tracing
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="process"
+        tooltip="Apache Iceberg / Delta Lake: streaming ingestion через Kafka Connect в Data Lakehouse. ACID transactions поверх object storage. Следующий уровень после JDBC Sink."
+      >
+        Data Lakehouse (Iceberg)
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+**Краткие рекомендации по направлениям:**
+
+- **Если вы Data Engineer:** изучайте Apache Flink и Data Lakehouse (Iceberg + Kafka). Это текущий stack для streaming analytics.
+- **Если вы Platform/SRE Engineer:** Strimzi + Kubernetes операции, Kafka на Kubernetes в production.
+- **Если вы Software Engineer:** Debezium Deep-Dive + OpenTelemetry для event-driven microservices. Сертификация CCDAK.
+- **Если вы Architect:** все направления, плюс изучите Kafka vs Pulsar trade-offs для следующего поколения систем.
+
+---
+
+<KnowledgeCheck
+  question="Итоговый вопрос курса: Вы проектируете новую feature — real-time рейтинг продавцов для маркетплейса. Данные: 50 000 транзакций/мин, средний чек 1500 руб. Требования: (1) рейтинг обновляется в течение 60 секунд после транзакции, (2) финансовый аудит за последние 90 дней, (3) отказоустойчивость: RPO менее 60 сек, (4) команда поиска читает рейтинги из Elasticsearch. Опишите полную архитектуру: топики, Kafka Streams topology, Connect pipeline, Multi-DC конфигурацию и ключевые security решения."
+  answer="Топики: (1) transactions.payment.completed — 12 партиций (50K/60 / ~800 msg/s per partition = 7, округляем до 12), retention 90 дней (аудит), delete policy, ключ=sellerId. (2) sellers.seller.rating — 6 партиций, compact policy (только текущий рейтинг per seller), ключ=sellerId. Streams topology: KStream(transactions.payment.completed) GROUPBY sellerId → WindowedKTable (tumbling window 60s, sum(amount), count) → mapValues(compute_rating) → KStream → to(sellers.seller.rating). Windowing: tumbling 60s окно с grace period 5s для late arrivals. Connect: Elasticsearch Sink читает sellers.seller.rating, document id = sellerId, upsert mode. Index: sellers-rating-v1 с маппингом sellerId (keyword), rating (float), updatedAt (date). Multi-DC: active-passive MM2, dc1->dc2 репликация transactions.* и sellers.*, sync.group.offsets.enabled=true. RPO: MM2 lag 2-5s + checkpoint 10s = ~15s (лучше 60s требования). Security: SASL/SCRAM per service: streams-app (Read transactions, Write sellers.seller.rating), search-connector (Read sellers.seller.rating). StandardAuthorizer, allow.everyone.if.no.acl.found=false. Мониторинг: consumer lag для streams-app (алерт > 10000), Streams processing-latency-avg-ms (алерт > 30000ms — превышение 60s SLA предупреждение)."
+/>
+
+---
+
+## Завершение курса
+
+Завершив этот курс, вы теперь обладаете знаниями для:
+
+- Проектирования production Kafka архитектур с обоснованием каждого решения
+- Развёртывания безопасного кластера с SASL, TLS и ACL
+- Настройки мониторинга и алертинга с реалистичными порогами
+- Планирования capacity с расчётами под конкретную нагрузку
+- Реализации Multi-DC с MirrorMaker 2 и конкретными RPO/RTO числами
+- Применения паттернов Event Sourcing, CQRS, Outbox, Saga в реальных сценариях
+- Использования Kafka Streams и ksqlDB для stream processing
+
+Архитектурный challenge из Модуля 13 — ваш portfolio-артефакт. Он демонстрирует работодателям и клиентам, что вы можете не просто использовать Kafka API, но и проектировать complete production systems.
+
+Выполнение всех модульных экзаменов курса открывает доступ к сертификату об окончании курса Apache Kafka Deep-Dive. Используйте его как дополнение к официальной сертификации CCDAK.

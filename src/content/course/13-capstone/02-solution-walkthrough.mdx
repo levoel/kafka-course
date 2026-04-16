@@ -1,0 +1,605 @@
+---
+title: "Разбор эталонного решения"
+description: "Одно из корректных решений архитектурного challenge с детальным обоснованием каждого решения: каталог топиков, архитектура сервисов, стриминговый конвейер, безопасность, Multi-DC, мониторинг."
+order: 2
+difficulty: "advanced"
+estimatedTime: 50
+topics: ["Architecture Solution", "Capstone", "Reference Design"]
+free: false
+---
+
+# Разбор эталонного решения
+
+Это **одно** из корректных решений архитектурного challenge. Ваше решение может отличаться — главное, обоснованы ли ваши решения. Используйте этот разбор как эталон, с которым можно сравнить свой подход и проверить ключевые технические решения.
+
+<Callout type="note">
+Не существует единственно правильного решения для системного дизайна. Данный разбор отражает решения, принятые конкретным старшим инженером с конкретными допущениями. Если ваш выбор отличается — убедитесь, что у вас есть обоснование, и сравните trade-offs.
+</Callout>
+
+---
+
+## Раздел 1: Эталонный каталог топиков
+
+### Соглашение об именовании
+
+Используем формат `{domain}.{entity}.{event-type}` из Модуля 12. Домен = команда-владелец. Entity = бизнес-сущность. Event-type = прошедшее время (что произошло).
+
+### Обоснование количества партиций
+
+**Исходные данные:** 10 000 заказов/сек, средний размер события 500 байт.
+
+```
+Пропускная способность на партицию (конservативная оценка):
+  1 000 сообщений/сек при 500 байт = 500 KB/s на партицию
+  Kafka может обрабатывать до 10 MB/s per partition, но:
+  1 consumer thread = практически ~1 000 msg/s при реальной обработке
+
+Минимальное число партиций = ceil(10 000 / 1 000) = 10
+Округление до кратного числу брокеров (6 брокеров): 12 партиций
+```
+
+<DiagramContainer title="Каталог топиков: эталонное решение" color="blue">
+  <div className="space-y-3 p-2">
+    <Grid columns={5}>
+      <FlowNode variant="header" tooltip="Имя топика в формате domain.entity.event-type">Топик</FlowNode>
+      <FlowNode variant="header" tooltip="Число партиций с обоснованием">Партиции</FlowNode>
+      <FlowNode variant="header" tooltip="Политика хранения данных">Retention</FlowNode>
+      <FlowNode variant="header" tooltip="Политика очистки: delete или compact">Cleanup</FlowNode>
+      <FlowNode variant="header" tooltip="Ключ партиционирования — определяет упорядоченность">Ключ</FlowNode>
+
+      <DataBox label="orders.order.created" tooltip="Основной топик событий заказа. 12 партиций: peak throughput 10K msg/s / 1K msg/s per partition. Все downstream сервисы стартуют отсюда.">orders.order.created</DataBox>
+      <DataBox label="12" tooltip="Peak 10K/s / 1K/s per partition = 10, округляем до 12 (кратно 6 брокерам).">12</DataBox>
+      <DataBox label="30 дней" tooltip="30 дней: достаточно для replay при аварии или добавлении нового consumer. Не infinite — события не являются event store в строгом смысле.">30d</DataBox>
+      <DataBox label="delete" tooltip="delete: устаревшие события удаляются по retention. Не compact — нам нужна полная история, не только последнее состояние.">delete</DataBox>
+      <DataBox label="orderId" tooltip="Ключ = orderId. Все события одного заказа в одну партицию → строгий порядок событий одного заказа.">orderId</DataBox>
+
+      <DataBox label="orders.order.confirmed" tooltip="Подтверждённые заказы. Публикуется сагой после успешных payment + inventory шагов.">orders.order.confirmed</DataBox>
+      <DataBox label="12" tooltip="Соответствует orders.order.created — одинаковый throughput.">12</DataBox>
+      <DataBox label="30 дней" tooltip="30 дней: финансовая сверка требует историю за месяц.">30d</DataBox>
+      <DataBox label="delete" tooltip="delete: исторические события, не snapshot.">delete</DataBox>
+      <DataBox label="orderId" tooltip="orderId: co-partitioning с orders.order.created для JOIN в Streams.">orderId</DataBox>
+
+      <DataBox label="payments.payment.charged" tooltip="Успешные платежи. Читается Inventory Service для резервирования товара. Ключевой топик в saga flow.">payments.payment.charged</DataBox>
+      <DataBox label="12" tooltip="12 партиций: тот же peak throughput. Inventory Service должен иметь 12 consumers для параллельной обработки.">12</DataBox>
+      <DataBox label="30 дней" tooltip="30 дней: финансовая аудитность требует полной истории платежей.">30d</DataBox>
+      <DataBox label="delete" tooltip="delete: события транзакций, не snapshot.">delete</DataBox>
+      <DataBox label="orderId" tooltip="orderId: co-partitioning позволяет JOIN с orders в случае необходимости.">orderId</DataBox>
+
+      <DataBox label="payments.payment.refunded" tooltip="Возвраты. Более редкие, чем charged — 6 партиций достаточно.">payments.payment.refunded</DataBox>
+      <DataBox label="6" tooltip="6 партиций: refund rate обычно 1-5% от charge rate. Половина партиций — достаточно.">6</DataBox>
+      <DataBox label="30 дней" tooltip="30 дней: финансовый аудит.">30d</DataBox>
+      <DataBox label="delete" tooltip="delete: исторические события.">delete</DataBox>
+      <DataBox label="orderId" tooltip="orderId: связь с исходным заказом.">orderId</DataBox>
+
+      <DataBox label="inventory.item.reserved" tooltip="Резервирование складских позиций. Ключ = itemId для партиционирования по товару.">inventory.item.reserved</DataBox>
+      <DataBox label="12" tooltip="12 партиций: высокий throughput при 10K заказов/сек, каждый с несколькими позициями.">12</DataBox>
+      <DataBox label="30 дней" tooltip="30 дней: достаточно для аудита складских операций.">30d</DataBox>
+      <DataBox label="delete" tooltip="delete: события, не текущий складской остаток.">delete</DataBox>
+      <DataBox label="itemId" tooltip="itemId (не orderId): партиционирование по товару позволяет Inventory Service поддерживать счётчики остатков per-partition с гарантиями порядка.">itemId</DataBox>
+
+      <DataBox label="orders.order.enriched" tooltip="Output Kafka Streams topology: JOIN заказов с профилями клиентов. Input для JDBC Sink и Analytics.">orders.order.enriched</DataBox>
+      <DataBox label="12" tooltip="12 партиций: соответствует входному топику — repartitioning не требуется.">12</DataBox>
+      <DataBox label="7 дней" tooltip="7 дней: JDBC Sink реплицирует данные в PostgreSQL непрерывно. Replay за 7 дней достаточно при восстановлении.">7d</DataBox>
+      <DataBox label="compact" tooltip="compact: обогащённый заказ — снепшот текущего состояния. Нужен только последний вариант по orderId.">compact</DataBox>
+      <DataBox label="orderId" tooltip="orderId: JOIN по orderId в Streams.">orderId</DataBox>
+
+      <DataBox label="saga.order-fulfillment.state" tooltip="Состояние саги выполнения заказа. Компактный топик: только последнее состояние per saga.">saga.order-fulfillment.state</DataBox>
+      <DataBox label="12" tooltip="12 партиций: один активный saga per order, peak 10K/s.">12</DataBox>
+      <DataBox label="7 дней" tooltip="7 дней: активные саги не живут больше нескольких минут. 7 дней — запас для crashed/stuck sagas.">7d</DataBox>
+      <DataBox label="compact" tooltip="compact: сохраняем только последнее состояние саги по sagaId. Завершённые саги будут compacted автоматически.">compact</DataBox>
+      <DataBox label="sagaId" tooltip="sagaId: уникальный идентификатор экземпляра саги (= orderId для 1:1 mapping).">sagaId</DataBox>
+    </Grid>
+  </div>
+</DiagramContainer>
+
+---
+
+## Раздел 2: Архитектура сервисов
+
+### Решение: Orchestration Saga
+
+При 4 сервисах в цепочке выполнения заказа (Order → Payment → Inventory → Notification) выбор между хореографией и оркестрацией принципиален.
+
+**Решение: Orchestration (Оркестрация)**
+
+**Обоснование:** При 4 сервисах хореография становится трудноотслеживаемой — нет единого взгляда на прогресс выполнения заказа. При сбое на шаге 3 (резервирование инвентаря) нужно компенсировать шаг 2 (платёж — возврат средств). Логика компенсации разбросана по 4 сервисам без центрального координатора.
+
+Оркестрация: вся логика в одном месте — Saga Orchestrator. Добавить новый шаг = изменить только оркестратор. Debug: состояние видно в `saga.order-fulfillment.state`.
+
+<DiagramContainer title="Архитектура сервисов: flow событий" color="blue">
+  <div className="space-y-4 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="source"
+        tooltip="Order Service: принимает HTTP запрос на создание заказа. Записывает заказ в собственную БД И запись в outbox-таблицу — в ОДНОЙ транзакции. Debezium CDC или polling publisher читает outbox и публикует в Kafka."
+      >
+        Order Service
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="process"
+        tooltip="orders.order.created: 12 партиций, ключ=orderId. Order Service продюсирует через Debezium Outbox Connector — гарантия at-least-once без dual write проблемы."
+      >
+        orders.order.created
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="process"
+        tooltip="Saga Orchestrator: stateful сервис, читает orders.order.created, запускает saga instance. Состояние сохраняет в saga.order-fulfillment.state (compact topic). Координирует Payment → Inventory → Notification."
+      >
+        Saga Orchestrator
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="process"
+        tooltip="saga.commands.payments: команды от оркестратора к Payment Service. ChargePayment, RefundPayment. Ключ=sagaId для упорядоченности команд."
+      >
+        saga.commands.payments
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="process"
+        tooltip="Payment Service: idempotent consumer — dedup по orderId (хранит processed_order_ids в Redis). Использует enable.idempotence=true + transactional.id для exactly-once produce."
+      >
+        Payment Service
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="sink"
+        tooltip="payments.payment.charged: результат успешного платежа. Ключ=orderId. Оркестратор читает и переходит к следующему шагу — резервированию инвентаря."
+      >
+        payments.payment.charged
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="process"
+        tooltip="Inventory Service: читает saga.commands.inventory. Резервирует товар. При успехе — публикует inventory.item.reserved. При нехватке — failure event, оркестратор компенсирует (RefundPayment)."
+      >
+        Inventory Service
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="process"
+        tooltip="Notification Service: читает orders.order.confirmed от оркестратора. Отправляет email/SMS. Fire-and-forget — сбой уведомления не блокирует saga."
+      >
+        Notification Service
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="sink"
+        tooltip="Заказ подтверждён. Оркестратор публикует orders.order.confirmed. Состояние саги = COMPLETED. Analytics и Finance читают обогащённые данные."
+      >
+        Order Confirmed
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+### Transactional Outbox для Order Service
+
+Order Service использует паттерн transactional outbox из Модуля 12. Без него — dual write: запись в БД и отправка в Kafka не атомарны.
+
+```sql
+-- В одной транзакции PostgreSQL:
+BEGIN;
+  INSERT INTO orders (id, customer_id, status, amount)
+  VALUES ('order-123', 'cust-1', 'CREATED', 99.99);
+
+  INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload)
+  VALUES (
+    'Order',
+    'order-123',
+    'OrderCreated',
+    '{"orderId":"order-123","customerId":"cust-1","amount":99.99}'
+  );
+COMMIT;
+-- Обе записи атомарны. Debezium читает WAL и публикует outbox запись в Kafka.
+```
+
+### Exactly-once для Payment Service
+
+**Решение:** Idempotent consumer + `transactional.id` на producer.
+
+- Consumer: проверяет Redis cache по `orderId` перед обработкой. Если `orderId` уже обработан — skip (idempotent handling).
+- Producer: `transactional.id=payment-service-{partition}`, `enable.idempotence=true`. Атомарная публикация `payments.payment.charged` и обновления статуса.
+
+**Почему не только Kafka transactions для consumer?** Idempotent consumer на стороне приложения более надёжен — не зависит от `isolation.level=read_committed` в downstream.
+
+---
+
+## Раздел 3: Стриминговый конвейер
+
+### Kafka Streams Topology
+
+```java
+// Топология обогащения заказов
+StreamsBuilder builder = new StreamsBuilder();
+
+// Исходный поток заказов
+KStream<String, OrderCreated> orders = builder
+    .stream("orders.order.created",
+            Consumed.with(Serdes.String(), orderCreatedSerde));
+
+// KTable профилей клиентов (changelog из customer-service)
+KTable<String, CustomerProfile> customers = builder
+    .table("customers.customer.profile",
+           Consumed.with(Serdes.String(), customerProfileSerde),
+           Materialized.as("customers-store"));
+
+// Re-key заказов по customerId для JOIN
+KStream<String, OrderCreated> ordersByCustomer = orders
+    .selectKey((orderId, order) -> order.getCustomerId());
+
+// JOIN заказа с профилем клиента
+KStream<String, OrderEnriched> enriched = ordersByCustomer.join(
+    customers,
+    (order, customer) -> OrderEnriched.builder()
+        .orderId(order.getOrderId())
+        .customerId(order.getCustomerId())
+        .customerName(customer.getFullName())
+        .customerEmail(customer.getEmail())
+        .amount(order.getAmount())
+        .createdAt(order.getCreatedAt())
+        .build(),
+    Joined.with(Serdes.String(), orderCreatedSerde, customerProfileSerde)
+);
+
+// Re-key обратно по orderId для output топика
+enriched
+    .selectKey((customerId, enrichedOrder) -> enrichedOrder.getOrderId())
+    .to("orders.order.enriched",
+        Produced.with(Serdes.String(), orderEnrichedSerde));
+```
+
+**Ключевой момент:** Re-key по `customerId` перед JOIN необходим — Kafka Streams JOIN требует совпадения ключей. Затем повторный re-key обратно по `orderId` для downstream совместимости (JDBC Sink ожидает `orderId` как первичный ключ).
+
+### Connect Pipelines
+
+**JDBC Sink (PostgreSQL для Finance):**
+
+```json
+{
+  "name": "orders-jdbc-sink",
+  "config": {
+    "connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector",
+    "connection.url": "jdbc:postgresql://postgres:5432/analytics",
+    "topics": "orders.order.enriched",
+    "table.name.format": "order_analytics",
+    "insert.mode": "upsert",
+    "pk.mode": "record_key",
+    "pk.fields": "order_id",
+    "auto.create": "false",
+    "batch.size": "3000",
+    "consumer.override.max.poll.records": "3000"
+  }
+}
+```
+
+`insert.mode=upsert`: при compact топике возможны дубликаты при redelivery — upsert безопасен.
+
+**Elasticsearch Sink (Search):**
+
+```json
+{
+  "name": "products-es-sink",
+  "config": {
+    "connector.class": "io.confluent.connect.elasticsearch.ElasticsearchSinkConnector",
+    "connection.url": "http://elasticsearch:9200",
+    "topics": "products.product.updated",
+    "type.name": "_doc",
+    "key.ignore": "false",
+    "schema.ignore": "false",
+    "behavior.on.null.values": "delete",
+    "batch.size": "1000",
+    "linger.ms": "100"
+  }
+}
+```
+
+`behavior.on.null.values=delete`: tombstone записи (null value) в compact топике интерпретируются как удаление документа из Elasticsearch.
+
+---
+
+## Раздел 4: Дизайн безопасности
+
+### SASL/SCRAM principals
+
+Каждый сервис — отдельный SCRAM principal. Компрометация одного credential не затрагивает остальные.
+
+```
+Principals:
+  order-service       — Order Service application
+  payment-service     — Payment Service application
+  inventory-service   — Inventory Service application
+  notification-service — Notification Service application
+  saga-orchestrator   — Saga Orchestrator application
+  streams-app         — Kafka Streams enrichment app
+  analytics-connector — Connect JDBC Sink for analytics
+  search-connector    — Connect Elasticsearch Sink
+  mirrormaker2        — MM2 replication process
+  admin               — Operational super user (super.users)
+```
+
+### ACL матрица
+
+<DiagramContainer title="ACL матрица: права доступа per service" color="slate">
+  <div className="space-y-3 p-2">
+    <Grid columns={4}>
+      <FlowNode variant="header" tooltip="Principal — SCRAM-SHA-256 identity">Principal</FlowNode>
+      <FlowNode variant="header" tooltip="Топик или ресурс Kafka">Resource</FlowNode>
+      <FlowNode variant="header" tooltip="PREFIXED — все топики с префиксом, LITERAL — конкретный топик">Pattern</FlowNode>
+      <FlowNode variant="header" tooltip="Разрешённые операции">Операции</FlowNode>
+
+      <DataBox label="order-service" tooltip="Order Service пишет только в topics с префиксом orders. Читает из orders для event sourcing replay.">order-service</DataBox>
+      <DataBox label="orders.*" tooltip="Все topics в домене orders: orders.order.created, orders.order.confirmed, orders.order.cancelled.">orders.*</DataBox>
+      <DataBox label="PREFIXED" tooltip="PREFIXED ACL: автоматически покрывает новые orders.* топики без изменения ACL.">PREFIXED</DataBox>
+      <DataBox label="Write, Read, Describe" tooltip="Write: publish events. Read: event sourcing replay. Describe: metadata для producer конфигурации.">Write, Read, Describe</DataBox>
+
+      <DataBox label="payment-service" tooltip="Payment Service читает команды от оркестратора, пишет результаты платежей.">payment-service</DataBox>
+      <DataBox label="saga.commands.payments" tooltip="Команды от оркестратора: ChargePayment, RefundPayment.">saga.commands.payments</DataBox>
+      <DataBox label="LITERAL" tooltip="LITERAL: конкретный топик команд. Не нужен широкий prefixed доступ.">LITERAL</DataBox>
+      <DataBox label="Read, Describe" tooltip="Только чтение команд от оркестратора.">Read, Describe</DataBox>
+
+      <DataBox label="payment-service" tooltip="Payment Service пишет результаты в payments.* домен.">payment-service</DataBox>
+      <DataBox label="payments.*" tooltip="payments.payment.charged, payments.payment.refunded.">payments.*</DataBox>
+      <DataBox label="PREFIXED" tooltip="PREFIXED: покрывает все будущие payments.* топики.">PREFIXED</DataBox>
+      <DataBox label="Write, Describe" tooltip="Только запись результатов. Читать из payments не нужно.">Write, Describe</DataBox>
+
+      <DataBox label="inventory-service" tooltip="Inventory Service читает команды оркестратора, пишет результаты резервирования.">inventory-service</DataBox>
+      <DataBox label="saga.commands.inventory" tooltip="Команды: ReserveInventory, ReleaseInventory.">saga.commands.inventory</DataBox>
+      <DataBox label="LITERAL" tooltip="LITERAL: конкретный командный топик.">LITERAL</DataBox>
+      <DataBox label="Read, Describe" tooltip="Только чтение команд.">Read, Describe</DataBox>
+
+      <DataBox label="inventory-service" tooltip="Пишет события резервирования.">inventory-service</DataBox>
+      <DataBox label="inventory.*" tooltip="inventory.item.reserved, inventory.item.released.">inventory.*</DataBox>
+      <DataBox label="PREFIXED" tooltip="PREFIXED для inventory домена.">PREFIXED</DataBox>
+      <DataBox label="Write, Describe" tooltip="Запись событий склада.">Write, Describe</DataBox>
+
+      <DataBox label="streams-app" tooltip="Kafka Streams app читает orders и customers, пишет enriched.">streams-app</DataBox>
+      <DataBox label="orders.order.created" tooltip="Исходный топик для enrichment topology.">orders.order.created</DataBox>
+      <DataBox label="LITERAL" tooltip="Конкретный исходный топик.">LITERAL</DataBox>
+      <DataBox label="Read, Describe" tooltip="Только чтение исходного потока.">Read, Describe</DataBox>
+
+      <DataBox label="streams-app" tooltip="Streams пишет обогащённые данные.">streams-app</DataBox>
+      <DataBox label="orders.order.enriched" tooltip="Output топик обогащения.">orders.order.enriched</DataBox>
+      <DataBox label="LITERAL" tooltip="Конкретный output топик.">LITERAL</DataBox>
+      <DataBox label="Write, Describe" tooltip="Запись обогащённых событий.">Write, Describe</DataBox>
+
+      <DataBox label="analytics-connector" tooltip="JDBC Sink Connect connector читает обогащённые данные для PostgreSQL.">analytics-connector</DataBox>
+      <DataBox label="orders.order.enriched" tooltip="Единственный топик для аналитического sink.">orders.order.enriched</DataBox>
+      <DataBox label="LITERAL" tooltip="Точный доступ — только нужный топик.">LITERAL</DataBox>
+      <DataBox label="Read, Describe" tooltip="Только чтение для sink connector.">Read, Describe</DataBox>
+
+      <DataBox label="mirrormaker2" tooltip="MM2 требует широкий доступ для репликации всех топиков и управления offset.">mirrormaker2</DataBox>
+      <DataBox label="*" tooltip="Cluster-level: описание всех топиков. Topic-level: Read на все реплицируемые топики.">* (cluster)</DataBox>
+      <DataBox label="PREFIXED" tooltip="PREFIXED на пустой строке = все топики.">PREFIXED</DataBox>
+      <DataBox label="Read, Describe, Cluster:Describe" tooltip="MM2 читает все топики, описывает кластер. Дополнительно: Create на DC-2 для создания реплицированных топиков.">Read, Describe, ClusterDescribe</DataBox>
+    </Grid>
+  </div>
+</DiagramContainer>
+
+---
+
+## Раздел 5: Multi-DC и Disaster Recovery
+
+### Выбор топологии: Active-Passive
+
+**Обоснование:** E-commerce платформа с единым основным DC и DR резервом. Активный-пассивный режим проще в управлении, не требует разрешения конфликтов при записи с обеих сторон.
+
+Active-active подходит, когда:
+- Требуется нулевое время failover (near-zero RTO)
+- Два DC равнозначно обслуживают разные географические регионы
+- Приложение рассчитано на partition affinity (A-M ключи в DC-1, N-Z в DC-2)
+
+Для нашего сценария (один основной DC) — active-passive с MM2.
+
+### MM2 конфигурация
+
+```properties
+# MirrorMaker 2 — Active-Passive: DC-1 -> DC-2
+# Полная конфигурация для production
+
+clusters = dc1, dc2
+dc1.bootstrap.servers = kafka-dc1-broker1:9092,kafka-dc1-broker2:9092,kafka-dc1-broker3:9092
+dc2.bootstrap.servers = kafka-dc2-broker1:9092,kafka-dc2-broker2:9092,kafka-dc2-broker3:9092
+
+# Только направление DC-1 -> DC-2
+dc1->dc2.enabled = true
+dc1->dc2.topics = orders\..*, payments\..*, inventory\..*, saga\..*
+dc1->dc2.groups = order-processor, payment-processor, inventory-processor
+
+# DC-2 -> DC-1 отключено (active-passive)
+dc2->dc1.enabled = false
+
+# Checkpoint connector: синхронизация consumer group offsets
+emit.checkpoints.enabled = true
+emit.checkpoints.interval.seconds = 10
+sync.group.offsets.enabled = true
+sync.group.offsets.interval.seconds = 10
+
+# Heartbeat connector: мониторинг здоровья репликации
+emit.heartbeats.enabled = true
+emit.heartbeats.interval.seconds = 5
+
+# DefaultReplicationPolicy: топики появляются как dc1.orders.order.created на DC-2
+replication.policy.class = org.apache.kafka.connect.mirror.DefaultReplicationPolicy
+
+# Параллелизм: по одной task per partition group
+tasks.max = 8
+
+# Аутентификация MM2 -> DC-1 и DC-2
+dc1.security.protocol = SASL_SSL
+dc1.sasl.mechanism = SCRAM-SHA-256
+dc2.security.protocol = SASL_SSL
+dc2.sasl.mechanism = SCRAM-SHA-256
+```
+
+**Почему `DefaultReplicationPolicy`, а не `IdentityReplicationPolicy`?**
+
+- `DefaultReplicationPolicy`: топик `orders.order.created` на DC-1 появляется как `dc1.orders.order.created` на DC-2. Consumers на DC-2 явно настроены на чтение с префиксом `dc1.`. Это предотвращает случайную запись в "оригинальный" топик на DR кластере.
+- `IdentityReplicationPolicy`: те же имена на обоих кластерах. Требуется только при active-active, где приложения должны читать/писать независимо от DC. Для active-passive создаёт риск ambiguity.
+
+### RPO/RTO анализ
+
+**RPO (Recovery Point Objective = максимальная допустимая потеря данных):**
+
+```
+MM2 replication latency при нормальной работе: 2–5 секунд
+emit.checkpoints.interval.seconds = 10 секунд
+Максимальный RPO = max(replication lag) + checkpoint interval
+                 = 5 + 10 = ~15 секунд (значительно лучше требования 30 сек)
+```
+
+**RTO (Recovery Time Objective = время восстановления):**
+
+| Этап | Время | Комментарий |
+|------|-------|-------------|
+| Обнаружение сбоя (мониторинг) | ~2 мин | Prometheus alert + PagerDuty |
+| Принятие решения о failover | ~1 мин | Ручное или автоматическое |
+| Дренирование MM2 лага | ~1 мин | Или принять текущий RPO |
+| DNS failover (TTL 60 сек) | ~1 мин | Обновление A-записи load balancer |
+| Offset translation (auto) | ~0 мин | `sync.group.offsets.enabled=true` — автоматически |
+| Перезапуск сервисов на DC-2 | ~2 мин | Kubernetes rolling restart |
+| **Итого RTO** | **~7 мин** | Менее требования 10 мин |
+
+### Runbook failover
+
+1. Prometheus алерт: `kafka_mirror_heartbeat_age_seconds > 60` на DC-2 (репликация остановилась)
+2. On-call инженер проверяет доступность DC-1: `kafka-topics.sh --bootstrap-server kafka-dc1:9092 --list`
+3. Если DC-1 недоступен: принять решение о failover (согласно incident severity playbook)
+4. Остановить все producers на DC-1 (circuit breaker / feature flag в приложении)
+5. Зафиксировать текущий MM2 lag: `kafka-consumer-groups.sh --bootstrap-server kafka-dc2:9092 --describe --group mirrormaker2-dc1-dc2`
+6. Проверить наличие consumer group offsets на DC-2: `kafka-consumer-groups.sh --bootstrap-server kafka-dc2:9092 --describe --group order-processor`
+7. Обновить DNS: изменить A-запись load balancer с DC-1 endpoints на DC-2 endpoints
+8. Consumers на DC-2 стартуют и читают из `dc1.orders.order.created` (DefaultReplicationPolicy prefix)
+9. Проверить стабилизацию: consumer lag снижается, UnderReplicatedPartitions = 0, бизнес-метрики возобновились
+
+---
+
+## Раздел 6: Мониторинг и ёмкость
+
+### Ключевые Prometheus алерты
+
+```yaml
+groups:
+  - name: kafka-production-alerts
+    rules:
+      # Критический: под-реплицированные партиции
+      - alert: KafkaUnderReplicatedPartitions
+        expr: kafka_server_replicamanager_underreplicatedpartitions > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "UnderReplicatedPartitions > 0 на {{ $labels.instance }}"
+          description: "Возможен сбой брокера или сетевая проблема. Немедленная диагностика."
+
+      # Warning: высокий consumer lag
+      - alert: KafkaConsumerLagHigh
+        expr: kafka_consumer_group_lag > 5000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consumer lag {{ $value }} для группы {{ $labels.group }}"
+
+      # Critical: очень высокий consumer lag
+      - alert: KafkaConsumerLagCritical
+        expr: kafka_consumer_group_lag > 50000
+        for: 5m
+        labels:
+          severity: critical
+
+      # Warning: задержка produce
+      - alert: KafkaProduceLatencyHigh
+        expr: kafka_network_requestmetrics_totaltimems{request="Produce", quantile="0.99"} > 200
+        for: 5m
+        labels:
+          severity: warning
+
+      # Critical: задержка репликации MM2
+      - alert: MM2ReplicationLagHigh
+        expr: kafka_mirror_replication_latency_ms_avg > 10000
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MM2 replication lag > 10 секунд — RPO под угрозой"
+```
+
+### Ёмкостный план (детальный расчёт)
+
+```
+Входные данные:
+  Пиковый throughput: 10 000 заказов/сек
+  Средний размер события: 500 байт
+  Replication Factor: 3
+  Retention: 30 дней (основные топики)
+  Число топиков: ~10 (из каталога)
+
+Расчёт:
+  Суммарный produce rate: 10 000 × 500 байт = 5 МБ/с (на уровне приложения)
+  С RF=3: 5 МБ/с × 3 = 15 МБ/с суммарная disk write rate (по всем брокерам)
+  Суточный объём на диске: 15 МБ/с × 86 400 сек = ~1,3 ТБ/день
+  30-дневное хранилище: 1,3 × 30 = ~39 ТБ суммарно
+
+Конфигурация кластера:
+  Минимум брокеров: 3 (для RF=3)
+  Рекомендуется: 6 (для headroom + reassignment без деградации)
+  На брокер: 39 / 6 = ~6,5 ТБ + 30% headroom = ~8,5 ТБ SSD
+
+RAM на брокер:
+  JVM heap: 6 ГБ (фиксированно, не увеличивать — Модуль 10)
+  Page cache: 24 ГБ (15 МБ/с × 1 600 сек = ~24 ГБ "горячих" данных)
+  Итого: 32 ГБ RAM per broker
+
+Сеть:
+  Inbound: 5 МБ/с producer
+  Replication: 5 × 2 = 10 МБ/с (2 follower копии)
+  Consumer: ~15 МБ/с (3 consumer groups × 5 МБ/с)
+  Итого per broker: ~30 МБ/с = 0,24 Гбит/с
+  При 1 Гбит/с NIC: 24% утилизация (значительно ниже 70% порога)
+
+Итоговая спецификация на брокер:
+  CPU: 16 ядер
+  RAM: 32 ГБ
+  Диск: 9 ТБ NVMe SSD (с 30% запасом)
+  NIC: 1 Гбит/с
+  Брокеров: 6 (3 в DC-1, 3 в DC-2)
+```
+
+<Callout type="tip">
+Обратите внимание на соотношение JVM heap / page cache. 6 ГБ heap — жёсткое правило (Модуль 10: больший heap = GC паузы). Весь дополнительный RAM уходит в page cache. Именно page cache обеспечивает низкую latency — OS держит горячие log сегменты в памяти, consumer читает без disk I/O.
+</Callout>
+
+---
+
+## Ключевые решения и альтернативы
+
+<DiagramContainer title="Резюме ключевых архитектурных решений" color="slate">
+  <div className="space-y-3 p-2">
+    <Grid columns={3}>
+      <FlowNode variant="header" tooltip="Решение">Решение</FlowNode>
+      <FlowNode variant="header" tooltip="Выбранный вариант">Выбор</FlowNode>
+      <FlowNode variant="header" tooltip="Альтернатива и причина отклонения">Альтернатива (отклонена)</FlowNode>
+
+      <DataBox label="Saga тип" tooltip="При 4+ сервисах и необходимости компенсации оркестрация выгоднее.">Saga тип</DataBox>
+      <DataBox label="Orchestration" tooltip="Центральный координатор: ясная компенсация, единое место для debugging, легко добавить шаг.">Orchestration</DataBox>
+      <DataBox label="Choreography: сложная компенсация при 4+ сервисах" tooltip="Choreography хороша при 2-3 сервисах. При 4+ трудно отследить прогресс и реализовать компенсацию.">Choreography (сложная компенсация)</DataBox>
+
+      <DataBox label="MM2 политика" tooltip="DefaultReplicationPolicy vs IdentityReplicationPolicy.">MM2 Policy</DataBox>
+      <DataBox label="DefaultReplicationPolicy" tooltip="Топики на DC-2 с dc1. префиксом: явная изоляция от оригинальных топиков. Безопаснее для active-passive.">DefaultReplicationPolicy</DataBox>
+      <DataBox label="IdentityReplicationPolicy: нужна только при active-active" tooltip="IdentityReplicationPolicy нужна при active-active для прозрачного переключения без изменения topic names.">IdentityReplicationPolicy (не нужна)</DataBox>
+
+      <DataBox label="Reliable publish" tooltip="Как Order Service гарантирует доставку событий в Kafka.">Reliable publish</DataBox>
+      <DataBox label="Transactional Outbox" tooltip="Atomicity: запись в БД + outbox в одной транзакции. Debezium CDC читает WAL и публикует. Гарантирует at-least-once.">Transactional Outbox</DataBox>
+      <DataBox label="Direct produce: риск потери при сбое между DB и Kafka" tooltip="Запись в БД, затем produce в Kafka — не атомарно. При сбое между двумя операциями: или событие потеряно, или состояние БД не согласовано.">Direct produce (dual write)</DataBox>
+
+      <DataBox label="Enrichment" tooltip="Как обогащать заказы данными клиентов.">Enrichment</DataBox>
+      <DataBox label="Kafka Streams JOIN" tooltip="Streams KTable JOIN: stateful, рестарт без потери состояния (RocksDB), масштабируется горизонтально.">Kafka Streams JOIN</DataBox>
+      <DataBox label="Lookup в service: синхронный HTTP call, монолитный контракт" tooltip="Обращение к customer-service по HTTP при обработке заказа: latency, coupling, сбой сервиса блокирует обработку.">Lookup в customer-service (HTTP coupling)</DataBox>
+    </Grid>
+  </div>
+</DiagramContainer>
