@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "05-kafka-connect/02-source-connectors",
+  "moduleId": "05-kafka-connect",
+  "_meta": {
+    "idPrefix": "kafka-m05-02",
+    "description": "Use IDs: kafka-m05-02-q1, q2, q3 for MC; kafka-m05-02-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m05-02-q1",
+      "type": "multiple-choice",
+      "question": "Source connector записал offset в connect-offsets. Через 10 минут Worker падает и перезапускается. С какой позиции продолжит чтение задача?",
+      "options": [
+        {
+          "id": "a",
+          "text": "С начала источника (offset 0) — Connect не восстанавливает позицию после перезапуска воркера"
+        },
+        {
+          "id": "b",
+          "text": "С последнего зафиксированного offset в connect-offsets — дубликаты возможны только для записей после последнего коммита"
+        },
+        {
+          "id": "c",
+          "text": "С позиции, сохранённой в __consumer_offsets — source connector использует стандартный consumer offset"
+        },
+        {
+          "id": "d",
+          "text": "Администратор должен вручную указать стартовый offset через REST API после перезапуска"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Source connector хранит свою позицию в log-compacted Kafka-топике connect-offsets. При перезапуске задача читает этот топик, находит последний зафиксированный offset для своей source partition (ключ в connect-offsets = connector name + source partition), и продолжает с этой позиции. Записи между последним коммитом и моментом падения могут быть обработаны повторно (at-least-once). Source connector использует connect-offsets, а не __consumer_offsets — это топик для sink коннекторов.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m05-02-q2",
+      "type": "multiple-choice",
+      "question": "Таблица orders в PostgreSQL имеет столбцы: id (SERIAL), amount, status, updated_at (TIMESTAMP). Записи могут создаваться и обновляться. Какой mode JDBC Source Connector наиболее надёжен для захвата всех изменений?",
+      "options": [
+        {
+          "id": "a",
+          "text": "mode=bulk — полная выгрузка каждый poll гарантирует захват всех изменений"
+        },
+        {
+          "id": "b",
+          "text": "mode=incrementing — ID монотонно возрастает, поэтому новые и обновлённые строки всегда обнаруживаются"
+        },
+        {
+          "id": "c",
+          "text": "mode=timestamp+incrementing — комбинация updated_at для обновлений и id для точной идентификации при совпадении timestamp"
+        },
+        {
+          "id": "d",
+          "text": "mode=timestamp — достаточно updated_at для захвата и INSERT, и UPDATE"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "mode=timestamp+incrementing наиболее надёжен. mode=incrementing фиксирует только INSERT (id возрастает), UPDATE не видит (id не меняется). mode=timestamp видит UPDATE, но уязвим к проблеме: несколько строк с одинаковым updated_at с точностью до секунды — некоторые могут быть пропущены. mode=bulk нагружает базу полным SELECT на каждый poll — неэффективно для больших таблиц. mode=timestamp+incrementing: SELECT WHERE updated_at >= :last_ts OR (updated_at = :last_ts AND id > :last_id) — корректно обрабатывает совпадение timestamp.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m05-02-q3",
+      "type": "multiple-choice",
+      "question": "Команда выбирает между JDBC Source Connector и Debezium для захвата изменений из MySQL. Операция DELETE критически важна для синхронизации. Что выбрать и почему?",
+      "options": [
+        {
+          "id": "a",
+          "text": "JDBC Source с mode=timestamp — поле deleted_at заполняется при soft-delete, что позволяет видеть удаления"
+        },
+        {
+          "id": "b",
+          "text": "Debezium MySQL Connector — читает binlog и фиксирует DELETE как событие с op='d', до и после удаления"
+        },
+        {
+          "id": "c",
+          "text": "JDBC Source с mode=bulk — полная выгрузка таблицы позволяет сравнить снапшоты и определить удалённые строки"
+        },
+        {
+          "id": "d",
+          "text": "Оба коннектора поддерживают DELETE — выбор определяется только производительностью"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Debezium обязателен, когда важны DELETE. JDBC Source Connector работает через SELECT-запросы к таблице — удалённые строки уже отсутствуют, их невозможно прочитать. JDBC видит только INSERT (mode=incrementing) и UPDATE (mode=timestamp). Debezium читает MySQL binlog — журнал всех операций базы данных — и фиксирует DELETE как событие {op: 'd', before: {строка до удаления}, after: null}. Вариант с soft-delete (deleted_at) — допустимый архитектурный обходной путь для JDBC, но требует изменений схемы базы и исключает физическое удаление. mode=bulk для сравнения снапшотов — крайне неэффективно и не масштабируется.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m05-02-q4",
+      "type": "true-false",
+      "question": "FileStreamSourceConnector является рекомендуемым решением для чтения rotating log-файлов в production-системах.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. FileStreamSourceConnector предназначен исключительно для учебных примеров и тестирования. Его критические ограничения для production: (1) не отслеживает ротацию лог-файлов — если файл архивируется и создаётся новый, коннектор может потерять позицию или читать старый файл; (2) нет поддержки сжатых файлов (.gz, .bz2); (3) нет мониторинга появления новых файлов в директории; (4) один файл = одна задача — нет параллелизма. Для production log ingestion используйте специализированные решения: Kafka Connect S3 Source Connector, Filebeat + Logstash, или Confluent Kafka Connect File Pulse Connector.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

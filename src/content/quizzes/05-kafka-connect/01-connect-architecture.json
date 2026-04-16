@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "05-kafka-connect/01-connect-architecture",
+  "moduleId": "05-kafka-connect",
+  "_meta": {
+    "idPrefix": "kafka-m05-01",
+    "description": "Use IDs: kafka-m05-01-q1, q2, q3 for MC; kafka-m05-01-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m05-01-q1",
+      "type": "multiple-choice",
+      "question": "Команда развёртывает Kafka Connect в production. Какие три внутренних Kafka-топика необходимо создать для distributed режима и каково их назначение?",
+      "options": [
+        {
+          "id": "a",
+          "text": "__consumer_offsets, __transaction_state, connect-logs — стандартные внутренние топики Kafka"
+        },
+        {
+          "id": "b",
+          "text": "connect-configs (конфигурации коннекторов), connect-offsets (позиции source-коннекторов), connect-status (статусы задач)"
+        },
+        {
+          "id": "c",
+          "text": "connect-configs (конфигурации), connect-dlq (ошибочные записи), connect-metrics (метрики воркеров)"
+        },
+        {
+          "id": "d",
+          "text": "Внутренние топики создаются автоматически — явного создания не требуется, достаточно указать bootstrap.servers"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Distributed Connect требует три внутренних топика: (1) connect-configs — log-compacted топик с конфигурациями всех коннекторов и задач; новый воркер читает его при старте для восстановления состояния; (2) connect-offsets — log-compacted топик с позициями source-коннекторов (байтовый offset файла, ID последней строки JDBC, LSN Debezium); (3) connect-status — статусы всех коннекторов и задач (RUNNING/FAILED/PAUSED). Топики создаются автоматически при первом запуске, но в production рекомендуется создать их вручную с нужным replication.factor=3. DLQ — это отдельная концепция, не внутренний топик Connect.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m05-01-q2",
+      "type": "multiple-choice",
+      "question": "Connect-кластер из 3 воркеров выполняет коннектор с tasks.max=6. Worker 2 падает. Какова корректная последовательность событий?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Все задачи останавливаются до ручного перезапуска Worker 2 — Connect не имеет автоматического восстановления"
+        },
+        {
+          "id": "b",
+          "text": "2 задачи Worker 2 перераспределяются на Worker 1 и Worker 3 (по 1 дополнительной), коннектор продолжает работу"
+        },
+        {
+          "id": "c",
+          "text": "Connect создаёт новый Worker для замены упавшего через Kubernetes автоскейлинг"
+        },
+        {
+          "id": "d",
+          "text": "Оставшиеся 2 воркера запрашивают увеличение tasks.max до 8 для компенсации нагрузки"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "В distributed режиме Connect использует тот же механизм координации, что и Kafka consumer group. При падении Worker 2 оставшиеся воркеры (Worker 1 и Worker 3) обнаруживают потерю участника и инициируют rebalance. Задачи, ранее выполнявшиеся на Worker 2, перераспределяются: при 3 воркерах и 6 задачах каждый получал по 2 задачи; теперь 2 воркера получают по 3 задачи. Никакого ручного вмешательства не требуется — это ключевое преимущество distributed режима над standalone. Конфигурации задач читаются из connect-configs, offset позиции — из connect-offsets.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m05-01-q3",
+      "type": "multiple-choice",
+      "question": "Разработчик настраивает коннектор с value.converter=io.confluent.connect.avro.AvroConverter. Schema Registry недоступна в момент первой записи. Что произойдёт?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Коннектор переключится на JsonConverter как запасной вариант"
+        },
+        {
+          "id": "b",
+          "text": "AvroConverter не сможет зарегистрировать схему — serialization error, задача перейдёт в FAILED"
+        },
+        {
+          "id": "c",
+          "text": "Коннектор буферизует записи локально до восстановления Schema Registry"
+        },
+        {
+          "id": "d",
+          "text": "Записи публикуются без Avro-схемы — Schema Registry используется только для чтения"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "AvroConverter при каждой сериализации обращается к Schema Registry: регистрирует схему (если не зарегистрирована), получает числовой schema ID, формирует 5-байтовый заголовок (0x00 magic byte + 4-байтовый schema ID) перед Avro-payload. Если Schema Registry недоступна — AvroConverter выбрасывает SerializationException. При errors.tolerance=none (по умолчанию) задача переходит в FAILED. Никакого fallback на другой converter нет — converter задаётся статически в конфигурации. Именно поэтому Schema Registry — критическая зависимость при использовании Avro в Connect.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m05-01-q4",
+      "type": "true-false",
+      "question": "REST API Kafka Connect в distributed режиме доступен на порту 8083 на любом воркере кластера — запрос к любому воркеру даст одинаковый результат.",
+      "correctAnswer": "true",
+      "explanation": "Верно. В distributed режиме каждый воркер запускает REST API на порту 8083. Поскольку состояние коннекторов хранится в общих Kafka-топиках (connect-configs, connect-status), а не локально на воркере, любой воркер имеет доступ к актуальному состоянию. REST API запрос на создание, обновление или получение статуса коннектора даст одинаковый результат независимо от того, к какому воркеру обратились. Для load balancing в production ставят L7 load balancer (nginx, HAProxy) перед воркерами Connect.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

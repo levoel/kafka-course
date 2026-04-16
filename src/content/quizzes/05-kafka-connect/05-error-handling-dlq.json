@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "05-kafka-connect/05-error-handling-dlq",
+  "moduleId": "05-kafka-connect",
+  "_meta": {
+    "idPrefix": "kafka-m05-05",
+    "description": "Use IDs: kafka-m05-05-q1, q2, q3 for MC; kafka-m05-05-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m05-05-q1",
+      "type": "multiple-choice",
+      "question": "Connect Sink Connector настроен с errors.tolerance=none. Из 10 000 записей в топике одна запись на offset 5000 имеет некорректный JSON. Что произойдёт при обработке этой записи?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Некорректная запись пропускается, остальные 9 999 записей обрабатываются успешно"
+        },
+        {
+          "id": "b",
+          "text": "Задача коннектора переходит в FAILED, обработка останавливается, оставшиеся 5 000 записей не обрабатываются"
+        },
+        {
+          "id": "c",
+          "text": "Connect автоматически переключается на errors.tolerance=all для данной задачи"
+        },
+        {
+          "id": "d",
+          "text": "Некорректная запись записывается в DLQ, остальные обрабатываются (DLQ включён по умолчанию)"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "При errors.tolerance=none (значение по умолчанию) любая ошибка десериализации, SMT, или записи в целевую систему переводит задачу в состояние FAILED. Обработка топика останавливается — Consumer не продвигает offset дальше offset 5000. Записи с offset 5001 и далее не обрабатываются. Для продолжения необходимо: исправить данные или конфигурацию, затем вручную перезапустить задачу через REST API POST /connectors/{name}/tasks/{id}/restart. DLQ включается только явной конфигурацией — его нет по умолчанию.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m05-05-q2",
+      "type": "multiple-choice",
+      "question": "Команда хочет production-конфигурацию: плохие записи не должны останавливать конвейер, но должны быть сохранены для последующего анализа с полным контекстом ошибки. Какой минимальный набор параметров необходим?",
+      "options": [
+        {
+          "id": "a",
+          "text": "errors.tolerance=all — достаточно, плохие записи логируются автоматически"
+        },
+        {
+          "id": "b",
+          "text": "errors.tolerance=all + errors.deadletterqueue.topic.name + errors.deadletterqueue.context.headers.enable=true"
+        },
+        {
+          "id": "c",
+          "text": "errors.log.enable=true + errors.log.include.messages=true — записи в лог содержат полный контекст"
+        },
+        {
+          "id": "d",
+          "text": "errors.tolerance=all + errors.retry.timeout=0 — немедленный переход в DLQ без ретраев"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Для production DLQ-паттерна необходим минимальный набор: (1) errors.tolerance=all — без этого задача остановится при первой ошибке и ничего не попадёт в DLQ; (2) errors.deadletterqueue.topic.name — указывает топик для ошибочных записей; без этого параметра при tolerance=all плохие записи молча сбрасываются; (3) errors.deadletterqueue.context.headers.enable=true — добавляет заголовки с контекстом (__connect.errors.exception.message, __connect.errors.stage, __connect.errors.offset) — без них анализ причины невозможен. errors.log.enable — дополнение к DLQ, а не замена: лог не позволяет повторно обработать записи.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m05-05-q3",
+      "type": "multiple-choice",
+      "question": "DLQ топик накопил 50 000 записей за неделю. Команда хочет понять: (1) почему записи попали в DLQ, (2) с каких offset в исходном топике, (3) на каком этапе pipeline произошла ошибка. Какой из заголовков DLQ отвечает на каждый из этих вопросов?",
+      "options": [
+        {
+          "id": "a",
+          "text": "__connect.errors.class.name — класс ошибки; __connect.errors.source.offset — исходный offset; __connect.errors.pipeline.stage — этап"
+        },
+        {
+          "id": "b",
+          "text": "__connect.errors.exception.message — сообщение ошибки; __connect.errors.offset — offset; __connect.errors.stage — этап (converter/transform/task-put)"
+        },
+        {
+          "id": "c",
+          "text": "DLQ заголовки содержат только имя коннектора и timestamp — детальный контекст недоступен"
+        },
+        {
+          "id": "d",
+          "text": "Для получения причины нужно читать log Connect Worker — DLQ заголовки содержат только исходную запись"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "При errors.deadletterqueue.context.headers.enable=true каждая запись в DLQ содержит заголовки: __connect.errors.exception.message — человекочитаемое сообщение исключения (отвечает на «почему»); __connect.errors.exception.stacktrace — полный stack trace; __connect.errors.offset — offset в исходном топике (отвечает на «с какого offset»); __connect.errors.partition — партиция; __connect.errors.topic — исходный топик; __connect.errors.stage — этап pipeline: CONVERTING_KEY, CONVERTING_VALUE, APPLYING_TRANSFORM, TASK_PUT (отвечает на «на каком этапе»); __connect.errors.connector.name — имя коннектора. Это позволяет полностью диагностировать проблему без доступа к логам Worker.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m05-05-q4",
+      "type": "true-false",
+      "question": "При errors.tolerance=all все плохие записи автоматически попадают в DLQ — достаточно только установить этот параметр.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. errors.tolerance=all указывает Connect пропускать ошибочные записи вместо остановки задачи — но куда отправлять плохие записи, определяется отдельным параметром errors.deadletterqueue.topic.name. Если DLQ топик не настроен: при errors.tolerance=all плохие записи молча сбрасываются (silent drop). Они не логируются автоматически — для логирования нужен errors.log.enable=true. Таким образом, errors.tolerance=all без DLQ — это режим «пропусти и потеряй». Полная production-конфигурация: errors.tolerance=all + errors.deadletterqueue.topic.name + errors.deadletterqueue.context.headers.enable=true + errors.log.enable=true.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

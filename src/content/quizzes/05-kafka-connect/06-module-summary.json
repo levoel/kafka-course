@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "05-kafka-connect/06-module-summary",
+  "moduleId": "05-kafka-connect",
+  "_meta": {
+    "idPrefix": "kafka-m05-06",
+    "description": "Use IDs: kafka-m05-06-q1, q2, q3 for MC; kafka-m05-06-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m05-06-q1",
+      "type": "multiple-choice",
+      "question": "Архитектор проектирует конвейер: данные из MySQL (включая DELETE) → Kafka (в Avro-формате через Schema Registry) → Snowflake. Назовите правильную последовательность компонентов.",
+      "options": [
+        {
+          "id": "a",
+          "text": "JDBC Source (mode=timestamp) + JsonConverter → Kafka → JDBC Sink с AvroConverter"
+        },
+        {
+          "id": "b",
+          "text": "Debezium MySQL Connector + AvroConverter → Kafka → Snowflake Sink Connector с AvroConverter; Schema Registry обязателен на обоих концах"
+        },
+        {
+          "id": "c",
+          "text": "FileStreamSource + StringConverter → Kafka → любой sink; Schema Registry не нужен"
+        },
+        {
+          "id": "d",
+          "text": "Kafka Streams приложение, читающее из MySQL напрямую → Kafka → Snowflake Sink"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Для CDC с DELETE необходим Debezium (JDBC Source не видит DELETE). AvroConverter на source connector регистрирует схему в Schema Registry и кодирует каждое сообщение с 5-байтовым заголовком (magic byte + schema ID). Kafka хранит Avro-encoded данные. Snowflake Sink Connector с AvroConverter читает schema ID из заголовка, fetches схему из Schema Registry, десериализует Avro-payload. Schema Registry — обязательная зависимость для обоих концов при использовании Avro. JDBC Source не поддерживает DELETE; FileStreamSource — только для учебных примеров.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m05-06-q2",
+      "type": "multiple-choice",
+      "question": "В production Connect pipeline обнаружено: 0.5% записей из топика имеют некорректную схему Avro. Конвейер должен продолжать работу, плохие записи — изолироваться. Через 2 недели нужно повторить их обработку после исправления схемы. Какая конфигурация оптимальна?",
+      "options": [
+        {
+          "id": "a",
+          "text": "errors.tolerance=all без DLQ — плохие записи молча пропускаются, конвейер не прерывается"
+        },
+        {
+          "id": "b",
+          "text": "errors.tolerance=all + DLQ с retention.ms=2592000000 (30 дней) + context.headers.enable=true — изоляция с сохранением для ретрая"
+        },
+        {
+          "id": "c",
+          "text": "errors.tolerance=none — остановить конвейер при первой ошибке и исправить схему немедленно"
+        },
+        {
+          "id": "d",
+          "text": "Добавить SMT MaskField для поля с некорректной схемой — трансформация предотвратит ошибку десериализации"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Требования: (1) конвейер не прерывается → errors.tolerance=all; (2) плохие записи изолируются → errors.deadletterqueue.topic.name; (3) доступны через 2 недели для ретрая → retention.ms DLQ топика ≥ 14 дней (рекомендуется 30 дней = 2592000000 мс); (4) контекст для диагностики → context.headers.enable=true. Вариант без DLQ (а) теряет данные безвозвратно. Остановка конвейера (в) неприемлема при 0.5% ошибочных записей. SMT (г) выполняется после десериализации — если десериализация уже упала, SMT не поможет.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m05-06-q3",
+      "type": "multiple-choice",
+      "question": "Команда решает: использовать ли SMT для обогащения записей данными из внешнего сервиса (HTTP-запрос к REST API на каждую запись), или Kafka Streams. Что правильно?",
+      "options": [
+        {
+          "id": "a",
+          "text": "SMT — они легковесны и выполняются в task thread, что делает HTTP-вызовы эффективными"
+        },
+        {
+          "id": "b",
+          "text": "Kafka Streams или внешний обработчик — SMT предназначены для stateless трансформаций без внешних вызовов; HTTP на каждую запись создаст узкое место и может привести к потере записей при недоступности API"
+        },
+        {
+          "id": "c",
+          "text": "SMT с predicate — условное применение HTTP-вызова снизит нагрузку"
+        },
+        {
+          "id": "d",
+          "text": "Custom SMT с HTTP-клиентом — Connect поддерживает asyncPoll() для неблокирующих вызовов"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "SMT предназначены для простых per-record трансформаций без внешних зависимостей: переименование полей, маскировка, routing. HTTP-вызов в SMT — антипаттерн: (1) синхронный вызов в task thread блокирует всю очередь обработки; (2) latency HTTP API (~10-100 мс) умножается на throughput (1000 записей/с = 10 000-100 000 мс задержки в очереди); (3) недоступность API = task FAILED или потеря записей. Правильное решение: Kafka Streams с KTable для кеширования данных внешнего сервиса, или отдельный consumer-processor с retry-логикой. asyncPoll() не существует в Connect API.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m05-06-q4",
+      "type": "true-false",
+      "question": "Kafka Connect в standalone режиме автоматически перераспределяет задачи между несколькими процессами при росте нагрузки.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. Standalone режим — это единственный JVM-процесс. Нет возможности запустить несколько standalone-воркеров в кластере: у них нет механизма координации (нет shared group.id через Kafka). Каждый standalone-воркер работает полностью независимо и не знает о существовании других. Автоматическое перераспределение задач (rebalancing) — эксклюзивная функция distributed режима: при добавлении нового воркера с тем же group.id задачи перераспределяются равномерно; при падении воркера его задачи принимают оставшиеся. Standalone — только для разработки и тестирования.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "05-kafka-connect/03-sink-connectors",
+  "moduleId": "05-kafka-connect",
+  "_meta": {
+    "idPrefix": "kafka-m05-03",
+    "description": "Use IDs: kafka-m05-03-q1, q2, q3 for MC; kafka-m05-03-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m05-03-q1",
+      "type": "multiple-choice",
+      "question": "Sink connector вызывает SinkTask.put(records) с пакетом из 200 записей. После записи 150-й записи в PostgreSQL приложение выбрасывает исключение. Offset не закоммичен. Что произойдёт при следующем вызове put()?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Connect продолжит с 151-й записи — он знает, что первые 150 уже записаны"
+        },
+        {
+          "id": "b",
+          "text": "Connect повторно передаст весь пакет из 200 записей — offset не зафиксирован, повторная обработка с at-least-once"
+        },
+        {
+          "id": "c",
+          "text": "Connect пропустит весь пакет и перейдёт к следующим записям"
+        },
+        {
+          "id": "d",
+          "text": "Connect уменьшит размер пакета вдвое и повторит с 1-й записи исходного пакета"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Sink connector реализует at-least-once семантику: commit offset в __consumer_offsets происходит только после успешного возврата из put(). Если put() выбросил исключение — offset не коммитится. При следующем вызове Consumer снова вернёт те же 200 записей с того же offset. Connect не отслеживает частичный прогресс внутри пакета — put() рассматривается как атомарная операция. Решение для идемпотентности: insert.mode=upsert, чтобы повторная запись тех же строк не создавала дубликатов.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m05-03-q2",
+      "type": "multiple-choice",
+      "question": "S3 Sink Connector настроен с flush.size=1000 и TimeBasedPartitioner с path.format='year=YYYY/month=MM/day=dd'. В 23:59 накоплено 800 записей, в 00:00 наступает новый день. Что произойдёт?",
+      "options": [
+        {
+          "id": "a",
+          "text": "S3 Sink подождёт ещё 200 записей до следующего дня и создаст один файл в директории нового дня"
+        },
+        {
+          "id": "b",
+          "text": "S3 Sink создаст файл с 800 записями в директории старого дня при смене временного раздела, затем начнёт новый файл в директории нового дня"
+        },
+        {
+          "id": "c",
+          "text": "S3 Sink создаст один файл, разделённый между двумя директориями — 800 записей в year=2024/month=01/day=31 и 0 в day=01"
+        },
+        {
+          "id": "d",
+          "text": "Файл не создастся — flush.size=1000 означает, что файл создаётся только при накоплении ровно 1000 записей"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "TimeBasedPartitioner отслеживает временные границы раздела. При смене дня (00:00) коннектор фиксирует, что раздел изменился, и немедленно создаёт файл с накопленными 800 записями в директории старого дня (year=2024/month=01/day=31). Это происходит независимо от того, достигнут ли flush.size. После этого начинается новый буфер для нового дня. S3 Sink создаёт файл при любом из условий: достигнут flush.size ИЛИ истёк rotate.interval.ms ИЛИ сменился временной раздел. Это гарантирует, что данные одного дня не попадут в директорию другого дня.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m05-03-q3",
+      "type": "multiple-choice",
+      "question": "JDBC Sink Connector с insert.mode=upsert, pk.mode=record_key, pk.fields=order_id обрабатывает одну и ту же запись дважды из-за at-least-once доставки. Какой SQL выполнится при втором вхождении?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Второй INSERT создаст дубликат строки — upsert не гарантирует идемпотентность"
+        },
+        {
+          "id": "b",
+          "text": "INSERT ... ON CONFLICT (order_id) DO UPDATE SET ... — строка обновляется теми же значениями, дубликата нет"
+        },
+        {
+          "id": "c",
+          "text": "Второй INSERT завершится с ошибкой UNIQUE VIOLATION — коннектор перейдёт в FAILED"
+        },
+        {
+          "id": "d",
+          "text": "Connect обнаружит дубликат через offset tracking и автоматически пропустит вторую запись"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "insert.mode=upsert генерирует INSERT ... ON CONFLICT DO UPDATE (PostgreSQL) или аналогичный синтаксис для других баз. При pk.mode=record_key, pk.fields=order_id: если строка с order_id=X уже существует — UPDATE заменяет её теми же (или новыми) данными. Если не существует — INSERT создаёт. Результат идемпотентен: повторная запись одной и той же записи оставляет таблицу в том же состоянии. Connect не отслеживает дубликаты через offset — он полагается на идемпотентность самой операции записи. Именно поэтому upsert + PK = рекомендованная конфигурация для production JDBC Sink.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m05-03-q4",
+      "type": "true-false",
+      "question": "Sink connector хранит consumer offset в Kafka-топике __consumer_offsets, так же как и обычные Kafka-консьюмеры.",
+      "correctAnswer": "true",
+      "explanation": "Верно. Sink connector под капотом использует стандартный Kafka Consumer с group.id равным имени коннектора. Offset потребления хранится в __consumer_offsets — стандартном Kafka-топике для всех consumer groups. Это означает: (1) инструменты мониторинга consumer lag (Kafka UI, Grafana + kafka_exporter, kafka-consumer-groups.sh) работают для sink коннекторов из коробки; (2) при перезапуске задача продолжит с последнего закоммиченного offset, как обычный consumer. Это отличает sink от source: source хранит свои позиции в connect-offsets (не в __consumer_offsets).",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

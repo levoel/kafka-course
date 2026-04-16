@@ -1,0 +1,129 @@
+{
+  "lessonSlug": "05-kafka-connect/04-single-message-transforms",
+  "moduleId": "05-kafka-connect",
+  "_meta": {
+    "idPrefix": "kafka-m05-04",
+    "description": "Use IDs: kafka-m05-04-q1, q2, q3 for MC; kafka-m05-04-q4 for TF; kafka-m05-04-code-1 for code challenge"
+  },
+  "questions": [
+    {
+      "id": "kafka-m05-04-q1",
+      "type": "multiple-choice",
+      "question": "В какой момент SMT выполняются в pipeline source connector?",
+      "options": [
+        {
+          "id": "a",
+          "text": "После записи в Kafka — SMT применяются при чтении потребителем"
+        },
+        {
+          "id": "b",
+          "text": "В потоке задачи Connect Worker, после poll() и до сериализации converter — запись трансформируется перед публикацией в Kafka"
+        },
+        {
+          "id": "c",
+          "text": "В Kafka Broker при получении записи от producer"
+        },
+        {
+          "id": "d",
+          "text": "В отдельном процессе трансформации, независимом от Connect Worker"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "SMT выполняются синхронно в потоке задачи (task thread) Connect Worker. Для source connector: (1) SourceTask.poll() возвращает List<SourceRecord>; (2) Worker применяет chain SMT к каждой записи; (3) Converter сериализует трансформированную запись; (4) Producer публикует в Kafka. SMT видят запись до сериализации — это позволяет работать со структурированными полями, а не с байтами. Для sink connector SMT выполняются после десериализации и до SinkTask.put(). SMT — это синхронная per-record операция без внешних вызовов.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m05-04-q2",
+      "type": "multiple-choice",
+      "question": "Нужно направлять события в топики по дате: события за 15 января → events-20240115, за 16 января → events-20240116. Исходный топик events. Какой SMT использовать и какова конфигурация?",
+      "options": [
+        {
+          "id": "a",
+          "text": "RegexRouter: regex=events, replacement=events-${date} — использует текущую дату сервера"
+        },
+        {
+          "id": "b",
+          "text": "TimestampRouter: topic.format=${topic}-${timestamp}, timestamp.format=yyyyMMdd — формирует имя топика из timestamp сообщения"
+        },
+        {
+          "id": "c",
+          "text": "Filter + TopicNameMatches predicate — фильтрует по дате и перенаправляет"
+        },
+        {
+          "id": "d",
+          "text": "InsertField с topic.field — добавляет поле с именем целевого топика, который producer использует"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "TimestampRouter изменяет имя целевого топика на основе timestamp самого сообщения (не времени сервера). Конфигурация: transforms.route.type=org.apache.kafka.connect.transforms.TimestampRouter, transforms.route.topic.format=${topic}-${timestamp}, transforms.route.timestamp.format=yyyyMMdd. Для сообщения с timestamp 2024-01-15T10:30:00: topic='events', timestamp='20240115' → целевой топик 'events-20240115'. При смене дня записи автоматически направляются в новый топик. S3 Sink с TimeBasedPartitioner — альтернатива на уровне sink, а не routing в Kafka.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m05-04-q3",
+      "type": "multiple-choice",
+      "question": "Цепочка SMT: transforms=addCreatedAt,maskPII. addCreatedAt добавляет поле created_at. maskPII маскирует поля ssn,credit_card,created_at. Что произойдёт с полем created_at в итоговой записи?",
+      "options": [
+        {
+          "id": "a",
+          "text": "created_at не будет замаскировано — maskPII обрабатывает только исходные поля, а не добавленные другими SMT"
+        },
+        {
+          "id": "b",
+          "text": "created_at будет добавлено (addCreatedAt) и затем замаскировано (maskPII) — цепочка обеспечивает последовательную обработку"
+        },
+        {
+          "id": "c",
+          "text": "Конфигурация некорректна — нельзя маскировать поле, которое добавляет другой SMT"
+        },
+        {
+          "id": "d",
+          "text": "Порядок выполнения случаен — результат непредсказуем"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "SMT выполняются строго слева направо. Запись последовательно проходит через каждый SMT: (1) addCreatedAt получает исходную запись и возвращает новую запись с добавленным полем created_at; (2) maskPII получает запись уже с created_at и маскирует поля ssn, credit_card, created_at. Итог: created_at присутствует в записи, но замаскировано. Если бы цепочка была обратной (maskPII,addCreatedAt), то maskPII не нашёл бы поле created_at (оно ещё не добавлено) и не замаскировал бы его, а addCreatedAt добавил бы поле уже после маскировки.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m05-04-q4",
+      "type": "true-false",
+      "question": "SMT в Kafka Connect могут выполнять join между двумя топиками — например, обогащать запись из topic A данными из topic B через встроенный механизм предикатов.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. SMT — это stateless, per-record трансформации. Каждая запись обрабатывается независимо, без доступа к другим записям или топикам. Join требует состояния: нужно хранить данные из одного топика, пока не придут соответствующие данные из другого. SMT не имеют state store. Предикаты позволяют применять SMT условно (к записям, соответствующим условию), но не обеспечивают доступ к данным других топиков. Для join, агрегации и windowing операций используйте Kafka Streams (KStream-KTable join, windowed join) или ksqlDB (JOIN в потоковых запросах).",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m05-04-code-1",
+      "type": "code-challenge",
+      "question": "Напишите JSON-конфигурацию для connector с цепочкой из двух SMT: (1) InsertField добавляет поле 'environment' со значением 'production', (2) MaskField маскирует поле 'credit_card'. Укажите connector.class (используйте io.confluent.connect.jdbc.JdbcSourceConnector), topics (используйте 'payments'), и transforms в правильном порядке. Суффикс $Value обязателен для обоих SMT.",
+      "language": "json",
+      "starterCode": "{\n  \"name\": \"payments-source\",\n  \"config\": {\n    \"connector.class\": \"io.confluent.connect.jdbc.JdbcSourceConnector\",\n    \"topics\": \"payments\",\n    \"transforms\": \"TODO: укажите два имени через запятую\",\n    \"transforms.TODO_SMT1.type\": \"TODO: тип InsertField\",\n    \"transforms.TODO_SMT1.static.field\": \"TODO\",\n    \"transforms.TODO_SMT1.static.value\": \"TODO\",\n    \"transforms.TODO_SMT2.type\": \"TODO: тип MaskField\",\n    \"transforms.TODO_SMT2.fields\": \"TODO\"\n  }\n}",
+      "solutionCode": "{\n  \"name\": \"payments-source\",\n  \"config\": {\n    \"connector.class\": \"io.confluent.connect.jdbc.JdbcSourceConnector\",\n    \"topics\": \"payments\",\n    \"transforms\": \"addEnv,maskPII\",\n    \"transforms.addEnv.type\": \"org.apache.kafka.connect.transforms.InsertField$Value\",\n    \"transforms.addEnv.static.field\": \"environment\",\n    \"transforms.addEnv.static.value\": \"production\",\n    \"transforms.maskPII.type\": \"org.apache.kafka.connect.transforms.MaskField$Value\",\n    \"transforms.maskPII.fields\": \"credit_card\"\n  }\n}",
+      "testCases": [
+        {
+          "id": "tc1",
+          "description": "Конфигурация содержит InsertField SMT",
+          "expectedOutput": "InsertField",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc2",
+          "description": "Конфигурация содержит MaskField SMT",
+          "expectedOutput": "MaskField",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc3",
+          "description": "Значение static.value равно 'production'",
+          "expectedOutput": "production",
+          "matchMode": "contains",
+          "hidden": true
+        }
+      ],
+      "explanation": "Цепочка SMT задаётся параметром transforms через запятую: transforms=addEnv,maskPII. Порядок определяет последовательность: addEnv выполняется первым и добавляет поле environment=production; затем maskPII маскирует поле credit_card. Полные имена классов: InsertField$Value и MaskField$Value — суффикс $Value указывает, что трансформация применяется к value сообщения (не к key). Каждый SMT получает уникальное логическое имя (addEnv, maskPII), которое используется как префикс для его параметров.",
+      "bloomLevel": "applied"
+    }
+  ]
+}
