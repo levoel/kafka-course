@@ -1,0 +1,91 @@
+{
+  "lessonSlug": "13-capstone/02-solution-walkthrough",
+  "moduleId": "13-capstone",
+  "_meta": {
+    "idPrefix": "kafka-13-02",
+    "description": "Quizzes for the solution walkthrough lesson. Tests understanding of orchestration vs choreography trade-offs, Streams primitives, and MM2 topology selection."
+  },
+  "questions": [
+    {
+      "id": "kafka-13-02-q1",
+      "type": "multiple-choice",
+      "question": "Эталонное решение capstone выбирает оркестрационную сагу вместо хореографической. Цепочка выполнения заказа охватывает 4 сервиса: Payment Service, Inventory Service, Notification Service, Order Service. Какое из следующих утверждений является основным обоснованием выбора оркестрации при данном количестве сервисов?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Оркестрация всегда быстрее хореографии за счёт меньшего числа Kafka-сообщений"
+        },
+        {
+          "id": "b",
+          "text": "При 4+ сервисах логика компенсации при хореографии распределяется по всем сервисам: каждый должен 'знать' о событиях других для инициации rollback. Оркестрация централизует эту логику в одном компоненте — оркестраторе, что упрощает debugging, добавление шагов и реализацию компенсирующих транзакций"
+        },
+        {
+          "id": "c",
+          "text": "Хореография не поддерживает компенсирующие транзакции — это технологическое ограничение Kafka"
+        },
+        {
+          "id": "d",
+          "text": "Оркестрация обязательна при использовании exactly-once semantics — хореография с транзакциями не совместима"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Ключевое преимущество оркестрации при 4+ сервисах — централизованная компенсация: при сбое на шаге 3 (Inventory Service не может зарезервировать товар), оркестратор знает полное состояние саги и может отправить команду RefundPayment в Payment Service. При хореографии Inventory Service должен напрямую публиковать InventoryFailed событие, которое Payment Service должен 'знать как обработать' — это создаёт неявные зависимости между сервисами. При 2-3 сервисах хореография проще и предпочтительнее (меньше инфраструктуры). При 4+ сервисах: оркестрация даёт (1) ясный flow в одном месте, (2) простое добавление нового шага (изменить только оркестратор), (3) видимость прогресса через saga.order-fulfillment.state топик. Вариант A неверен: оркестрация использует больше Kafka-сообщений (команды + ответы). Вариант C неверен: хореография поддерживает компенсацию через compensation events.",
+      "bloomLevel": "analytical",
+      "studyHint": "Модуль 12: Design Patterns — раздел 'Orchestration vs Choreography trade-offs'"
+    },
+    {
+      "id": "kafka-13-02-q2",
+      "type": "multiple-choice",
+      "question": "Kafka Streams topology в эталонном решении выполняет JOIN потока orders.order.created с данными клиентов для создания обогащённых заказов. Данные клиентов читаются из топика customers.customer.profile. Какой Kafka Streams примитив используется для представления таблицы клиентов, обеспечивающей lookup при JOIN?",
+      "options": [
+        {
+          "id": "a",
+          "text": "KStream: данные клиентов — это поток событий изменения профиля, JOIN выполняется как stream-stream join"
+        },
+        {
+          "id": "b",
+          "text": "KTable: changelog топик customers.customer.profile материализуется как KTable — снепшот текущего профиля клиента по ключу customerId. JOIN: KStream(orders) ⋈ KTable(customers) — stream-table join"
+        },
+        {
+          "id": "c",
+          "text": "GlobalKTable с bootstrap.servers отдельного кластера клиентов"
+        },
+        {
+          "id": "d",
+          "text": "StateStore с ручным get() вызовом внутри map() оператора"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "KTable — правильный примитив для lookup данных в Kafka Streams: (1) KTable материализует changelog топик как таблицу с последним значением per key. customers.customer.profile с log.cleanup.policy=compact идеально подходит: compact topic хранит только последний профиль per customerId. (2) Stream-Table JOIN: KStream(orders) JOIN KTable(customers). Семантика: для каждого события в orders найти текущий профиль клиента в customers по совпадающему ключу. (3) Re-keying необходим: исходный orders.order.created имеет ключ=orderId, KTable(customers) имеет ключ=customerId. Перед JOIN нужен selectKey(order -> order.getCustomerId()). Вариант A (stream-stream join) потребовал бы оба стрима иметь одинаковый ключ и использовал бы JoinWindows — корректно для временных joins, но избыточно для справочных данных. GlobalKTable (вариант C) тоже корректен технически, но загружает ВСЕ данные на КАЖДЫЙ instance — масштабируется хуже при большой таблице клиентов.",
+      "bloomLevel": "applied",
+      "studyHint": "Модуль 07: Kafka Streams — раздел 'KTable: snapshot table from changelog topic'"
+    },
+    {
+      "id": "kafka-13-02-q3",
+      "type": "multiple-choice",
+      "question": "Эталонное решение capstone выбирает active-passive топологию MirrorMaker 2. При каком изменении требований active-active была бы более подходящим выбором?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Если требование RPO снижается с 30 секунд до 10 секунд — active-active обеспечивает лучший RPO"
+        },
+        {
+          "id": "b",
+          "text": "Если компания открывает офисы в двух географических регионах (EU и US), и каждый регион обслуживает своих клиентов независимо: EU-клиенты пишут в EU-кластер, US-клиенты — в US-кластер. Требуется: zero failover time для каждого региона, оба DC полностью активны одновременно"
+        },
+        {
+          "id": "c",
+          "text": "Если RTO требование меняется с 10 минут до 30 минут — active-active облегчает failover"
+        },
+        {
+          "id": "d",
+          "text": "Если число топиков увеличивается с 10 до 100 — active-active лучше масштабируется"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Active-active топология оправдана при следующих условиях: (1) Оба DC равнозначно обслуживают production traffic одновременно — нет 'главного' и 'резервного'. (2) Требуется near-zero failover time: при выходе одного региона трафик перенаправляется на второй без ожидания восстановления. (3) Приложение спроектировано с учётом active-active: partition affinity (EU-ключи в EU-кластере, US-ключи в US-кластере) или IdentityReplicationPolicy для прозрачного доступа. Важные требования к active-active: IdentityReplicationPolicy (одинаковые имена топиков), исключение MM2 internal topics из реплицирования, управление конфликтами при записи с обеих сторон. Вариант A ошибочен: active-passive с sync.group.offsets.enabled и emit.checkpoints.interval=10s достигает RPO~15 сек (хорошо укладывается в 30 сек), active-active не улучшает RPO — оба режима имеют схожую replication latency.",
+      "bloomLevel": "analytical",
+      "studyHint": "Модуль 11: Multi-DC — раздел 'Active-Active vs Active-Passive: когда что выбирать'"
+    }
+  ]
+}

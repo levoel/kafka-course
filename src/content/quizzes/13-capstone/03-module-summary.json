@@ -1,0 +1,91 @@
+{
+  "lessonSlug": "13-capstone/03-module-summary",
+  "moduleId": "13-capstone",
+  "_meta": {
+    "idPrefix": "kafka-13-03",
+    "description": "Quizzes for the course conclusion lesson. Synthesises core principles across the full course."
+  },
+  "questions": [
+    {
+      "id": "kafka-13-03-q1",
+      "type": "multiple-choice",
+      "question": "В микросервисной архитектуре с Kafka важно, что каждый микросервис имеет собственную consumer group. Какой единственный наиболее важный принцип для Kafka-consumers в микросервисной архитектуре, нарушение которого приводит к серьёзным производственным проблемам?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Всегда использовать auto.offset.commit=true для автоматического подтверждения офсетов без дополнительного кода"
+        },
+        {
+          "id": "b",
+          "text": "Каждый логически независимый сервис должен иметь уникальное имя consumer group. Два сервиса с одинаковым group.id будут делить партиции — каждый будет получать только часть сообщений, нарушая полноту обработки"
+        },
+        {
+          "id": "c",
+          "text": "Consumer всегда должен читать только один топик — подписка на несколько топиков приводит к race conditions"
+        },
+        {
+          "id": "d",
+          "text": "max.poll.interval.ms должен быть не менее 5 минут для всех consumers в production"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Уникальность group.id — фундаментальный принцип: Kafka балансирует партиции между consumers с одинаковым group.id. Если два логически независимых сервиса используют один group.id: (1) Сервис A и Сервис B получают по половине партиций каждый. (2) Каждое сообщение обрабатывается только одним из сервисов — нарушение семантики fan-out. (3) При правильной архитектуре два разных сервиса должны ОБА получить все сообщения — каждый со своим group.id. Пример из capstone: payment-service и notification-service оба читают orders.order.created, но с разными группами payment-processor и notification-processor соответственно. auto.offset.commit=true (вариант A) — не главный принцип, а выбор между auto и manual commit зависит от сценария. Нарушение group.id uniqueness — классическая ошибка начинающих, ломающая всю систему.",
+      "bloomLevel": "conceptual",
+      "studyHint": "Модуль 03: Consumers — раздел 'Consumer Groups: partition assignment semantics'"
+    },
+    {
+      "id": "kafka-13-03-q2",
+      "type": "multiple-choice",
+      "question": "На этапе запуска нового Kafka-кластера для production у вас есть ресурсы только на настройку двух из трёх аспектов: безопасность (SASL + ACL), мониторинг (JMX + Prometheus + алерты), управление схемами (Schema Registry + Avro). Какой из трёх аспектов наиболее критично настроить ПЕРВЫМ, и почему?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Schema Registry первым: несовместимые схемы приведут к потере данных, которую невозможно исправить ретроспективно"
+        },
+        {
+          "id": "b",
+          "text": "Мониторинг первым: без метрик невозможно понять, работает ли кластер правильно. Безопасность и схемы можно добавить позже"
+        },
+        {
+          "id": "c",
+          "text": "Безопасность первым: кластер без аутентификации и авторизации в production-среде представляет немедленный риск: любой клиент в сети может читать и писать любые данные. Исправить постфактум — сложная rolling-миграция с downtime risk"
+        },
+        {
+          "id": "d",
+          "text": "Все три аспекта равнозначны — нет приоритизации между ними"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Безопасность имеет наивысший приоритет при запуске по следующим причинам: (1) Необратимый риск: кластер без SASL в production-сети может быть немедленно использован любым внутренним инструментом или compromised сервисом. Данные, записанные до включения авторизации, не защищены. (2) Сложность ретроспективного включения: миграция с PLAINTEXT на SASL_SSL требует rolling restart всех брокеров, обновления всех client конфигурций, risk period между изменениями. Schema Registry и мониторинг добавляются значительно проще без downtime. (3) Compliance: большинство production систем требуют TLS + auth перед первой записью production данных. Мониторинг (вариант B) действительно критичен — но начать со сбора метрик можно позже, данные в лог будут накапливаться. Schema Registry (вариант A) важен для backward compatibility — но первые топики можно создать с JSON и мигрировать на Avro позже, пусть и с сложностью. Безопасность — единственный аспект, где 'добавить позже' означает неприемлемый production risk.",
+      "bloomLevel": "analytical",
+      "studyHint": "Модуль 09: Security — раздел 'Production security checklist'. Модуль 10: Production Ops"
+    },
+    {
+      "id": "kafka-13-03-q3",
+      "type": "multiple-choice",
+      "question": "Требование capstone: 'audit trail — все изменения состояния заказа должны быть восстановимы'. Какая Kafka-функция и конфигурация топика напрямую обеспечивает этот audit trail?",
+      "options": [
+        {
+          "id": "a",
+          "text": "kafka-consumer-groups.sh --describe: показывает историю consumer offset commits, из которой можно восстановить все события"
+        },
+        {
+          "id": "b",
+          "text": "Kafka authorizer log (kafka.authorizer.logger): записывает все операции чтения и записи — полный audit trail"
+        },
+        {
+          "id": "c",
+          "text": "Kafka log retention с log.retention.ms=-1 (infinite) или достаточно длительным retention для топика orders.order.created. Поскольку Kafka хранит все записи до истечения retention, полная история событий восстанавливается replay-ем из offset 0. Это и есть Event Sourcing: append-only лог как источник истины"
+        },
+        {
+          "id": "d",
+          "text": "Transactional producer с transactional.id: транзакционный лог Kafka содержит все изменения"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Audit trail в Kafka реализуется через append-only природу Kafka лога + retention конфигурацию: (1) Kafka хранит все записи до истечения retention.ms или достижения retention.bytes. При log.retention.ms=-1 — хранение бесконечно. (2) Consumer может читать с offset=0 (auto.offset.reset=earliest) и получить ВСЕХ событий с начала истории. (3) Это и есть Event Sourcing из Модуля 12: каждое изменение состояния заказа = отдельное событие в append-only логе. Запись нельзя изменить — только добавить новое событие. (4) Восстановление истории = replay из offset 0 по нужному partition. Вариант B (authorizer log) — это security audit log (кто имел доступ), а не бизнес audit trail (что произошло с заказом). Вариант A (consumer groups --describe) показывает только текущие offsets, не историю. Вариант D (transactional producer) обеспечивает atomicity записи, не хранение истории.",
+      "bloomLevel": "applied",
+      "studyHint": "Модуль 04: Kafka Internals — раздел 'Log retention and compaction'. Модуль 12: Event Sourcing"
+    }
+  ]
+}

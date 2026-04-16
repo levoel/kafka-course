@@ -1,0 +1,417 @@
+{
+  "lessonSlug": "13-capstone/_exam",
+  "moduleId": "13-capstone",
+  "examTitle": "Capstone: Apache Kafka Deep-Dive",
+  "passThreshold": 70,
+  "_meta": {
+    "idPrefix": "kafka-13-exam",
+    "description": "Synthesis exam covering all 13 modules. 15 questions: 5 applied, 10 analytical. Scenario-based with production context. Module distribution: 01-12 (one per module) + 3 synthesis questions spanning multiple modules."
+  },
+  "questions": [
+    {
+      "id": "kafka-13-exam-q1",
+      "type": "multiple-choice",
+      "question": "[Модуль 01: Архитектура] Kafka 4.0 KRaft кластер из 5 брокеров: broker-1 настроен как KAFKA_PROCESS_ROLES=controller (только контроллер), broker-2 через broker-5 — только брокеры. Кворум KRaft требует большинства контроллеров для election. После аварийного отключения broker-1 — единственного контроллера — что произойдёт с кластером?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Один из broker-2..5 автоматически принимает роль контроллера через leader election в KRaft кворуме"
+        },
+        {
+          "id": "b",
+          "text": "Кластер продолжает работать без контроллера: брокеры обрабатывают produce/consume запросы, но новые Leader elections и создание топиков невозможны"
+        },
+        {
+          "id": "c",
+          "text": "Кластер полностью недоступен: без контроллера ни один produce/consume запрос не обрабатывается"
+        },
+        {
+          "id": "d",
+          "text": "Кластер теряет возможность управления метаданными (Leader Elections, TopicCreation), но существующие partition leaders продолжают обрабатывать produce/consume. Broker-2..5 не могут стать контроллерами — они не входят в KAFKA_CONTROLLER_QUORUM_VOTERS. Recovery только через перезапуск broker-1"
+        }
+      ],
+      "correctAnswer": "d",
+      "explanation": "KRaft кворум работает только с брокерами, настроенными как controller (KAFKA_PROCESS_ROLES включает 'controller'). Брокеры с ролью только 'broker' не участвуют в controller election. При отказе единственного контроллера: существующие partition leaders продолжают обрабатывать I/O (produce/consume), но metadata operations (Leader Elections при отказе брокера, создание/удаление топиков, изменение конфигурации) заморожены. Production best practice: минимум 3 контроллера в кворуме для fault tolerance (1 может отказать и кворум сохраняется). Вариант A был бы верен, если broker-2..5 тоже имели роль controller в KAFKA_CONTROLLER_QUORUM_VOTERS.",
+      "bloomLevel": "analytical",
+      "studyHint": "Модуль 01: Kafka Architecture — раздел 'KRaft Controller Quorum'"
+    },
+    {
+      "id": "kafka-13-exam-q2",
+      "type": "multiple-choice",
+      "question": "[Модуль 02: Producers] Высоконагруженный producer отправляет телеметрию с 50 000 устройств IoT: сообщения 200 байт, частота 500 сообщений/сек per device. Требование: максимальный throughput, допустимая задержка до 5 секунд. Какая комбинация конфигурации producer оптимальна?",
+      "options": [
+        {
+          "id": "a",
+          "text": "batch.size=16384, linger.ms=0, acks=1, compression.type=none. Минимальная задержка — стандартный throughput"
+        },
+        {
+          "id": "b",
+          "text": "batch.size=1048576 (1 MB), linger.ms=1000, acks=1, compression.type=lz4, buffer.memory=67108864 (64 MB). Большой batch: 500 * 50 000 * 200 = 5 GB/s send rate — группируем в 1 MB batch за ~1 сек. lz4 снижает сетевую нагрузку в 3-5x. acks=1 (не all) — допустим для телеметрии"
+        },
+        {
+          "id": "c",
+          "text": "batch.size=262144 (256 KB), linger.ms=100, acks=all, min.insync.replicas=3, compression.type=zstd"
+        },
+        {
+          "id": "d",
+          "text": "batch.size=1048576, linger.ms=5000, acks=0, compression.type=lz4. Максимальный throughput: fire-and-forget без подтверждений"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Для максимального throughput при допустимой задержке 5 сек: (1) batch.size=1 MB: при 50K devices * 500 msg/s * 200 bytes = 5 GB/s суммарно — producer должен агрессивно batching. Большой batch = меньше Kafka requests per second = выше throughput. (2) linger.ms=1000 мс: ждать до заполнения batch или 1 секунды. Это значительно ниже допустимого SLA 5 секунд. (3) acks=1: для телеметрии допустим — потеря одного сообщения при отказе leader не критична (IoT данные избыточны). acks=all увеличивал бы latency. (4) lz4: оптимальный ratio/speed для throughput. zstd лучше ratio, но медленнее при высокой частоте. Вариант D (acks=0) не рекомендуется: producer не знает об ошибках, буфер может переполниться при network issues без предупреждения.",
+      "bloomLevel": "applied",
+      "studyHint": "Модуль 02: Producers — раздел 'Throughput vs Latency producer configuration'"
+    },
+    {
+      "id": "kafka-13-exam-q3",
+      "type": "multiple-choice",
+      "question": "[Модуль 03: Consumers] Consumer group 'analytics-group' читает топик orders.order.enriched (12 партиций). Grafana показывает: records-lag-max стабильно растёт до 500 000 за 30 минут, затем резко падает до 0, затем снова растёт. Текущий размер группы: 4 consumer instances. records-consumed-rate = 80 000 msg/min. Что происходит и как исправить?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Consumer instances исчерпывают память: при lag 500K records буферизуются в памяти. Решение: уменьшить max.partition.fetch.bytes"
+        },
+        {
+          "id": "b",
+          "text": "4 consumers при 12 партициях: каждый consumer обрабатывает 3 партиции. При пиковой нагрузке produce rate > consume rate — lag растёт. При снижении нагрузки — догоняет. Это нормальное поведение при правильной утилизации"
+        },
+        {
+          "id": "c",
+          "text": "Consumer instances регулярно падают: max.poll.interval.ms превышается при обработке больших батчей — consumer исключается из группы (rebalance), lag накапливается, новый consumer подхватывает и быстро обрабатывает накопленное. Решение: увеличить max.poll.interval.ms или уменьшить max.poll.records"
+        },
+        {
+          "id": "d",
+          "text": "Топик заполнен данными за несколько дней — один consumer в группе читает с beginning. Остальные 3 ждут rebalance"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Паттерн 'lag растёт -> резко падает до 0 -> снова растёт' — классический симптом consumer timeout + rebalance loop: (1) Consumer превышает max.poll.interval.ms (default 5 min) при обработке батча. (2) Broker исключает его из группы и запускает rebalance. (3) Другой consumer получает его партиции и быстро обрабатывает накопленный lag (lag падает до 0). (4) Тот же consumer снова присоединяется, снова получает нагрузку, снова таймаут. Диагностика: kafka-consumer-groups.sh --describe покажет регулярные rebalance. Решение: (1) Уменьшить max.poll.records (меньше работы per poll). (2) Увеличить max.poll.interval.ms если обработка legitimately долгая. (3) Оптимизировать бизнес-логику в consumer. Вариант B неверен: нормальное поведение lag не даёт резких падений до нуля без видимой причины.",
+      "bloomLevel": "analytical",
+      "studyHint": "Модуль 03: Consumers — раздел 'Consumer liveness: max.poll.interval.ms'"
+    },
+    {
+      "id": "kafka-13-exam-q4",
+      "type": "multiple-choice",
+      "question": "[Модуль 04: Internals] Топик audit-events используется для хранения полной истории изменений. Требования: (1) хранить ТОЛЬКО последнее состояние per entity (для snapshots), (2) при обновлении entity старые записи должны быть удалены. Текущая конфигурация: log.cleanup.policy=delete, log.retention.ms=604800000 (7 дней). Как изменить конфигурацию?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Уменьшить log.retention.ms=86400000 (1 день): более частая очистка удалит старые записи быстрее"
+        },
+        {
+          "id": "b",
+          "text": "Изменить log.cleanup.policy=compact: log compaction удаляет старые записи с тем же ключом, сохраняя только последнюю. Kafka cleaner периодически проходит по сегментам и удаляет дубли по ключу. Tombstone (null value) удаляет ключ полностью"
+        },
+        {
+          "id": "c",
+          "text": "Установить log.cleanup.policy=delete,compact: обе политики одновременно дадут лучший результат"
+        },
+        {
+          "id": "d",
+          "text": "Использовать log.retention.bytes для ограничения размера топика"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "log.cleanup.policy=compact — правильный выбор для snapshot-топиков: (1) Log compaction: Kafka cleaner периодически сканирует log segments и удаляет записи, если для того же ключа есть более поздняя запись. Результат: для каждого ключа (entity ID) в топике остаётся только последняя запись. (2) Tombstone: producer отправляет null value — после compaction эта запись удаляется (entity полностью удалён из снепшота). (3) Гарантия: хотя бы одна запись per key сохраняется всегда (последняя). Вариант C (delete,compact вместе) — валидная конфигурация в Kafka: сначала применяется compaction (удаление старых per key), затем delete (удаление по retention). Подходит для сценариев где нужно и очистить дубли, и не хранить вечно. Для чистого 'только последнее состояние' без time-based expiry — только compact. Вариант A (уменьшить retention) не решает проблему: при delete policy ВСЕ записи старше retention удаляются, включая единственную актуальную версию для старых entities.",
+      "bloomLevel": "applied",
+      "studyHint": "Модуль 04: Kafka Internals — раздел 'Log compaction: how it works'"
+    },
+    {
+      "id": "kafka-13-exam-q5",
+      "type": "multiple-choice",
+      "question": "[Модуль 05: Kafka Connect] Команда хочет захватывать изменения из таблицы orders в PostgreSQL и реплицировать их в Kafka для real-time аналитики. Таблица: 50M rows, 5000 INSERT/UPDATE/DELETE в секунду. Какой подход к Kafka Connect является правильным для данного сценария, и почему JDBC Source connector — недостаточен?",
+      "options": [
+        {
+          "id": "a",
+          "text": "JDBC Source Connector с mode=timestamp+incrementing: стандартный способ для всех сценариев с PostgreSQL"
+        },
+        {
+          "id": "b",
+          "text": "Debezium PostgreSQL Source Connector (CDC через WAL): захватывает INSERT/UPDATE/DELETE события из PostgreSQL Write-Ahead Log. JDBC Source с polling не захватывает DELETE-операции (нет способа обнаружить удалённые строки при опросе). При 5000 ops/s JDBC polling создаёт высокую нагрузку на БД"
+        },
+        {
+          "id": "c",
+          "text": "Kafka Connect JDBC Sink Connector с insert.mode=upsert: репликация в Kafka через sink"
+        },
+        {
+          "id": "d",
+          "text": "Custom Kafka Producer в приложении: надёжнее готовых коннекторов при высокой нагрузке"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Debezium CDC (Change Data Capture) через WAL — правильный выбор для CDC из PostgreSQL: (1) Захватывает ВСЕ операции: INSERT, UPDATE, DELETE. JDBC Source Connector при polling mode=timestamp читает только строки с updated_at > last_poll_time — удалённые строки физически отсутствуют в таблице, их нельзя обнаружить при polling. (2) Near-real-time: Debezium читает из PostgreSQL replication slot (WAL) с latency ~milliseconds. JDBC polling interval минимум несколько секунд. (3) Нагрузка на БД: polling 50M row таблицы каждые секунды — высокая нагрузка. Debezium читает из WAL stream — минимальная нагрузка. (4) Полная история: WAL содержит before/after state каждой операции — Debezium передаёт оба снимка. Вариант C (JDBC Sink) направление неверное: Sink читает из Kafka и пишет в DB, не из DB в Kafka.",
+      "bloomLevel": "analytical",
+      "studyHint": "Модуль 05: Kafka Connect — раздел 'Debezium CDC vs JDBC polling'"
+    },
+    {
+      "id": "kafka-13-exam-q6",
+      "type": "multiple-choice",
+      "question": "[Модуль 06: Schema Registry] Producer публикует в топик orders.order.created схему OrderCreated v1 (поля: orderId, customerId, amount). Команда хочет добавить поле shippingAddress (строка). Consumer-сервисы не могут обновиться одновременно с producer. Какая стратегия эволюции схемы корректна при BACKWARD compatibility, и что произойдёт с consumers на старой версии?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Добавить обязательное поле shippingAddress без default value. Consumers на v1 продолжат работать, игнорируя неизвестные поля"
+        },
+        {
+          "id": "b",
+          "text": "Добавить поле shippingAddress с default value (пустая строка или null). BACKWARD compatibility: новая схема v2 может читать данные, написанные producer с v1 (отсутствующее поле = default value). Старые consumers на v1 читают записи v2: Avro десериализация — неизвестные поля игнорируются по умолчанию. Нет coordination между producer upgrade и consumer upgrade"
+        },
+        {
+          "id": "c",
+          "text": "Создать новый топик orders.order.created.v2 и публиковать в него с новой схемой. Старый топик сохраняется для legacy consumers"
+        },
+        {
+          "id": "d",
+          "text": "Удалить поле customerId и добавить shippingAddress — это breaking change, требует одновременного обновления всех сервисов"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "BACKWARD compatibility в Avro Schema Registry: (1) Правило: новый reader (consumer с новой схемой) может читать данные, написанные old writer (producer со старой схемой). (2) Добавление поля с default value — backward compatible: если данные написаны со старой схемой (без shippingAddress), новый consumer использует default value для отсутствующего поля. (3) Старые consumers (v1 schema) при чтении записей с v2: Avro игнорирует неизвестные поля при десериализации — backward compatibility обеспечивает безопасное независимое обновление. (4) Schema Registry rejectable: если попытаться зарегистрировать схему с обязательным полем без default — Registry вернёт 409 Conflict (нарушение BACKWARD compatibility). Вариант A (без default) — Schema Registry с BACKWARD compatibility отклонит регистрацию. Вариант C (новый топик) — анти-паттерн: дублирует инфраструктуру, усложняет consumers.",
+      "bloomLevel": "analytical",
+      "studyHint": "Модуль 06: Schema Registry — раздел 'Compatibility modes: BACKWARD'"
+    },
+    {
+      "id": "kafka-13-exam-q7",
+      "type": "multiple-choice",
+      "question": "[Модуль 07: Kafka Streams] Приложение Kafka Streams обрабатывает поток кликов пользователей (clicks topic, 12 партиций) и нужно вычислить сессии активности: период активности пользователя заканчивается, если нет события за последние 30 минут. Какой тип window и какой примитив правильно реализует эту задачу?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Tumbling window с размером 30 минут: фиксированные 30-минутные окна — ближайший аналог"
+        },
+        {
+          "id": "b",
+          "text": "Hopping window с размером 60 минут и advance 30 минут: перекрывающиеся окна ловят сессии на границах"
+        },
+        {
+          "id": "c",
+          "text": "Session window с inactivityGap=30 минут: Kafka Streams SessionWindows группирует события в сессию пока интервал между событиями не превышает inactivityGap. Сессия закрывается автоматически при 30 минутах тишины. KStream.groupByKey().windowedBy(SessionWindows.ofInactivityGapWithNoGrace(Duration.ofMinutes(30)))"
+        },
+        {
+          "id": "d",
+          "text": "Sliding window с 30-минутным advance: скользящее окно лучше отслеживает временные паттерны"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Session windows — единственный тип window в Kafka Streams, спроектированный для 'периодов активности с паузами': (1) SessionWindows.ofInactivityGapWithNoGrace(Duration.ofMinutes(30)): группирует все события пользователя в одну сессию, пока промежуток между событиями не превышает 30 минут. (2) Динамический размер: сессия начинается с первого события и заканчивается через 30 мин после последнего события. Нет фиксированного размера — сессия может быть 1 минуту или 8 часов. (3) Merge операция: если приходит событие через 25 минут — сессия расширяется (merge двух window segments). (4) Partitioning: partition по userId обязательна для корректной агрегации сессий (все события пользователя в одну партицию). Tumbling/Hopping (варианты A/B) — фиксированный размер: не подходят для переменных сессий. Sliding (вариант D) в Kafka Streams — это другой паттерн для joinWith.",
+      "bloomLevel": "applied",
+      "studyHint": "Модуль 07: Kafka Streams — раздел 'Session Windows vs Tumbling vs Hopping'"
+    },
+    {
+      "id": "kafka-13-exam-q8",
+      "type": "multiple-choice",
+      "question": "[Модуль 08: ksqlDB] Команда analytics хочет создать real-time агрегацию: количество заказов и суммарную выручку за каждые 5 минут, с обновлением каждую минуту (перекрывающиеся окна). Какой ksqlDB запрос корректно реализует эту агрегацию?",
+      "options": [
+        {
+          "id": "a",
+          "text": "CREATE STREAM order_metrics AS SELECT COUNT(*) as cnt, SUM(amount) as revenue FROM orders GROUP BY WINDOWSTART;"
+        },
+        {
+          "id": "b",
+          "text": "CREATE TABLE order_5min_stats AS SELECT COUNT(*) as order_count, SUM(amount) as revenue, WINDOWSTART as window_start FROM orders WINDOW TUMBLING (SIZE 5 MINUTES) GROUP BY 1 EMIT CHANGES;"
+        },
+        {
+          "id": "c",
+          "text": "CREATE TABLE order_5min_stats AS SELECT COUNT(*) as order_count, SUM(amount) as revenue, WINDOWSTART as window_start FROM orders WINDOW HOPPING (SIZE 5 MINUTES, ADVANCE BY 1 MINUTE) GROUP BY 1 EMIT CHANGES;"
+        },
+        {
+          "id": "d",
+          "text": "CREATE STREAM order_5min_stats AS SELECT TUMBLE_END(ROWTIME, INTERVAL '5' MINUTES) as window_end, COUNT(*) FROM orders GROUP BY TUMBLE_START(ROWTIME, INTERVAL '5' MINUTES);"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "HOPPING window с ADVANCE BY 1 MINUTE — правильный выбор для 'перекрывающихся окон': (1) WINDOW HOPPING (SIZE 5 MINUTES, ADVANCE BY 1 MINUTE): каждую минуту создаётся новое 5-минутное окно. В любой момент времени активны 5 перекрывающихся окон. (2) CREATE TABLE: агрегация по времени создаёт TABLE (materialised view), не STREAM. (3) GROUP BY 1: группировка по всем записям (нет category). (4) EMIT CHANGES: push query — обновления отправляются по мере поступления данных. Вариант B (TUMBLING) — 5-минутные неперекрывающиеся окна: не удовлетворяет требованию 'обновление каждую минуту'. Вариант A (GROUP BY WINDOWSTART без WINDOW clause) — синтаксическая ошибка. Вариант D — нестандартный SQL синтаксис, не ksqlDB.",
+      "bloomLevel": "analytical",
+      "studyHint": "Модуль 08: ksqlDB — раздел 'Windowed aggregations: TUMBLING vs HOPPING vs SESSION'"
+    },
+    {
+      "id": "kafka-13-exam-q9",
+      "type": "multiple-choice",
+      "question": "[Модуль 09: Security] Новый e-commerce кластер выходит в production. Security architect проектирует ACL модель. 12 микросервисов, каждый имеет владельческие топики (домен-префикс). Дополнительно: Kafka Streams приложение нужно Read на входном топике И Write на выходном, плюс Create для internal Streams топиков. Какая конфигурация корректна для Kafka Streams приложения?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Cluster:All для Kafka Streams principal — Streams нужен полный доступ к кластеру"
+        },
+        {
+          "id": "b",
+          "text": "Topic:Read на входном, Topic:Write на выходном. Streams создаёт internal topics автоматически без дополнительных прав"
+        },
+        {
+          "id": "c",
+          "text": "Topic:Read на исходном топике, Topic:Write+Describe на выходном, Topic:Create+Write+Read+Describe на PREFIXED '{application-id}-' (internal Streams topics), Group:Read+Describe на consumer group '{application-id}', TransactionalId:Write если processing.guarantee=exactly_once_v2"
+        },
+        {
+          "id": "d",
+          "text": "super.users=User:streams-app: проще разрешить всё, чем настраивать детальные ACL для Streams"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Kafka Streams требует расширенного набора ACL: (1) Исходный топик: Topic:Read+Describe — читать и описывать метаданные. (2) Выходной топик: Topic:Write+Describe — производить enriched события. (3) Internal Streams topics: Kafka Streams автоматически создаёт repartition и changelog топики с префиксом {application-id}-. Требуется Topic:Create (создание), Read, Write, Describe на PREFIXED '{application-id}-'. (4) Consumer Group: Group:Read+Describe на {application-id} — Streams использует consumer group для partitioning. (5) TransactionalId: если processing.guarantee=exactly_once_v2 — TransactionalId:Write на '{application-id}-'. Вариант B ошибочен: без Topic:Create на internal topics Streams упадёт с TopicAuthorizationException при запуске. Вариант D (super.users) — нарушение principle of least privilege.",
+      "bloomLevel": "analytical",
+      "studyHint": "Модуль 09: Security — раздел 'ACL для Kafka Streams applications'"
+    },
+    {
+      "id": "kafka-13-exam-q10",
+      "type": "multiple-choice",
+      "question": "[Модуль 10: Production Ops] Grafana дашборд Kafka-кластера (3 брокера, 150 топиков, 1800 партиций RF=3) показывает в 14:35: (1) kafka_server_replicamanager_underreplicatedpartitions{broker='broker-2'} = 35, (2) kafka_network_processor_idle_percent{broker='broker-2'} = 0.08, (3) kafka_server_brokertopicmetrics_bytesinpersec{broker='broker-2'} = 850MB/s. broker-1 и broker-3 показывают URP=0, idle=0.45, bytes=280MB/s. Какой диагноз и первый шаг?",
+      "options": [
+        {
+          "id": "a",
+          "text": "broker-2 перегружен сетью (850 MB/s): нужно немедленно снизить produce rate"
+        },
+        {
+          "id": "b",
+          "text": "broker-2 является partition leader для непропорционально большого числа partition: BytesIn 850 MB/s = 3x нагрузка broker-1/3. network processor idle 0.08 (92% загрузка) = I/O saturated. URP=35 = follower не успевает реплицировать с перегруженного leader. Первый шаг: kafka-leader-election.sh --election-type preferred для перебалансировки leaders"
+        },
+        {
+          "id": "c",
+          "text": "35 партиций удалены с broker-2 — нужно проверить disk на broker-2"
+        },
+        {
+          "id": "d",
+          "text": "broker-2 имеет сетевую проблему с broker-1 и broker-3 — проверить сетевую связность"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Картина метрик однозначно указывает на leader imbalance: (1) BytesInPerSec broker-2 = 850 MB/s vs broker-1/3 = 280 MB/s: broker-2 обрабатывает ~3x нагрузки остальных брокеров. Это возможно если broker-2 является preferred leader для большинства высокоактивных партиций. (2) NetworkProcessorAvgIdlePercent = 0.08 (8% простоя = 92% загрузки): network I/O thread saturated. При такой загрузке broker-2 не успевает обрабатывать replication requests от follower-ов. (3) URP = 35: follower-ы broker-1 и broker-3 не могут угнаться за записями на перегруженном broker-2. Решение: (1) preferred leader election — перераспределить leaders по всем брокерам. (2) Если дисбаланс хронический — partition reassignment для выравнивания. (3) После реакции: проверить auto.leader.rebalance.enable=true.",
+      "bloomLevel": "applied",
+      "studyHint": "Модуль 10: Production Ops — раздел 'Leader imbalance and preferred leader election'"
+    },
+    {
+      "id": "kafka-13-exam-q11",
+      "type": "multiple-choice",
+      "question": "[Модуль 11: Multi-DC] Компания развёртывает Kafka для глобального маркетплейса: регион EU (Франкфурт) и регион US (Вирджиния). Продавцы EU публикуют товары в EU-кластер, покупатели US должны видеть EU-товары в near-real-time. Покупатели US публикуют заказы в US-кластер, продавцы EU должны получать уведомления о заказах. Какая MirrorMaker 2 топология и политика подходит?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Active-passive с DefaultReplicationPolicy: EU-кластер основной, US-кластер DR-резерв"
+        },
+        {
+          "id": "b",
+          "text": "Active-active с DefaultReplicationPolicy: bidirectional репликация, топики на US будут eu.products.catalog"
+        },
+        {
+          "id": "c",
+          "text": "Active-active с IdentityReplicationPolicy: bidirectional репликация, одинаковые имена топиков в обоих регионах. EU producers пишут products.catalog в EU-кластер, MM2 реплицирует в US-кластер как products.catalog. US consumers читают products.catalog из локального US-кластера без изменения конфигурации"
+        },
+        {
+          "id": "d",
+          "text": "Hub-and-spoke с третьим global-кластером: EU и US реплицируют в hub, hub раздаёт обоим"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Active-active с IdentityReplicationPolicy — правильный выбор для multi-region активного трафика: (1) Оба региона равнозначно активны: EU продавцы и US покупатели работают одновременно. Active-passive (вариант A) предполагает DR-резерв — неприемлемо для US-покупателей. (2) IdentityReplicationPolicy: products.catalog в EU реплицируется как products.catalog в US. US consumers используют тот же topic name — нет координации конфигурации. (3) DefaultReplicationPolicy (вариант B): products.catalog в EU появится как eu.products.catalog в US — консюмеры должны знать префикс, что усложняет конфигурацию. (4) Cycle prevention: MM2 добавляет source cluster alias header — record из EU не реплицируется обратно из US в EU. Необходимо: topics.exclude = .*\\.internal, heartbeats для обоих направлений. Вариант D (Hub-and-spoke) добавляет latency через третий кластер и сложность инфраструктуры.",
+      "bloomLevel": "analytical",
+      "studyHint": "Модуль 11: Multi-DC — раздел 'Active-Active with IdentityReplicationPolicy'"
+    },
+    {
+      "id": "kafka-13-exam-q12",
+      "type": "multiple-choice",
+      "question": "[Модуль 12: Design Patterns] Финтех-стартап строит платёжную систему. Требования: (1) платёж атомарно списывает средства из БД И публикует событие в Kafka; (2) история всех транзакций должна быть полностью восстановима; (3) баланс счёта должен быть доступен без воспроизведения всей истории. Какая комбинация паттернов из Модуля 12 правильно решает все три требования?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Только Event Sourcing: Kafka хранит все события, баланс вычисляется replay-ем"
+        },
+        {
+          "id": "b",
+          "text": "Transactional Outbox + Event Sourcing + CQRS: Outbox (атомарность публикации), Event Sourcing (полная история в Kafka с infinite retention), CQRS (read model баланса в Redis/PostgreSQL, обновляется projection consumer без replay всей истории)"
+        },
+        {
+          "id": "c",
+          "text": "Saga Pattern: сага координирует списание через несколько сервисов"
+        },
+        {
+          "id": "d",
+          "text": "CQRS + Saga: команды обрабатываются через сагу, query side возвращает баланс"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Все три требования решаются тремя паттернами вместе: (1) Transactional Outbox решает атомарность: 'UPDATE balance; INSERT INTO outbox' в одной DB-транзакции. Debezium публикует outbox запись в Kafka. Нет dual write risk. (2) Event Sourcing: топик transactions с log.retention.ms=-1 (infinite). Каждая транзакция — неизменяемое событие. Полная история = replay с offset 0. (3) CQRS: write side пишет в Kafka (через outbox). Read side = Kafka Streams KTable или Connect JDBC Sink → PostgreSQL balance view. Projection consumer обновляет баланс по каждому событию. Получить баланс = query read model (O(1)), не replay истории (O(n)). Вариант A (только Event Sourcing) не решает требование 3: баланс из Kafka требует replay всей истории = O(n) операция при каждом запросе баланса. Вариант C (Saga): saga координирует distributed transactions, не решает атомарность single-service DB + Kafka.",
+      "bloomLevel": "analytical",
+      "studyHint": "Модуль 12: Design Patterns — Transactional Outbox, Event Sourcing, CQRS"
+    },
+    {
+      "id": "kafka-13-exam-q13",
+      "type": "multiple-choice",
+      "question": "[Синтез: Модули 02+09+11] Команда разворачивает активный Kafka-кластер в двух DC. Producer-приложение настроено: acks=all, enable.idempotence=true, transactional.id=app-producer-1. Кластер защищён SASL/SCRAM + ACL: User:app имеет Write на topics.* + TransactionalId:Write на app-producer-1. MirrorMaker 2 реплицирует dc1->dc2. При тестировании failover: consumer на dc2 читает dc1.topics.events и обнаруживает дубликаты несмотря на transactional producer. Почему?",
+      "options": [
+        {
+          "id": "a",
+          "text": "transactional.id должен включать DC-идентификатор: app-producer-dc1 вместо app-producer-1"
+        },
+        {
+          "id": "b",
+          "text": "Consumer на DC-2 не настроен с isolation.level=read_committed: он читает uncommitted transactional записи из реплицированного топика, включая дубликаты, отмеченные как aborted"
+        },
+        {
+          "id": "c",
+          "text": "MirrorMaker 2 не поддерживает репликацию transactional topics — нужен IdentityReplicationPolicy"
+        },
+        {
+          "id": "d",
+          "text": "MM2 реплицирует ВСЕ записи включая транзакционные маркеры (commit/abort markers), но потребитель на dc2 с isolation.level=read_uncommitted (default) читает все записи независимо от транзакционного статуса — включая записи в aborted транзакциях. Решение: настроить consumer на dc2 с isolation.level=read_committed"
+        }
+      ],
+      "correctAnswer": "d",
+      "explanation": "Синтез знаний из Модулей 02, 04, 11: (1) Transactional producer с acks=all записывает в Kafka: payload + abort/commit markers. При ретрае одной и той же транзакции возможно: запись попадает в лог дважды (одна будет в aborted транзакции). (2) MM2 реплицирует ВСЕ записи из transaction log, включая записи из абортированных транзакций и дубликаты. (3) Consumer с isolation.level=read_uncommitted (default) видит ВСЕ записи, включая те, что в abort транзакции. (4) Решение: isolation.level=read_committed на consumer — он видит только записи из committed транзакций, абортированные отфильтрованы. После этого дубликаты из retried/aborted транзакций исчезнут. Вариант B технически тот же ответ что D, но неполный: он описывает symptom (uncommitted records), не механизм (MM2 replication всех transaction log entries).",
+      "bloomLevel": "analytical",
+      "studyHint": "Модуль 02: Transactional Producer. Модуль 04: Transaction Log. Модуль 11: MM2 replication"
+    },
+    {
+      "id": "kafka-13-exam-q14",
+      "type": "multiple-choice",
+      "question": "[Синтез: Модули 05+06+07] Команда строит data pipeline: PostgreSQL (OLTP) -> Kafka -> Apache Iceberg (Data Lake) -> Analytical queries. Текущая схема таблицы orders: {id, customer_id, amount, status}. Планируется добавить поле discount_code (nullable string) через 3 месяца. Как правильно организовать схему и evolution в этом pipeline?",
+      "options": [
+        {
+          "id": "a",
+          "text": "JSON без Schema Registry: гибкость для будущих изменений без schema constraints"
+        },
+        {
+          "id": "b",
+          "text": "Avro с Schema Registry (FULL_TRANSITIVE compatibility): Debezium захватывает PostgreSQL WAL с Avro конвертацией. При добавлении discount_code (nullable с default=null): FULL_TRANSITIVE позволяет как старым consumers читать новые записи (backward), так и новым consumers читать старые записи (forward). Iceberg connector использует Schema Registry для schema evolution Iceberg table"
+        },
+        {
+          "id": "c",
+          "text": "Protobuf с FORWARD compatibility: Protobuf лучше для data lake интеграции"
+        },
+        {
+          "id": "d",
+          "text": "Avro с BACKWARD compatibility + версионирование топиков: orders-v1, orders-v2 при каждом schema change"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "FULL_TRANSITIVE compatibility — наиболее строгий режим, правильный для data pipeline с несколькими потребителями на разных уровнях: (1) FULL_TRANSITIVE: каждая новая версия схемы должна быть и BACKWARD (новый reader читает старые данные) и FORWARD (старый reader читает новые данные) совместима с ВСЕМИ предыдущими версиями. (2) Добавление discount_code как nullable (Avro union ['null', 'string'] с default=null): backward compatible (старые readers используют null) и forward compatible (новые readers читают старые данные без discount_code — default null). (3) Debezium с Avro конвертором использует Schema Registry для envelope schema: автоматическая регистрация при изменении PostgreSQL схемы. (4) Iceberg Schema Evolution: Kafka Connect S3/Iceberg Sink поддерживает schema evolution через Schema Registry — новые поля автоматически добавляются в Iceberg table schema. Вариант D (версионирование топиков) — анти-паттерн: усложняет инфраструктуру, Iceberg не знает о двух топиках.",
+      "bloomLevel": "analytical",
+      "studyHint": "Модуль 05: Kafka Connect + Debezium. Модуль 06: Schema Registry compatibility modes"
+    },
+    {
+      "id": "kafka-13-exam-q15",
+      "type": "multiple-choice",
+      "question": "[Синтез: Модули 08+10+12] Руководство требует внедрить real-time дашборд 'Здоровье платформы': (1) count активных саг в секунду, (2) средняя длительность саги (от OrderCreated до OrderConfirmed), (3) процент саг, завершившихся с компенсацией (refund). Топики: saga.order-fulfillment.state (compact, KRaft, ключ=sagaId), orders.order.created (12 партиций). Какое сочетание инструментов и подхода оптимально?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Kafka Streams для всех трёх метрик: State Store для count, Stream-Stream JOIN для длительности, filter+count для refund %"
+        },
+        {
+          "id": "b",
+          "text": "ksqlDB для всех трёх: CSAS для count per window, JOIN orders с saga-state для длительности, CASE WHEN status='COMPENSATED' для refund %"
+        },
+        {
+          "id": "c",
+          "text": "Kafka Streams для вычисления (stateful aggregation + join) с выходными топиками metrics.saga.*, Connect JDBC Sink в TimescaleDB/PostgreSQL (time-series), Grafana читает из PostgreSQL. Для более простых dashboard queries — ksqlDB Pull Query к saga-state KTable для ad-hoc запросов"
+        },
+        {
+          "id": "d",
+          "text": "JMX custom metrics: регистрировать saga metrics через JMX и экспортировать в Prometheus"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Синтез из трёх модулей: (1) Kafka Streams (Модуль 07/12): stateful агрегации требуют состояния через reboots (RocksDB). Stream-Table JOIN для обогащения saga events данными о длительности (JOIN saga.state с original order timestamp). Session windows для длительности саги. Processing guarantee=exactly_once_v2 для точных счётчиков. (2) Connect JDBC Sink в TimescaleDB (Модуль 05): метрики — time-series данные. TimescaleDB = PostgreSQL + time-series extension. Grafana нативно поддерживает TimescaleDB как datasource. (3) ksqlDB Pull Query (Модуль 08): SELECT * FROM saga_state_ktable WHERE sagaId='...' — ad-hoc запросы к текущему состоянию без stream processing. Production Ops (Модуль 10): JMX (вариант D) мониторирует инфраструктуру Kafka, не бизнес-метрики саг — неправильный инструмент для бизнес-KPI. Kafka Streams alone (вариант A) — технически правильно, но без persistent storage Grafana не может хранить historical trends.",
+      "bloomLevel": "analytical",
+      "studyHint": "Модуль 07-08: Kafka Streams + ksqlDB. Модуль 10: Monitoring stack. Модуль 12: Saga pattern"
+    }
+  ]
+}

@@ -1,0 +1,91 @@
+{
+  "lessonSlug": "13-capstone/01-architecture-challenge",
+  "moduleId": "13-capstone",
+  "_meta": {
+    "idPrefix": "kafka-13-01",
+    "description": "Quizzes for the architecture challenge lesson. Tests calculation skills, exactly-once understanding, and topic naming conventions."
+  },
+  "questions": [
+    {
+      "id": "kafka-13-01-q1",
+      "type": "multiple-choice",
+      "question": "Согласно условиям capstone-задания, пиковая нагрузка — 10 000 заказов в секунду, средний размер события — 500 байт. Консьюмер обрабатывает реалистично около 1 000 сообщений в секунду на один поток. Сколько партиций следует создать для топика orders.order.created, и как обосновать это число?",
+      "options": [
+        {
+          "id": "a",
+          "text": "3 партиции: стандартное число для небольшого кластера, можно увеличить позже при необходимости"
+        },
+        {
+          "id": "b",
+          "text": "10 партиций: ceil(10 000 / 1 000) = 10. Без дополнительного округления — ровно пропускная способность без запаса"
+        },
+        {
+          "id": "c",
+          "text": "12 партиций: ceil(10 000 / 1 000) = 10, округляем до 12 — ближайшего числа, кратного 6 брокерам кластера. Равномерное распределение по брокерам и небольшой запас пропускной способности"
+        },
+        {
+          "id": "d",
+          "text": "100 партиций: чем больше партиций, тем выше параллелизм — всегда лучше создавать с запасом"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Расчёт числа партиций: (1) Минимальное число = ceil(пиковый_throughput / throughput_per_partition) = ceil(10 000 / 1 000) = 10. (2) Округление до кратного числу брокеров: при 6 брокерах ближайшее кратное — 12. Это обеспечивает равномерное распределение: каждый брокер получит ровно 2 партиции. (3) Вариант B (10) технически корректен по расчёту, но число, не кратное брокерам, создаёт дисбаланс: 4 брокера получат 2 партиции, 2 брокера — 1 партицию. Вариант D (100 партиций) — типичная ошибка over-partitioning: каждая партиция требует open file handles, память на ISR tracking, нагрузку на контроллер. Начинать следует с минимального обоснованного числа.",
+      "bloomLevel": "applied",
+      "studyHint": "Модуль 02: Producers — раздел 'Partition count sizing'. Модуль 10: Capacity Planning — раздел 'Partition count formula'"
+    },
+    {
+      "id": "kafka-13-01-q2",
+      "type": "multiple-choice",
+      "question": "Требование capstone: 'exactly-once обработка платежей — никаких двойных списаний'. Payment Service читает из orders.order.created и пишет в payments.payment.charged. Какая комбинация Kafka-механизмов полностью обеспечивает exactly-once semantics для этого сценария?",
+      "options": [
+        {
+          "id": "a",
+          "text": "acks=all на producer + min.insync.replicas=2 на брокере. Эти настройки гарантируют, что сообщение не потеряется"
+        },
+        {
+          "id": "b",
+          "text": "enable.idempotence=true на producer. Это активирует exactly-once без дополнительных настроек"
+        },
+        {
+          "id": "c",
+          "text": "Idempotent consumer на стороне приложения (dedup по orderId через Redis или БД) + enable.idempotence=true на producer. Idempotent producer предотвращает дублирование при ретраях produce, а idempotent consumer — при redelivery из Kafka"
+        },
+        {
+          "id": "d",
+          "text": "Kafka Streams с processing.guarantee=exactly_once_v2. Только Streams API обеспечивает настоящий exactly-once"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Exactly-once в контексте платежей требует двух уровней защиты: (1) Producer-side: enable.idempotence=true предотвращает дубликаты при ретраях produce в рамках одного producer session (sequence numbers на уровне брокера). (2) Consumer-side: даже с idempotent producer, Kafka гарантирует at-least-once delivery к consumer — при rebalancing или restart consumer может получить сообщение повторно. Поэтому нужен idempotent consumer: проверка по orderId перед обработкой. Вариант A (acks=all) — это durability, не exactly-once: защищает от потери данных, но не от дублирования при ретраях. Вариант B (enable.idempotence) — только producer-side, не защищает от дублирования при consumer restart. Вариант D (Kafka Streams exactly_once_v2) корректен для Streams приложений, но Payment Service — не Streams приложение.",
+      "bloomLevel": "analytical",
+      "studyHint": "Модуль 02: Producers — раздел 'Idempotent Producer'. Модуль 03: Consumers — раздел 'Exactly-once semantics'"
+    },
+    {
+      "id": "kafka-13-01-q3",
+      "type": "multiple-choice",
+      "question": "Capstone-система включает 7 бизнес-доменов: orders, payments, inventory, notifications, customers, products, analytics. Какое соглашение об именовании топиков наиболее подходит для такой многосервисной архитектуры, и почему?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Плоские имена без разделителей: ordercreated, paymentcharged, inventoryreserved. Просто и без избыточности"
+        },
+        {
+          "id": "b",
+          "text": "{domain}.{entity}.{event-type}: orders.order.created, payments.payment.charged, inventory.item.reserved. Трёхуровневая иерархия: домен=команда-владелец, entity=бизнес-сущность, event-type=прошедшее время"
+        },
+        {
+          "id": "c",
+          "text": "{service}-{version}: order-service-v1, payment-service-v2. Версионирование в имени топика для контроля изменений"
+        },
+        {
+          "id": "d",
+          "text": "UUID-имена: a3f2b1c0-orders, d4e5f6a7-payments. Уникальность гарантирована, нет конфликтов имён"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Соглашение {domain}.{entity}.{event-type} — стандарт для multi-service архитектур (Модуль 12: Topic Governance): (1) Domain (домен): указывает команду-владельца. Позволяет настроить PREFIXED ACL: orders-service получает Write на PREFIXED 'orders.' — автоматически покрывает все текущие и будущие topics в домене. (2) Entity: бизнес-сущность, не сервис. Топик orders.order.created принадлежит Order домену, не 'order-service'. Если сервис переименован — топик не меняется. (3) Event-type в прошедшем времени: подчёркивает, что это произошедший факт, не команда. 'created' (прошедшее) vs 'create' (команда) — важно для понимания semantics. (4) Wildcard поддержка: kafka-topics.sh --list | grep '^orders\.' показывает все orders-топики. Вариант C (версионирование в имени) — анти-паттерн: изменение схемы управляется Schema Registry, не переименованием топика.",
+      "bloomLevel": "applied",
+      "studyHint": "Модуль 12: Design Patterns — раздел 'Topic Naming Conventions and Governance'"
+    }
+  ]
+}
