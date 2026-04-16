@@ -7,6 +7,8 @@ estimatedTime: 30
 topics: ["Prometheus", "JMX Exporter", "Grafana", "Alerting", "kafka-exporter", "Monitoring Pipeline"]
 ---
 
+import { GrafanaDashboardDiagram } from '@engine/components/diagrams/courses/kafka';
+
 # Monitoring Stack: Prometheus + JMX Exporter + Grafana
 
 Знать имена JMX-метрик — необходимо. Но метрики в JMX-формате нельзя агрегировать, строить графики, настраивать алерты без дополнительного стека. Стандарт индустрии: Prometheus как база данных временных рядов и Grafana как визуализация.

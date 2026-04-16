@@ -7,6 +7,8 @@ estimatedTime: 25
 topics: ["Replication", "ISR", "High Watermark", "LEO", "acks"]
 ---
 
+import { PartitionReplicationDiagram } from '@engine/components/diagrams/courses/kafka';
+
 # Репликация и ISR
 
 Kafka может пережить потерю брокера без потери данных. Это не магия — это точно определённый протокол репликации на основе ISR (In-Sync Replicas). Понимание этого протокола критически важно: неправильная конфигурация `acks` и `min.insync.replicas` — одна из самых частых причин потери данных в production.

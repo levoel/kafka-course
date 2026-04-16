@@ -8,6 +8,8 @@ topics: ["CQRS", "Command Query Responsibility Segregation", "Read Model", "Writ
 free: false
 ---
 
+import { CqrsDataFlowDiagram } from '@engine/components/diagrams/courses/kafka';
+
 # Реализация CQRS
 
 **CQRS** — Command Query Responsibility Segregation. Принцип разделения: операции, которые изменяют состояние (команды), и операции, которые только читают (запросы), используют **разные модели**. Не разные таблицы в одной базе данных — разные модели, оптимизированные для своей задачи.

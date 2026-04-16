@@ -7,6 +7,8 @@ estimatedTime: 30
 topics: ["SSL", "TLS", "mTLS", "Keystore", "Truststore", "Certificate", "Handshake"]
 ---
 
+import { TlsHandshakeDiagram } from '@engine/components/diagrams/courses/kafka';
+
 # SSL/TLS Mutual Authentication
 
 Kafka использует TLS для двух целей: **шифрования канала** (никто не читает трафик в сети) и, опционально, **взаимной аутентификации** (mutual TLS, mTLS — обе стороны доказывают идентичность сертификатом). Понять разницу между этими режимами, а также как работают keystore и truststore — фундаментальный навык для любого Kafka operator.

@@ -8,6 +8,8 @@ topics: ["Event Sourcing", "Event Store", "Aggregate", "Snapshot", "Schema Evolu
 free: false
 ---
 
+import { EventSourcingDiagram } from '@engine/components/diagrams/courses/kafka';
+
 # Event Sourcing с Kafka
 
 Традиционные CRUD-системы хранят только **текущее состояние**: таблица `orders` содержит строку для каждого заказа, и при обновлении строка перезаписывается. История изменений, как правило, теряется. Event Sourcing переворачивает эту модель: вместо текущего состояния система хранит **последовательность событий**, из которых состояние вычисляется.

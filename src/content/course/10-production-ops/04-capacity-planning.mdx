@@ -7,6 +7,8 @@ estimatedTime: 30
 topics: ["Capacity Planning", "Disk Sizing", "Partition Count", "Network Bandwidth", "Memory", "Replication Factor"]
 ---
 
+import { CapacityPlannerDiagram } from '@engine/components/diagrams/courses/kafka';
+
 # Формулы планирования ёмкости
 
 Kafka-кластер без capacity planning — это кластер, который упадёт в самый неудобный момент. Под-provisioned кластер даёт data loss, накопленный lag, outages в production. Пере-provisioned кластер — wasteful spend на железо, которое простаивает.

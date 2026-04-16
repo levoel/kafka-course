@@ -7,6 +7,8 @@ estimatedTime: 25
 topics: ["Brokers", "Topics", "Partitions", "Leader", "Follower"]
 ---
 
+import { BrokerTopologyDiagram } from '@engine/components/diagrams/courses/kafka';
+
 # Брокеры, Топики, Партиции
 
 Первый урок дал ментальную модель — commit log. Теперь разберём физическую реальность: как этот commit log существует в кластере из нескольких машин. Ответ — через три уровня абстракции: брокеры, топики и партиции.
