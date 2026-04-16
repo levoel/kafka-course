@@ -1,0 +1,114 @@
+{
+  "lessonSlug": "12-design-patterns/02-cqrs-implementation",
+  "moduleId": "12-design-patterns",
+  "_meta": {
+    "idPrefix": "kafka-12-02",
+    "description": "4 questions on CQRS implementation: query/command separation, read model rebuild, read-after-write, KTable as read model"
+  },
+  "questions": [
+    {
+      "id": "kafka-12-02-q1",
+      "type": "multiple-choice",
+      "question": "В аббревиатуре CQRS буква 'Q' означает Query, а 'C' — Command. В чём фундаментальная причина их разделения в системах с высокой нагрузкой?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Query и Command требуют разных языков программирования"
+        },
+        {
+          "id": "b",
+          "text": "Query (чтение) и Command (запись) имеют принципиально разные требования: Command оптимизирован под консистентность и валидацию бизнес-правил (нормализованная модель), Query оптимизирован под скорость и гибкость доступа (денормализованные, специализированные read models). Одна модель не может быть одновременно лучшей для обоих."
+        },
+        {
+          "id": "c",
+          "text": "Query и Command требуют разных баз данных по причинам лицензирования"
+        },
+        {
+          "id": "d",
+          "text": "Разделение нужно только для горизонтального масштабирования на уровне HTTP"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Корень CQRS — асимметрия оптимизаций. Write side требует: нормализованных данных для валидации бизнес-правил без аномалий, транзакционной атомарности, consistency. Read side требует: денормализованных данных для быстрых запросов, специализированных индексов (Elasticsearch для поиска, Redis для кэша), aggregate views для UI. Нормализованная схема — плохой кандидат для полнотекстового поиска. Elasticsearch-индекс — плохой кандидат для транзакционной записи. CQRS позволяет использовать правильный инструмент для каждой задачи: Kafka events как source of truth, разные read models для разных query patterns.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-12-02-q2",
+      "type": "multiple-choice",
+      "question": "CQRS система использует Elasticsearch как read model для поиска заказов. Elasticsearch индекс повреждён и должен быть пересоздан с нуля. Каков правильный порядок действий?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Восстановить индекс из PostgreSQL резервной копии"
+        },
+        {
+          "id": "b",
+          "text": "Остановить Elasticsearch Sink connector, удалить индекс, создать новый с правильным mapping, запустить connector с auto.offset.reset=earliest — он прочитает все события из Kafka orders.events с начала и перестроит индекс."
+        },
+        {
+          "id": "c",
+          "text": "Остановить весь write side на время восстановления read model"
+        },
+        {
+          "id": "d",
+          "text": "Пересоздать индекс невозможно без full backup Elasticsearch"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Ключевое преимущество CQRS + Kafka: любой read model пересоздаётся из Kafka events topic. Алгоритм: (1) Остановить connector — прекратить новые writes в ES. (2) Удалить повреждённый индекс. (3) Создать новый индекс с правильным mapping. (4) Запустить connector с auto.offset.reset=earliest — Kafka Connect начнёт читать orders.events с offset 0 и заново заиндексирует все события. Write side не останавливается — он продолжает публиковать события в Kafka. Другие consumer groups (KTable, PostgreSQL) не затронуты. Это детерминированная и идемпотентная операция: результат одинаков при любом количестве повторений.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-12-02-q3",
+      "type": "multiple-choice",
+      "question": "Пользователь создаёт заказ через POST /api/orders. Write API возвращает 202 Accepted. Пользователь немедленно делает GET /api/orders/order-123 и получает 404. Диагностируйте проблему и предложите два архитектурных решения.",
+      "options": [
+        {
+          "id": "a",
+          "text": "Ошибка в Read API — нужно исправить SELECT запрос"
+        },
+        {
+          "id": "b",
+          "text": "Kafka broker недоступен — нужно проверить connectivity"
+        },
+        {
+          "id": "c",
+          "text": "Это read-after-write проблема: Read Model (KTable/PostgreSQL) ещё не обработал событие OrderCreated из Kafka. Два решения: (1) Write API возвращает данные заказа прямо в 202 Accepted (из команды) без обращения к Read Model. (2) Version polling: Write API возвращает eventVersion, клиент опрашивает GET /api/orders/order-123?minVersion=1 пока read model не достигнет нужной версии."
+        },
+        {
+          "id": "d",
+          "text": "Read Model нужно настроить на синхронную обработку событий (blocking consumer)"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Read-after-write — классическая проблема eventual consistency в CQRS. Producer опубликовал OrderCreated в Kafka, Write API вернул 202. Но consumer group (KTable, JDBC Sink) ещё не опросил Kafka, не обработал событие, не обновил read model. Задержка: 10мс — 2с в зависимости от consumer poll interval и projection latency. GET /api/orders/order-123 смотрит в Read Model — он ещё пустой. Два правильных решения: (1) Включить данные заказа в 202 Accepted — клиент использует данные из ответа на запись, не делает немедленный GET. (2) Version-based polling — Read API ждёт, пока projection не достигнет нужной версии события. Вариант D (blocking consumer) уничтожает масштабируемость и теряет преимущества асинхронности.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-12-02-q4",
+      "type": "multiple-choice",
+      "question": "Какой примитив Kafka Streams наиболее подходит для реализации in-memory read model в CQRS, который хранит текущее состояние заказа (последний снапшот) по orderId и поддерживает прямые HTTP-запросы?",
+      "options": [
+        {
+          "id": "a",
+          "text": "KStream — поток всех событий в режиме реального времени"
+        },
+        {
+          "id": "b",
+          "text": "KTable — материализованное представление, хранит последнее значение для каждого ключа. Interactive Queries позволяют отвечать на HTTP-запросы напрямую из state store (RocksDB) без внешней базы данных."
+        },
+        {
+          "id": "c",
+          "text": "GlobalKTable — тот же KTable, но реплицированный на все instances"
+        },
+        {
+          "id": "d",
+          "text": "WindowedKTable — KTable с временными окнами для агрегации"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "KTable — правильный ответ для read model текущего состояния. KTable в Kafka Streams: (1) Читает events topic, обновляет state store (RocksDB на диске, LRU-кэш в памяти). (2) Хранит только ПОСЛЕДНЕЕ значение для каждого ключа — идеально для current state projection. (3) Interactive Queries (StoreQueryParameters) позволяют HTTP-слою напрямую запрашивать state store: ReadOnlyKeyValueStore.get(orderId). Latency: 1-5ms. (4) При crash — автоматически восстанавливает state из changelog topic. GlobalKTable (вариант C) тоже возможен, но реплицирует данные на все instances — избыточно для large state stores. KStream (вариант A) — поток событий, не хранит current state.",
+      "bloomLevel": "applied"
+    }
+  ]
+}

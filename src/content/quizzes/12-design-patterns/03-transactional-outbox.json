@@ -1,0 +1,88 @@
+{
+  "lessonSlug": "12-design-patterns/03-transactional-outbox",
+  "moduleId": "12-design-patterns",
+  "_meta": {
+    "idPrefix": "kafka-12-03",
+    "description": "3 questions on Transactional Outbox: dual-write problem, outbox schema design, polling vs Debezium CDC comparison"
+  },
+  "questions": [
+    {
+      "id": "kafka-12-03-q1",
+      "type": "multiple-choice",
+      "question": "Что такое 'dual-write' проблема в контексте микросервисов, использующих Kafka?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Проблема записи в два разных топика Kafka одновременно"
+        },
+        {
+          "id": "b",
+          "text": "Проблема масштабирования двух producer instances"
+        },
+        {
+          "id": "c",
+          "text": "Невозможность атомарно выполнить операцию UPDATE в реляционной базе данных И публикацию события в Kafka. Сбой между этими двумя операциями приводит к несогласованности: база обновлена, а событие не опубликовано (или наоборот)."
+        },
+        {
+          "id": "d",
+          "text": "Необходимость записать данные в два разных формата (JSON и Avro) одновременно"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Dual-write — это ситуация, когда сервис должен записать в два независимых хранилища: реляционную базу данных (через DB-транзакцию) и Kafka (через producer.send). Эти две операции не могут быть объединены в одну атомарную транзакцию без XA/2PC (которые неприменимы с Kafka). Если DB commit успешен, но Kafka publish упал — событие теряется, downstream consumers не узнают об изменении. Если Kafka publish успешен, но DB commit откатился — событие опубликовано для изменения, которого не произошло. Outbox pattern решает это: событие записывается в outbox таблицу в той же DB-транзакции, что и бизнес-данные. Atomicity обеспечивает база данных.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-12-03-q2",
+      "type": "multiple-choice",
+      "question": "Вы проектируете outbox таблицу для Order Service, который публикует события OrderCreated, OrderPaid, OrderCancelled в Kafka. Какая схема outbox таблицы наиболее правильная для использования с Debezium EventRouter SMT?",
+      "options": [
+        {
+          "id": "a",
+          "text": "CREATE TABLE outbox (id SERIAL, event_json TEXT, sent BOOLEAN)"
+        },
+        {
+          "id": "b",
+          "text": "CREATE TABLE outbox (id UUID PRIMARY KEY, aggregate_type VARCHAR, aggregate_id VARCHAR, event_type VARCHAR, payload JSONB, created_at TIMESTAMPTZ). Поле aggregate_type используется для routing в Kafka топик, aggregate_id — Kafka key, payload — Kafka value."
+        },
+        {
+          "id": "c",
+          "text": "CREATE TABLE outbox (id BIGSERIAL, topic VARCHAR, message_key VARCHAR, message_value TEXT)"
+        },
+        {
+          "id": "d",
+          "text": "CREATE TABLE outbox (id UUID, kafka_offset BIGINT, kafka_partition INT, payload TEXT)"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Debezium EventRouter SMT читает конкретные поля outbox таблицы для маршрутизации: aggregate_type определяет целевой Kafka топик (Order -> outbox.event.order), aggregate_id становится Kafka key (обеспечивает partition affinity — все события одного агрегата в одной партиции), payload — это Kafka value (чистое бизнес-событие). id (UUID) — Kafka message key для дедупликации у consumers. created_at — для TTL-очистки. Вариант A (SERIAL + sent) — для polling publisher, не для Debezium. Вариант C (topic + key) — жёстко прописывает Kafka детали в бизнес-таблицу, не работает с EventRouter SMT. Вариант D (kafka_offset) — outbox не должен знать о Kafka offsets.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-12-03-q3",
+      "type": "multiple-choice",
+      "question": "Ваша команда выбирает между Polling Publisher и Debezium CDC для чтения outbox таблицы. Система обрабатывает 5,000 заказов в секунду, требования по latency — менее 100мс от записи в DB до публикации в Kafka. В каком сценарии следует выбрать Polling Publisher, а не Debezium?",
+      "options": [
+        {
+          "id": "a",
+          "text": "При 5,000 заказов/сек и latency менее 100мс — Polling Publisher является лучшим выбором"
+        },
+        {
+          "id": "b",
+          "text": "Polling Publisher следует выбрать когда: инфраструктурные ограничения не позволяют установить Debezium (нет доступа к WAL, PostgreSQL wal_level не logical), нагрузка низкая (до нескольких сотен событий/сек), latency 500мс-5с приемлема. При 5,000 заказов/сек и latency 100мс требования — это сценарий для Debezium CDC."
+        },
+        {
+          "id": "c",
+          "text": "Polling Publisher всегда лучше Debezium — он проще в обслуживании"
+        },
+        {
+          "id": "d",
+          "text": "Polling Publisher лучше при использовании MySQL, Debezium — только для PostgreSQL"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "При 5,000 заказов/сек и latency < 100мс правильный ответ — Debezium CDC. Polling Publisher при такой нагрузке: (1) Polling interval должен быть очень маленьким (< 100мс), но это создаёт огромную нагрузку SELECT на базу данных. (2) Нужна распределённая блокировка для масштабирования polling workers — сложность. (3) Два DB-запроса на каждое событие (SELECT + UPDATE processed_at). Debezium CDC читает PostgreSQL WAL напрямую: latency 10-50мс, нет SELECT нагрузки на таблицу, порядок WAL LSN строго соблюдён. Polling Publisher правильно выбирать при: wal_level не logical (не можем настроить CDC), нет доступа к WAL (managed DB без logical replication), throughput < 500 событий/сек, latency > 500мс приемлема.",
+      "bloomLevel": "analytical"
+    }
+  ]
+}

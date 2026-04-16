@@ -1,0 +1,114 @@
+{
+  "lessonSlug": "12-design-patterns/01-event-sourcing",
+  "moduleId": "12-design-patterns",
+  "_meta": {
+    "idPrefix": "kafka-12-01",
+    "description": "4 questions on Event Sourcing with Kafka: append-only event store, log compaction, snapshot strategy, partition ordering"
+  },
+  "questions": [
+    {
+      "id": "kafka-12-01-q1",
+      "type": "multiple-choice",
+      "question": "В чём принципиальное отличие Event Sourcing от традиционного CRUD подхода к хранению данных?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Event Sourcing хранит данные в JSON вместо реляционных таблиц"
+        },
+        {
+          "id": "b",
+          "text": "Event Sourcing хранит неизменяемую последовательность событий (фактов изменений), а не текущее состояние. Состояние вычисляется через fold(events, initialState, applyEvent)."
+        },
+        {
+          "id": "c",
+          "text": "Event Sourcing использует NoSQL базы данных вместо PostgreSQL"
+        },
+        {
+          "id": "d",
+          "text": "Event Sourcing хранит и текущее состояние, и лог изменений в одной таблице"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Event Sourcing переворачивает традиционную модель: вместо хранения текущего состояния (UPDATE строки) система хранит последовательность событий — иммутабельных фактов того, что произошло. Текущее состояние вычисляется через свёртку (fold) всех событий: OrderCreated -> ItemAdded -> PaymentConfirmed = текущий заказ. CRUD хранит только последнее состояние, Event Sourcing хранит полную историю. Это позволяет: audit trail, temporal queries, event replay, decoupled projections.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-12-01-q2",
+      "type": "multiple-choice",
+      "question": "Топик orders.events настроен с log.cleanup.policy=compact. Агрегат order-123 имеет 5 событий: OrderCreated, ItemAdded, PaymentConfirmed, OrderShipped, OrderArchived. Что произойдёт с этими событиями после log compaction?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Все 5 событий сохранятся — compaction не удаляет записи с одинаковым ключом"
+        },
+        {
+          "id": "b",
+          "text": "Compaction оставит только последнее событие OrderArchived с ключом order-123, удалив предыдущие 4 события. Полная история событий будет потеряна."
+        },
+        {
+          "id": "c",
+          "text": "Compaction удалит только события старше retention.ms"
+        },
+        {
+          "id": "d",
+          "text": "Compaction объединит все 5 событий в одну запись с итоговым состоянием"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "log.cleanup.policy=compact сохраняет только ПОСЛЕДНЕЕ значение для каждого ключа. Поскольку все 5 событий имеют один ключ (order-123), compaction оставит только OrderArchived и удалит OrderCreated, ItemAdded, PaymentConfirmed, OrderShipped. Для event store это КАТАСТРОФА: вся история агрегата потеряна, replay невозможен. Правильная конфигурация event store: log.cleanup.policy=delete + log.retention.ms=-1 (бесконечная retention). Compact policy применяется ТОЛЬКО для snapshot топиков (один ключ = одно текущее состояние).",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-12-01-q3",
+      "type": "multiple-choice",
+      "question": "Event-sourced агрегат Account имеет 80,000 событий. Event replay при каждом запросе занимает 45 секунд. Команда рассматривает три варианта решения: (A) снапшоты, (B) уменьшить retention до 7 дней, (C) перейти с Kafka на реляционную БД для event store. Какой вариант корректен и почему?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Вариант B — 7 дней retention устранит старые события и ускорит replay"
+        },
+        {
+          "id": "b",
+          "text": "Вариант C — Kafka не предназначена для event store с большим числом событий на агрегат"
+        },
+        {
+          "id": "c",
+          "text": "Вариант A — снапшоты хранят материализованное состояние агрегата в compact топике. При загрузке: читаем снапшот (state при version=N) + только события после N. Вместо 80,000 событий — несколько сотен."
+        },
+        {
+          "id": "d",
+          "text": "Все три варианта эквивалентны по эффекту"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Снапшоты — корректное решение проблемы долгого replay. Отдельный снапшот-топик с cleanup.policy=compact хранит только последний снапшот на ключ (aggregateId). При загрузке агрегата: (1) читаем снапшот из compact топика (state + lastEventVersion), (2) читаем только события после lastEventVersion из event топика. Вместо 80,000 событий — только события после последнего снапшота (например, 200). Вариант B — опасен: 7 дней retention означает потерю истории старше 7 дней, нарушение audit trail. Вариант C — неверен: проблема не в Kafka, а в отсутствии снапшотов. Kafka остаётся правильным event store, нужна правильная архитектура чтения.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-12-01-q4",
+      "type": "multiple-choice",
+      "question": "Event-sourced сервис публикует события в топик orders.events. Необходимо гарантировать, что все события агрегата order-456 обрабатываются consumer-ом строго по порядку (OrderCreated -> ItemAdded -> OrderShipped). Какая конфигурация это обеспечивает?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Использовать отдельный топик для каждого агрегата: orders.order-456.events"
+        },
+        {
+          "id": "b",
+          "text": "Устанавливать timestamp в строгом порядке при produce"
+        },
+        {
+          "id": "c",
+          "text": "Использовать aggregate ID как ключ Kafka записи (key='order-456'). Kafka хеширует ключ в одну партицию — все события одного агрегата гарантированно в одной партиции, порядок внутри партиции строго сохраняется."
+        },
+        {
+          "id": "d",
+          "text": "Использовать один consumer instance для всего топика (parallelism=1)"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Kafka гарантирует порядок ТОЛЬКО внутри одной партиции. Если использовать aggregateId как ключ записи, partitioner детерминированно хешируют ключ в одну и ту же партицию (при постоянном числе партиций). Все события order-456 всегда попадают в partition 3 (например). Consumer, читающий partition 3, обработает OrderCreated до ItemAdded до OrderShipped — строгий порядок. Вариант A (отдельный топик) — нереалистичен при тысячах агрегатов. Вариант D (один consumer) — уничтожает параллелизм и не решает проблему при multi-broker setup. Вариант B — timestamp не определяет порядок записи в партицию.",
+      "bloomLevel": "applied"
+    }
+  ]
+}

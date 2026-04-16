@@ -1,0 +1,114 @@
+{
+  "lessonSlug": "12-design-patterns/04-saga-pattern",
+  "moduleId": "12-design-patterns",
+  "_meta": {
+    "idPrefix": "kafka-12-04",
+    "description": "4 questions on Saga pattern: 2PC vs saga, choreography events, compensation order, Kafka transactions for orchestrator"
+  },
+  "questions": [
+    {
+      "id": "kafka-12-04-q1",
+      "type": "multiple-choice",
+      "question": "В чём ключевое отличие Saga паттерна от традиционного двухфазного коммита (2PC) при координации распределённых транзакций?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Saga использует единый глобальный lock на всё время выполнения транзакции, 2PC — нет"
+        },
+        {
+          "id": "b",
+          "text": "Saga не обеспечивает гарантий согласованности, 2PC гарантирует ACID"
+        },
+        {
+          "id": "c",
+          "text": "Saga — последовательность локальных транзакций без глобальных блокировок. При сбое выполняются компенсирующие транзакции (бизнес-откат). 2PC требует глобальных блокировок на всех участниках во время фазы голосования — не масштабируется, не совместим с Kafka."
+        },
+        {
+          "id": "d",
+          "text": "Saga и 2PC — эквивалентные подходы, разница только в реализации"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "2PC (Two-Phase Commit): фаза prepare — координатор блокирует ресурсы всех участников, фаза commit — либо все коммитят, либо все откатываются. Проблемы: блокировки на время голосования снижают throughput, coordinator failure в фазе commit = неопределённое состояние, Kafka не поддерживает XA транзакции как participant. Saga устраняет блокировки: каждый сервис выполняет локальную транзакцию и публикует событие. Если шаг N провалился — выполняются компенсирующие транзакции (Cn-1, ..., C1) — это бизнес-операции (PaymentRefunded, InventoryReleased), а не database rollback. Нет ACID изоляции: промежуточные состояния видимы. Масштабируется: каждый сервис блокирует только своё хранилище на время своей локальной транзакции.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-12-04-q2",
+      "type": "multiple-choice",
+      "question": "В choreography-based saga: Payment Service получает событие OrderCreated от Order Service и успешно списывает деньги с карты. Что Payment Service должен опубликовать в Kafka при успехе и при неудаче (недостаточно средств)?",
+      "options": [
+        {
+          "id": "a",
+          "text": "При успехе: OrderPaid (в orders.events). При неудаче: OrderCancelled (в orders.events)."
+        },
+        {
+          "id": "b",
+          "text": "При успехе: PaymentCharged (в payments.events). При неудаче: PaymentFailed (в payments.events). Каждый сервис публикует в свой domain topic. Следующий шаг (Inventory) подпишется на PaymentCharged. Компенсация запустится при PaymentFailed."
+        },
+        {
+          "id": "c",
+          "text": "При успехе: OrderApproved (в orders.events). При неудаче: ничего не публикует — Order Service сам проверяет таймаут."
+        },
+        {
+          "id": "d",
+          "text": "При успехе и неудаче: Payment Result (в shared.saga.results) — единый топик для всех результатов"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "В хореографии каждый сервис публикует события в свой domain topic: Payment Service -> payments.events. PaymentCharged сигнализирует следующему шагу (Inventory Service) начать резервирование. PaymentFailed запускает компенсацию: Order Service подпишется на payments.events, получит PaymentFailed, опубликует OrderCancelled. Вариант A (Payment публикует в orders.events) — нарушает domain boundaries: Payment Service не должен писать в orders домен. Вариант C (таймаут) — anti-pattern: явные события о failure критически важны для надёжной компенсации, таймаут-based coordination хрупка. Вариант D (shared.saga.results) — теряет domain separation, создаёт hotspot топик.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-12-04-q3",
+      "type": "multiple-choice",
+      "question": "Orchestration-based saga из 5 шагов: (1) CreateOrder, (2) ChargePayment, (3) ReserveInventory, (4) AllocateShipping, (5) SendConfirmation. Шаг 4 (AllocateShipping) провалился. Какие компенсирующие транзакции должен выполнить Saga Orchestrator и в каком порядке?",
+      "options": [
+        {
+          "id": "a",
+          "text": "ReleaseInventory (шаг 3), затем RefundPayment (шаг 2), затем CancelOrder (шаг 1) — в обратном порядке"
+        },
+        {
+          "id": "b",
+          "text": "Только CancelOrder (шаг 1) — достаточно отменить начальный шаг"
+        },
+        {
+          "id": "c",
+          "text": "RefundPayment (шаг 2), затем ReleaseInventory (шаг 3) — в произвольном порядке"
+        },
+        {
+          "id": "d",
+          "text": "RetryAllocateShipping до успеха (шаг 4 не нужно компенсировать)"
+        }
+      ],
+      "correctAnswer": "a",
+      "explanation": "Компенсация в saga выполняется в строго обратном порядке выполненных шагов. Провалился шаг 4, шаги 1-3 уже выполнены. Компенсация: (1) ReleaseInventory — компенсация шага 3 (освобождаем зарезервированные товары). (2) RefundPayment — компенсация шага 2 (возвращаем деньги клиенту). (3) CancelOrder — компенсация шага 1 (помечаем заказ как отменённый). Порядок важен: нельзя RefundPayment до ReleaseInventory, если система между этими шагами проверяет наличие payment для inventory. Шаг 5 (SendConfirmation) не выполнялся — не нужно компенсировать. Отдельный вопрос: нужно ли SendCancellationNotification клиенту — это зависит от бизнес-правил (обычно добавляется как новый шаг, не как компенсация).",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-12-04-q4",
+      "type": "multiple-choice",
+      "question": "Saga Orchestrator должен атомарно выполнить две операции: опубликовать команду ChargePayment в saga.commands.payments И обновить состояние саги в saga.state. Какая Kafka-фича обеспечивает атомарность этих двух publish операций в разные топики?",
+      "options": [
+        {
+          "id": "a",
+          "text": "idempotent producer (enable.idempotence=true)"
+        },
+        {
+          "id": "b",
+          "text": "acks=all на producer"
+        },
+        {
+          "id": "c",
+          "text": "Kafka транзакционный producer (transactional.id + beginTransaction/commitTransaction). Позволяет атомарно publish в несколько топиков: либо обе записи видны consumers (после commitTransaction), либо ни одна (при abortTransaction или crash)."
+        },
+        {
+          "id": "d",
+          "text": "Kafka Streams exactly-once semantics"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Kafka transactional producer с transactional.id обеспечивает exactly-once семантику между несколькими топиками. Orchestrator: producer.beginTransaction(); producer.send(saga.commands.payments, ChargePayment); producer.send(saga.state, updatedSagaState); producer.commitTransaction(). Если commitTransaction упал — abortTransaction, обе записи не видны. Consumers с isolation.level=read_committed видят только записи из зафиксированных транзакций. Если orchestrator крашнулся между beginTransaction и commitTransaction — Kafka автоматически откатит незавершённую транзакцию (через transaction timeout). Вариант A (idempotence) — только для одной partition, не между топиками. Вариант B (acks=all) — гарантия durability одной записи, не атомарности нескольких. Вариант D (Kafka Streams EOS) — это обёртка над transactional producer, но в контексте Orchestrator правильный ответ — прямые транзакции.",
+      "bloomLevel": "applied"
+    }
+  ]
+}

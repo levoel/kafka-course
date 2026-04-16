@@ -1,0 +1,88 @@
+{
+  "lessonSlug": "12-design-patterns/05-topic-governance",
+  "moduleId": "12-design-patterns",
+  "_meta": {
+    "idPrefix": "kafka-12-05",
+    "description": "3 questions on topic governance: auto.create.topics, naming convention, schema versioning migration strategy"
+  },
+  "questions": [
+    {
+      "id": "kafka-12-05-q1",
+      "type": "multiple-choice",
+      "question": "Почему auto.create.topics.enable=false является обязательной настройкой в production Kafka кластере?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Автоматическое создание топиков замедляет producer на несколько миллисекунд"
+        },
+        {
+          "id": "b",
+          "text": "При auto.create.topics.enable=true опечатка в имени топика в producer коде автоматически создаёт новый топик с default настройками (partitions=1, retention=7 days). Данные уходят не туда, event sourcing ломается, обнаружение ошибки — часы или дни. При false: produce в несуществующий топик немедленно выдаёт UnknownTopicOrPartitionException."
+        },
+        {
+          "id": "c",
+          "text": "Auto-create работает только для внутренних Kafka топиков (__ prefix)"
+        },
+        {
+          "id": "d",
+          "text": "Auto-create создаёт топики с неправильным replication factor — всегда 1 вместо 3"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "auto.create.topics.enable=true создаёт три категории проблем: (1) Silent data loss — опечатка orders.events -> ordes.events создаёт новый топик, реальные consumers читают из правильного топика и никогда не увидят эти данные. (2) Default конфигурация — auto-created топики используют broker defaults: partitions=num.partitions (обычно 1), retention=log.retention.ms (обычно 7 дней). Топик events с retention 7 дней вместо бесконечного — критическая потеря данных. (3) ACL нарушение — топик создаётся без явных ACL, нарушая security model. При false: любая опечатка или новый топик без явного создания сразу видна как ошибка при деплое, а не в production через дни.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-12-05-q2",
+      "type": "multiple-choice",
+      "question": "Согласно domain-based naming convention {domain}.{entity}.{event-type}, какое правильное название топика для события резервирования единицы товара (SKU) на складе командой inventory?",
+      "options": [
+        {
+          "id": "a",
+          "text": "inventory_reservation_events"
+        },
+        {
+          "id": "b",
+          "text": "InventoryItemReserved"
+        },
+        {
+          "id": "c",
+          "text": "inventory.product.reserved"
+        },
+        {
+          "id": "d",
+          "text": "inventory-service/item/reserved"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Правильный формат: inventory (домен) . product (сущность — продукт/SKU) . reserved (тип события — факт резервирования). Правила именования: только строчные буквы, цифры, дефис и точка. Точка используется как разделитель иерархии (домен.сущность.тип). Вариант A (подчёркивание) — подчёркивания зарезервированы для internal Kafka топиков (__ prefix), best practice — избегать. Вариант B (CamelCase) — нарушает lowercase конвенцию. Вариант D (слеш) — недопустимый символ в именах топиков Kafka. domain-based naming преимущество над team-based: домен 'inventory' стабилен, команда может реорганизоваться — имя топика не изменится.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-12-05-q3",
+      "type": "multiple-choice",
+      "question": "Команда миграции schema от v1 к v2 с breaking change: поле 'price' (integer, cents) переименовывается в 'priceRub' (float, рубли). Schema Registry настроен на BACKWARD compatibility. Сравните стратегии: (A) обновить схему в существующем топике, (B) создать новый топик orders.order.created.v2 с dual-publish. Какая правильная?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Стратегия A — Schema Registry BACKWARD позволяет любые изменения"
+        },
+        {
+          "id": "b",
+          "text": "Стратегия A — переименование поля backward compatible при указании aliases"
+        },
+        {
+          "id": "c",
+          "text": "Стратегия B — переименование поля является breaking change. Schema Registry BACKWARD отклонит новую схему. Правильно: новый топик orders.order.created.v2, dual-publish во время миграции, consumers переходят на v2 независимо, старый топик отключается после полной миграции."
+        },
+        {
+          "id": "d",
+          "text": "Обе стратегии эквивалентны — выбор зависит только от предпочтений команды"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Переименование 'price' -> 'priceRub' — breaking change в Avro: (1) Старые consumers ожидают поле 'price' — не найдут его в новой схеме, десериализация провалится (или использует default). (2) Смена типа integer -> float — дополнительный breaking change: числовое представление меняется. Schema Registry с BACKWARD отклонит эту схему как несовместимую. Стратегия A невозможна технически. Стратегия B — правильная: (1) Создать orders.order.created.v2 с новой схемой. (2) Producer публикует в оба топика (dual-publish). (3) Consumers мигрируют по очереди, каждый переключается с v1 на v2 в рамках своего деплоя. (4) После полной миграции — отключить v1 топик. Альтернатива без нового топика: добавить 'priceRub' как новое optional поле (backward compatible), deprecate 'price', удалить в следующем major release.",
+      "bloomLevel": "analytical"
+    }
+  ]
+}

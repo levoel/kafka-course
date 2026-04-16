@@ -1,0 +1,88 @@
+{
+  "lessonSlug": "12-design-patterns/06-module-summary",
+  "moduleId": "12-design-patterns",
+  "_meta": {
+    "idPrefix": "kafka-12-06",
+    "description": "3 questions on module 12 synthesis: pattern matching, combined pattern selection for financial system, dual-write problem identification"
+  },
+  "questions": [
+    {
+      "id": "kafka-12-06-q1",
+      "type": "multiple-choice",
+      "question": "Соотнесите каждый design pattern с проблемой, которую он решает: (1) Event Sourcing, (2) CQRS, (3) Transactional Outbox, (4) Saga. Проблемы: (A) распределённая транзакция без 2PC, (B) dual-write при обновлении DB + Kafka, (C) нет полной истории изменений для аудита, (D) разные оптимальные модели для read и write.",
+      "options": [
+        {
+          "id": "a",
+          "text": "1-A, 2-B, 3-C, 4-D"
+        },
+        {
+          "id": "b",
+          "text": "1-C, 2-D, 3-B, 4-A"
+        },
+        {
+          "id": "c",
+          "text": "1-D, 2-C, 3-A, 4-B"
+        },
+        {
+          "id": "d",
+          "text": "1-B, 2-A, 3-D, 4-C"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Правильное соответствие: (1) Event Sourcing -> (C) нет полной истории — Event Sourcing хранит все события, решает проблему audit trail и temporal queries. (2) CQRS -> (D) разные модели для read/write — Command side оптимизирован под консистентность, Query side под скорость запросов. (3) Transactional Outbox -> (B) dual-write — атомарная запись в outbox таблицу решает невозможность атомарности DB + Kafka. (4) Saga -> (A) распределённая транзакция — цепочка локальных транзакций с компенсацией вместо 2PC.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-12-06-q2",
+      "type": "multiple-choice",
+      "question": "Вы проектируете систему для финансового брокера: торговые операции (buy/sell), мультивалютные счета, аудит для ЦБ, риск-менеджмент в реальном времени, аналитика P&L. Какая комбинация паттернов оптимальна и почему?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Только CRUD с PostgreSQL — финансовые системы требуют простоты"
+        },
+        {
+          "id": "b",
+          "text": "Event Sourcing + CQRS + Transactional Outbox. Event Sourcing — для полного audit trail (требование ЦБ: каждая операция зафиксирована). Outbox — для надёжной публикации событий. CQRS — риск-менеджмент (Kafka Streams KTable, low-latency), аналитика P&L (ClickHouse projection), UI баланса (PostgreSQL). Saga — опционально для multi-leg операций (покупка + хеджирование)."
+        },
+        {
+          "id": "c",
+          "text": "Только Saga — финансовые системы требуют координации транзакций"
+        },
+        {
+          "id": "d",
+          "text": "CQRS + Saga достаточно — Event Sourcing избыточен для финансовой системы"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Финансовый брокер — идеальный кейс для полной комбинации паттернов. Event Sourcing критически важен: ЦБ требует полного audit trail каждой операции, temporal queries ('какой был баланс в момент X?'), воспроизведение для расчёта налоговой базы. CQRS необходим: риск-менеджмент требует low-latency (< 5мс) read model в Kafka Streams KTable; аналитика P&L нужна ClickHouse-проекции для OLAP запросов; UI баланса использует PostgreSQL. Эти три read models имеют принципиально разные оптимальные технологии — без CQRS одна база не справится. Outbox — обязателен: потеря события 'TradeExecuted' = несогласованность счетов, это недопустимо. Saga — для сложных multi-asset операций (swap, хеджирование через несколько сервисов).",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-12-06-q3",
+      "type": "multiple-choice",
+      "question": "Какой design pattern из модуля 12 специально создан для решения проблемы dual-write (атомарное обновление базы данных и публикация события в Kafka)?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Event Sourcing"
+        },
+        {
+          "id": "b",
+          "text": "CQRS"
+        },
+        {
+          "id": "c",
+          "text": "Transactional Outbox"
+        },
+        {
+          "id": "d",
+          "text": "Saga Pattern"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Transactional Outbox Pattern создан именно для решения dual-write проблемы. Суть: событие записывается в outbox таблицу в той же базе данных в той же DB-транзакции, что и бизнес-данные. Atomicity гарантирует база данных: либо обе операции (UPDATE business_table + INSERT outbox) выполняются, либо ни одна. Затем CDC (Debezium) или Polling Publisher читает outbox и публикует в Kafka. Event Sourcing решает проблему отсутствия истории. CQRS решает асимметрию read/write нагрузок. Saga решает координацию распределённых транзакций без 2PC. Только Outbox специализирован для dual-write атомарности.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}
