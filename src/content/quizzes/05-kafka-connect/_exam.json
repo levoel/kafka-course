@@ -1,0 +1,336 @@
+{
+  "lessonSlug": "05-kafka-connect/_exam",
+  "moduleId": "05-kafka-connect",
+  "examTitle": "Экзамен: Kafka Connect",
+  "passThreshold": 70,
+  "_meta": {
+    "idPrefix": "kafka-m05-exam",
+    "description": "12 analytical/applied scenario-based questions covering all 5 content lessons of Module 05"
+  },
+  "questions": [
+    {
+      "id": "kafka-m05-exam-q1",
+      "type": "multiple-choice",
+      "question": "JDBC Source Connector с mode=incrementing, incrementing.column.name=id работал корректно. После миграции схемы в таблице добавлен столбец migrated_at (TIMESTAMP, NOT NULL, DEFAULT '2024-01-01'). Коннектор перестал читать новые строки. В чём причина?",
+      "options": [
+        {
+          "id": "a",
+          "text": "JDBC Source не поддерживает таблицы с TIMESTAMP-столбцами в сочетании с mode=incrementing"
+        },
+        {
+          "id": "b",
+          "text": "Добавление нового NOT NULL столбца могло нарушить инкрементный запрос: если новые строки имеют id меньше последнего зафиксированного id (что невозможно при SERIAL), или коннектор потерял соединение во время миграции и зафиксировал некорректный offset"
+        },
+        {
+          "id": "c",
+          "text": "Столбец migrated_at не является монотонно возрастающим — JDBC Source требует монотонности ВСЕХ столбцов таблицы"
+        },
+        {
+          "id": "d",
+          "text": "incrementing.column.name должен указывать на последний добавленный столбец — теперь это migrated_at"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Наиболее вероятная причина: во время ALTER TABLE коннектор мог прервать poll() с исключением (DDL операция блокирует таблицу) и зафиксировать некорректный offset или перейти в FAILED. Кроме того, если в таблице есть уже существующие строки с id=1..N и новые строки начинают с id=N+1, а коннектор зафиксировал max_id=N+1000 до сбоя — он никогда не прочитает строки с id <= N+1000. Проверка: GET /connectors/{name}/status (task state), затем проверить текущий зафиксированный offset в connect-offsets. Решение: сбросить offset коннектора через REST API или пересоздать коннектор.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 2: Source Connectors — раздел 'Режимы чтения JDBC Source'"
+    },
+    {
+      "id": "kafka-m05-exam-q2",
+      "type": "multiple-choice",
+      "question": "Distributed Connect кластер из 3 воркеров выполняет коннектор с tasks.max=3. Worker 2 падает. Какова последовательность событий и финальное распределение задач?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Задачи Worker 2 ставятся в очередь и ждут его восстановления; другие воркеры не принимают чужие задачи"
+        },
+        {
+          "id": "b",
+          "text": "Connect обнаруживает потерю Worker 2 (через Kafka group protocol heartbeat timeout); инициируется rebalance; задача Worker 2 перераспределяется на Worker 1 или Worker 3; оба воркера продолжают работу с 1-2 задачами"
+        },
+        {
+          "id": "c",
+          "text": "Connect автоматически уменьшает tasks.max до 2 для соответствия числу доступных воркеров"
+        },
+        {
+          "id": "d",
+          "text": "tasks.max=3 жёстко привязывает по одной задаче к каждому воркеру — кластер переходит в degraded режим с 2 активными задачами"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Distributed Connect использует тот же группой протокол Kafka, что и consumer groups. При падении Worker 2 Kafka broker обнаруживает отсутствие heartbeat. Group coordinator инициирует rebalance для group.id Connect кластера. Задача(и) Worker 2 записываются в connect-status как UNASSIGNED. Оставшиеся воркеры (Worker 1 и Worker 3) получают новые назначения: при 2 воркерах и 3 задачах один воркер получит 2 задачи, другой — 1. Offset задачи Worker 2 сохранён в connect-offsets — задача продолжит с последней зафиксированной позиции. tasks.max не изменяется автоматически.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 1: Архитектура Kafka Connect — раздел 'Distributed режим'"
+    },
+    {
+      "id": "kafka-m05-exam-q3",
+      "type": "multiple-choice",
+      "question": "Нужно построить CDC-конвейер: PostgreSQL → Kafka → Elasticsearch. PostgreSQL хранит транзакции с полем card_number. Требования: (1) захватывать DELETE, (2) маскировать card_number до записи в Kafka, (3) не останавливаться при ошибках Elasticsearch. Назовите компоненты и их конфигурацию.",
+      "options": [
+        {
+          "id": "a",
+          "text": "JDBC Source (mode=timestamp) + SMT MaskField + ES Sink с errors.tolerance=none"
+        },
+        {
+          "id": "b",
+          "text": "Debezium PostgreSQL Connector + SMT MaskField$Value (fields=card_number) на source connector + ES Sink с errors.tolerance=all + DLQ"
+        },
+        {
+          "id": "c",
+          "text": "Debezium + SMT Filter для исключения DELETE событий + ES Sink с errors.tolerance=all"
+        },
+        {
+          "id": "d",
+          "text": "Kafka Streams приложение вместо Connect — только Streams поддерживает маскировку и CDC одновременно"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Требование (1) захватывать DELETE → обязателен Debezium (JDBC Source не видит DELETE). Требование (2) маскировать card_number до записи в Kafka → SMT MaskField$Value с fields=card_number в конфигурации source connector (Debezium); SMT применяются до сериализации и публикации в Kafka. Требование (3) не останавливаться при ошибках ES → ES Sink с errors.tolerance=all + errors.deadletterqueue.topic.name для сохранения проблемных записей. Полная конфигурация source: transforms=maskCard, transforms.maskCard.type=...MaskField$Value, transforms.maskCard.fields=card_number.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 2: Source Connectors; Урок 4: SMT; Урок 5: Error Handling"
+    },
+    {
+      "id": "kafka-m05-exam-q4",
+      "type": "multiple-choice",
+      "question": "SMT цепочка: transforms=insertTs,routeByDate. insertTs добавляет поле event_ts с текущим timestamp. routeByDate применяет TimestampRouter, используя event_ts. Запись обрабатывается 15 января в 23:59 и содержит бизнес-timestamp 14 января в 10:00. В какой топик попадёт запись?",
+      "options": [
+        {
+          "id": "a",
+          "text": "В топик с суффиксом 20240115 — routeByDate использует системное время сервера"
+        },
+        {
+          "id": "b",
+          "text": "В топик с суффиксом 20240114 — TimestampRouter использует timestamp поля сообщения (event_ts из бизнес-данных)"
+        },
+        {
+          "id": "c",
+          "text": "В топик с суффиксом 20240115 — insertTs добавил системное время (15 января), TimestampRouter использует именно его"
+        },
+        {
+          "id": "d",
+          "text": "В топик без суффикса — TimestampRouter не может обработать поле, добавленное другим SMT"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "insertTs добавляет поле event_ts со значением системного времени обработки (текущий timestamp Connect Worker): 15 января 23:59. Затем routeByDate (TimestampRouter) использует именно это поле — не бизнес-timestamp из исходных данных. Результат: топик с суффиксом 20240115. Если бы нужен был бизнес-timestamp (14 января), insertTs следует настроить по-другому или использовать TimestampConverter для преобразования существующего поля бизнес-timestamp. Это демонстрирует важность порядка SMT и понимания источника данных каждого поля.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 4: SMT — разделы 'Цепочки SMT' и 'TimestampRouter'"
+    },
+    {
+      "id": "kafka-m05-exam-q5",
+      "type": "multiple-choice",
+      "question": "errors.tolerance=all настроен, DLQ не настроен. За час в топике было 1 000 000 записей, 500 имели некорректный формат. Что произошло с этими 500 записями?",
+      "options": [
+        {
+          "id": "a",
+          "text": "500 записей сохранены во встроенный внутренний DLQ Connect и доступны через REST API"
+        },
+        {
+          "id": "b",
+          "text": "500 записей безвозвратно потеряны (silent drop) — без DLQ-топика ошибочные записи при tolerance=all просто пропускаются"
+        },
+        {
+          "id": "c",
+          "text": "500 записей остались в исходном топике с consumer lag = 500 — Connect не продвинул их offset"
+        },
+        {
+          "id": "d",
+          "text": "500 записей сохранены в лог Connect Worker и доступны через файловую систему"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "errors.tolerance=all без DLQ-топика означает silent drop: коннектор встречает некорректную запись, пропускает её без записи куда-либо, продвигает offset дальше. 500 записей потеряны безвозвратно. Если бы был включён errors.log.enable=true — информация об ошибке записалась бы в лог Worker, но сама запись не сохранилась бы. DLQ — единственный механизм сохранения ошибочных записей для последующего анализа. В production без DLQ tolerance=all неприемлем: потеря данных незаметна до тех пор, пока кто-то не заметит несоответствие счётчиков.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 5: Error Handling и DLQ — раздел 'errors.tolerance=all'"
+    },
+    {
+      "id": "kafka-m05-exam-q6",
+      "type": "multiple-choice",
+      "question": "Source connector настроен с tasks.max=4, но источник (одна таблица JDBC с mode=incrementing) поддерживает только последовательный доступ. Сколько задач реально создаст Connect?",
+      "options": [
+        {
+          "id": "a",
+          "text": "4 задачи — tasks.max задаёт точное количество задач, всегда"
+        },
+        {
+          "id": "b",
+          "text": "1 задача — Connector определяет реальное число задач в taskConfigs(); JDBC Source для одной таблицы возвращает конфигурацию для 1 задачи"
+        },
+        {
+          "id": "c",
+          "text": "0 задач — конфликт между tasks.max и реальными возможностями источника приводит к ошибке конфигурации"
+        },
+        {
+          "id": "d",
+          "text": "2 задачи — Connect делит tasks.max пополам при невозможности полного параллелизма"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "tasks.max — это верхняя граница, а не точное число. Реальное число задач определяется методом Connector.taskConfigs(maxTasks): коннектор возвращает List<Map> — каждый Map описывает одну задачу. JDBC Source Connector для одной таблицы (table.whitelist с одной таблицей) возвращает ровно 1 конфигурацию задачи независимо от tasks.max. Параллелизм JDBC Source ограничен числом независимых источников (таблиц, партиций). tasks.max=4 с четырьмя таблицами создаст 4 задачи. Это фундаментальное отличие от consumer group, где число consumers может быть любым (хотя и ограничено партициями).",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 1: Архитектура Kafka Connect — раздел 'Connector vs Task'"
+    },
+    {
+      "id": "kafka-m05-exam-q7",
+      "type": "multiple-choice",
+      "question": "Source connector использует AvroConverter. Schema Registry внезапно стала недоступна во время работы коннектора. Что произойдёт с текущей задачей при errors.tolerance=none?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Коннектор переключится на JsonConverter как запасной вариант и продолжит работу"
+        },
+        {
+          "id": "b",
+          "text": "Задача перейдёт в FAILED: AvroConverter выбросит SerializationException при попытке обратиться к Schema Registry для регистрации/получения схемы"
+        },
+        {
+          "id": "c",
+          "text": "Коннектор буферизует записи локально до восстановления Schema Registry"
+        },
+        {
+          "id": "d",
+          "text": "Коннектор продолжит работу, используя кешированные schema ID из предыдущих сессий"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "AvroConverter при каждой новой схеме или первой записи сессии обращается к Schema Registry: POST /subjects/{subject}/versions для регистрации или GET /schemas/ids/{id} для получения. Если Schema Registry недоступна — HTTP запрос завершается ошибкой, AvroConverter выбрасывает SerializationException. При errors.tolerance=none задача переходит в FAILED. Ограниченный кеш schema ID существует в памяти converter, но при перезапуске задачи кеш сбрасывается. Вывод: Schema Registry — критическая зависимость в production для всех коннекторов с AvroConverter; нужен мониторинг её доступности.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 1: Архитектура Kafka Connect — раздел 'Converters'; Модуль 06: Schema Registry"
+    },
+    {
+      "id": "kafka-m05-exam-q8",
+      "type": "multiple-choice",
+      "question": "S3 Sink с flush.size=1000 и TimeBasedPartitioner (path.format='year=YYYY/month=MM/day=dd/hour=HH'). В 10:45 накоплено 600 записей. В 11:00 приходит 601-я запись. Что произойдёт?",
+      "options": [
+        {
+          "id": "a",
+          "text": "601-я запись ждёт: файл создастся только при достижении flush.size=1000"
+        },
+        {
+          "id": "b",
+          "text": "При появлении 601-й записи (timestamp 11:00) коннектор определяет смену часового раздела и создаёт файл с 600 записями в hour=10. Запись за 11:00 начинает новый буфер для hour=11"
+        },
+        {
+          "id": "c",
+          "text": "S3 Sink ждёт истечения rotate.interval.ms независимо от смены временного раздела"
+        },
+        {
+          "id": "d",
+          "text": "601-я запись добавляется к 600 и буфер продолжает накапливаться в директории hour=10"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "TimeBasedPartitioner отслеживает временной раздел каждой записи. При поступлении записи с timestamp=11:00:xx коннектор определяет, что раздел изменился (hour=11 ≠ hour=10). Немедленно создаётся S3-файл с накопленными 600 записями в директории year=2024/month=01/day=15/hour=10. Затем 601-я запись начинает новый буфер для hour=11. Файл создаётся при любом из условий: достигнут flush.size ИЛИ истёк rotate.interval.ms ИЛИ сменился временной раздел. Это гарантирует правильную партиционированность данных в S3 по времени.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 3: Sink Connectors — раздел 'S3 Sink Connector'"
+    },
+    {
+      "id": "kafka-m05-exam-q9",
+      "type": "multiple-choice",
+      "question": "Коннектор показывает статус RUNNING, но task-0 в состоянии FAILED. Какой REST API вызов вернёт детальную информацию об ошибке task-0?",
+      "options": [
+        {
+          "id": "a",
+          "text": "GET /connectors/{name}/status — возвращает статус коннектора и всех задач"
+        },
+        {
+          "id": "b",
+          "text": "GET /connectors/{name}/tasks/0/status — возвращает детальный статус конкретной задачи, включая trace ошибки"
+        },
+        {
+          "id": "c",
+          "text": "GET /connector-plugins/{class}/config/validate — валидирует конфигурацию и показывает ошибки"
+        },
+        {
+          "id": "d",
+          "text": "GET /connectors/{name}/tasks — возвращает конфигурации задач, включая ошибки выполнения"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "GET /connectors/{name}/tasks/{taskId}/status возвращает детальный статус конкретной задачи: {\"id\": 0, \"state\": \"FAILED\", \"worker_id\": \"worker1:8083\", \"trace\": \"org.apache.kafka.connect.errors.ConnectException: ...\"}. Поле trace содержит полный stack trace исключения. GET /connectors/{name}/status (вариант а) также полезен — он возвращает статус всех задач, но поле trace на уровне задачи может быть усечено. Наиболее точная диагностика конкретной задачи — через /tasks/{id}/status. После анализа: POST /connectors/{name}/tasks/0/restart для перезапуска задачи.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 1: Архитектура Kafka Connect — раздел 'REST API'"
+    },
+    {
+      "id": "kafka-m05-exam-q10",
+      "type": "multiple-choice",
+      "question": "Разработчик написал Custom SMT, реализующий Transformation<SourceRecord>. Этот SMT подключается к Sink Connector. Что произойдёт при запуске?",
+      "options": [
+        {
+          "id": "a",
+          "text": "SMT работает корректно — Transformation<SourceRecord> совместим с SinkRecord через полиморфизм"
+        },
+        {
+          "id": "b",
+          "text": "Ошибка конфигурации или ClassCastException в runtime: Sink Connector передаёт SinkRecord, но SMT ожидает SourceRecord — несовместимые типы"
+        },
+        {
+          "id": "c",
+          "text": "Connect автоматически конвертирует SinkRecord в SourceRecord для совместимости"
+        },
+        {
+          "id": "d",
+          "text": "SMT игнорируется — Connect проверяет тип параметра и пропускает несовместимые трансформации"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Transformation<R extends ConnectRecord<R>> — это обобщённый интерфейс. Source Connector использует Transformation<SourceRecord>, Sink Connector — Transformation<SinkRecord>. SourceRecord и SinkRecord — разные классы, оба наследуют ConnectRecord, но не взаимозаменяемы. При применении SMT с Transformation<SourceRecord> к SinkRecord возникнет ClassCastException в runtime (или ошибка во время инициализации задачи). Правильно: Transformation<SinkRecord> для sink, или использовать общий Transformation<R extends ConnectRecord<R>> без привязки к конкретному типу. В Java дженерики стираются при компиляции, поэтому ошибка может проявиться только в runtime.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 4: SMT — раздел 'Анатомия custom SMT'"
+    },
+    {
+      "id": "kafka-m05-exam-q11",
+      "type": "multiple-choice",
+      "question": "JDBC Source Connector читает таблицу с 50 000 000 строк. tasks.max=1, poll.interval.ms=5000. Коннектор работает медленно. Таблица имеет 5 независимых partitionable столбцов. Что улучшит throughput?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Уменьшить poll.interval.ms до 100 — более частые опросы увеличат пропускную способность"
+        },
+        {
+          "id": "b",
+          "text": "Увеличить tasks.max и использовать table.partition.mode для разбиения по диапазонам — каждая задача читает свой диапазон строк параллельно"
+        },
+        {
+          "id": "c",
+          "text": "Переключиться на mode=bulk — полная выгрузка быстрее инкрементальных запросов"
+        },
+        {
+          "id": "d",
+          "text": "Увеличить replication.factor внутренних топиков Connect для более быстрой фиксации offset"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "tasks.max=1 означает однопоточное чтение. При поддержке источником партиционирования (например, числовой PK, по которому можно делить диапазоны) увеличение tasks.max позволит нескольким задачам читать разные диапазоны параллельно. Confluent JDBC Source поддерживает partition.mode с настройкой диапазонов. Уменьшение poll.interval.ms (а) лишь увеличивает нагрузку на базу без роста throughput — каждый запрос всё равно ограничен I/O базы. mode=bulk (в) для 50M строк создаст огромную нагрузку при каждом poll. replication.factor (г) не влияет на скорость чтения из источника.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 2: Source Connectors — раздел 'Параллелизм source connectors'"
+    },
+    {
+      "id": "kafka-m05-exam-q12",
+      "type": "multiple-choice",
+      "question": "Consumer читает из DLQ топика с включёнными context headers. Он обнаруживает запись с заголовком __connect.errors.topic=orders, __connect.errors.partition=2, __connect.errors.offset=84520. Что означают эти данные и как повторно обработать эту запись?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Запись из топика orders, партиция 2, offset 84520 вызвала ошибку. Для ретрая: прочитать исходную запись из orders/partition=2/offset=84520, исправить логику обработки, вручную опубликовать в целевую систему"
+        },
+        {
+          "id": "b",
+          "text": "Эти данные указывают на offset в DLQ топике, а не в исходном топике orders"
+        },
+        {
+          "id": "c",
+          "text": "Запись из orders/partition=2/offset=84520 была успешно обработана — DLQ хранит только метаданные успешных операций"
+        },
+        {
+          "id": "d",
+          "text": "Для ретрая нужно перезапустить connector с auto.offset.reset=earliest — он автоматически перечитает с offset 84520"
+        }
+      ],
+      "correctAnswer": "a",
+      "explanation": "Заголовки DLQ указывают координаты ИСХОДНОЙ записи (не позицию в DLQ): __connect.errors.topic=orders означает, что запись пришла из топика orders; __connect.errors.partition=2 — из партиции 2; __connect.errors.offset=84520 — offset в партиции 2 топика orders. Для ретрая: (1) прочитать исходную запись: kafka-console-consumer.sh --topic orders --partition 2 --offset 84520 --max-messages 1; (2) проанализировать причину ошибки через __connect.errors.exception.message; (3) исправить данные или логику; (4) вручную опубликовать в целевую систему или написать consumer, читающий из DLQ с исправленной логикой. auto.offset.reset=earliest перечитает весь топик с начала, что неприемлемо.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 5: Error Handling и DLQ — раздел 'DLQ заголовки'"
+    }
+  ]
+}
