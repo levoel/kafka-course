@@ -1,0 +1,88 @@
+{
+  "lessonSlug": "10-production-ops/05-topic-rebalancing",
+  "moduleId": "10-production-ops",
+  "_meta": {
+    "idPrefix": "kafka-m10-05",
+    "description": "Quiz for kafka-reassign-partitions workflow. IDs: kafka-m10-05-q1, q2, q3"
+  },
+  "questions": [
+    {
+      "id": "kafka-m10-05-q1",
+      "type": "multiple-choice",
+      "question": "После выполнения kafka-reassign-partitions --execute наблюдается: UnderReplicatedPartitions вырос с 0 до 15. ActiveBrokerCount = 4 (все брокеры живы). ReplicationBytesInPerSec = 45 MB/s. Это ожидаемое поведение?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Нет. UnderReplicatedPartitions > 0 при живых брокерах -- всегда инцидент. Нужно немедленно остановить reassignment"
+        },
+        {
+          "id": "b",
+          "text": "Да. Во время reassignment новые реплики добавляются как out-of-sync (они ещё не догнали лидера). Пока реплика догоняет -- партиция under-replicated. Это нормально. После завершения копирования реплики войдут в ISR и URP вернётся к 0"
+        },
+        {
+          "id": "c",
+          "text": "Частично. UnderReplicatedPartitions=15 означает что 15 партиций потеряли данные. ReplicationBytesInPerSec показывает попытку восстановления"
+        },
+        {
+          "id": "d",
+          "text": "Нет. ReplicationBytesInPerSec=45 MB/s указывает на нарушение throttle (должно быть ≤ 50 MB/s). Нужно снизить throttle"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Это нормальная картина во время partition reassignment. Процесс: (1) Новая реплика добавляется на целевой брокер как Out-of-Sync Replica (OSR). (2) Данные копируются: лидер -> новая реплика (именно это показывает ReplicationBytesInPerSec=45 MB/s, чуть ниже throttle 50 MB/s). (3) Пока реплика копирует данные -- она НЕ в ISR -> партиция under-replicated. (4) Когда реплика догнала лидера -> входит в ISR -> URP снижается. ReplicationBytesInPerSec=45 MB/s в рамках throttle 52428800 (50 MB/s) -- всё нормально. Тревожный сигнал: URP не снижается после нескольких часов при ненулевом ReplicationBytesInPerSec -- возможно задержка репликации.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m10-05-q2",
+      "type": "multiple-choice",
+      "question": "Администратор запускает kafka-reassign-partitions --execute без --throttle для 500 GB данных. Через 2 минуты от клиентов поступают жалобы: produce ошибки TimeoutException, consumer lag резко вырос. Какова причина и что делать немедленно?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Причина: 500 GB данных -- слишком большой объём для reassignment. Нужно разбить на несколько маленьких reassignment"
+        },
+        {
+          "id": "b",
+          "text": "Причина: без throttle reassignment потребляет весь сетевой и дисковый I/O -- producers и consumers не могут получить ресурсы. Немедленно: добавить throttle конфиги на брокеры: kafka-configs.sh --alter --add-config leader.replication.throttled.rate=52428800. Это не отменит reassignment, но ограничит его потребление ресурсов"
+        },
+        {
+          "id": "c",
+          "text": "Причина: broker перегружен метаданными. TimeoutException означает timeout metadata request. Решение: перезапустить брокеры"
+        },
+        {
+          "id": "d",
+          "text": "Причина: 500 GB данных создают слишком много UnderReplicatedPartitions. TimeoutException -- следствие нарушения ISR. Нужно увеличить min.insync.replicas"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Без throttle reassignment захватывает всю доступную пропускную способность NIC и IOPS диска. 500 GB при полной скорости 10 Gbps NIC = менее 10 минут transfer, но за это время 100% NIC занят репликацией. Producers не могут отправить данные -> TimeoutException. Consumers не получают ответы на fetch -> lag растёт. Немедленное действие: kafka-configs.sh --bootstrap-server localhost:9092 --entity-type brokers --entity-name 1 --alter --add-config 'leader.replication.throttled.rate=52428800,follower.replication.throttled.rate=52428800'. Повторить для каждого брокера. Это установит throttle без остановки текущего reassignment. Kafka применит throttle к ongoing репликации немедленно.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m10-05-q3",
+      "type": "multiple-choice",
+      "question": "После завершения partition reassignment (verify показал 'completed' для всех партиций) инженер замечает: один брокер является лидером для 80% партиций, остальные три -- для 20% совместно. Какова причина и как исправить?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Reassignment не завершён корректно. Нужно повторно запустить --execute для перераспределения лидеров"
+        },
+        {
+          "id": "b",
+          "text": "После reassignment preferred leaders в JSON плане могли быть распределены неравномерно. Решение: kafka-leader-election.sh --election-type preferred --all-topic-partitions переместит лидерство к preferred replica (первый элемент в replicas[]) без копирования данных"
+        },
+        {
+          "id": "c",
+          "text": "Нормальная ситуация: Kafka автоматически балансирует лидеров по нагрузке, а не по числу партиций"
+        },
+        {
+          "id": "d",
+          "text": "Нужно перезапустить overloaded брокер: он временно потерял лидерство и после перезапуска восстановит баланс"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Preferred leader -- первый элемент в массиве replicas[] в reassignment JSON. Например, replicas=[2, 3, 4] означает: broker-2 является preferred leader для этой партиции. Kafka стремится к тому, чтобы текущий leader == preferred leader. Но во время reassignment текущий leader мог не измениться: если до reassignment лидером был broker-1, и broker-1 всё ещё в ISR (но теперь не preferred), Kafka не сменит лидера автоматически. kafka-leader-election.sh --election-type preferred --all-topic-partitions запускает preferred replica election: для каждой партиции, где текущий leader != preferred leader, выполняется leadership transfer. Это лёгкая операция (нет копирования данных, только смена metadata) и занимает секунды.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

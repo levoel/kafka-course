@@ -1,0 +1,363 @@
+{
+  "lessonSlug": "10-production-ops/_exam",
+  "moduleId": "10-production-ops",
+  "examTitle": "Экзамен: Production Operations",
+  "passThreshold": 70,
+  "_meta": {
+    "idPrefix": "kafka-m10-exam",
+    "description": "13 applied/analytical scenario-based questions covering all 6 lessons of Module 10. Emphasis on numeric targets, operational reasoning, and incident diagnosis."
+  },
+  "questions": [
+    {
+      "id": "kafka-m10-exam-q1",
+      "type": "multiple-choice",
+      "question": "Дашборд показывает: UnderReplicatedPartitions=8, RequestHandlerAvgIdlePercent=0.08, BytesInPerSec broker-1=42 MB/s, broker-2=0 MB/s, broker-3=44 MB/s. ActiveBrokerCount=3. Что произошло и каковы первые три шага?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Broker-2 перегружен репликацией (URP=8). Первые шаги: (1) снизить produce rate, (2) увеличить num.io.threads, (3) добавить брокер"
+        },
+        {
+          "id": "b",
+          "text": "Broker-2 недоступен (BytesInPerSec=0): перестал принимать трафик. 8 партиций, у которых broker-2 в ISR, стали under-replicated. RequestHandlerAvgIdlePercent=0.08 -- broker-1 и broker-3 перегружены принимая трафик упавшего broker-2. Шаги: (1) проверить процесс/хост broker-2, (2) восстановить broker-2, (3) дождаться пересборки ISR. Если быстрое восстановление невозможно -- добавить временный брокер"
+        },
+        {
+          "id": "c",
+          "text": "Disk failure на broker-2: disk I/O = 0. Шаги: (1) kafka-log-dirs.sh для диагностики, (2) заменить диск, (3) запустить reassignment"
+        },
+        {
+          "id": "d",
+          "text": "Network partition: broker-2 изолирован от broker-1 и broker-3. ActiveBrokerCount=3 означает что broker-2 ещё считается живым контроллером"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "BytesInPerSec=0 на broker-2 при ActiveBrokerCount=3: брокер зарегистрирован в KRaft как живой, но НЕ обрабатывает трафик. Причина может быть: JVM frozen (GC pause продолжается), disk hang, сетевая проблема на уровне приложения. RequestHandlerAvgIdlePercent=0.08 (критически мало) -- broker-1 и broker-3 взяли на себя дополнительный трафик для leader-партиций broker-2 (те партиции, где broker-2 лидер, также должны были переизбрать лидера). URP=8 -- 8 партиций ждут, пока broker-2 вернётся в ISR.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 01: JMX Metrics Taxonomy -- секции Broker-level метрики и KRaft Controller метрики"
+    },
+    {
+      "id": "kafka-m10-exam-q2",
+      "type": "multiple-choice",
+      "question": "Prometheus alert KafkaRequestHandlerOverload: RequestHandlerAvgIdlePercent = 0.22 (порог: 0.30). Брокер имеет num.io.threads=8. Какой config-параметр нужно изменить и до какого значения как первый шаг?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Увеличить num.network.threads с 3 до 8: сетевые потоки принимают запросы от клиентов -- их нехватка создаёт bottleneck"
+        },
+        {
+          "id": "b",
+          "text": "Увеличить num.io.threads с 8 до 12-16: I/O потоки обрабатывают запросы из очереди. При idle < 30% они перегружены. Изменение применяется без перезапуска (dynamic config)"
+        },
+        {
+          "id": "c",
+          "text": "Уменьшить batch.size у producers: меньший batch = меньше работы на брокере per request"
+        },
+        {
+          "id": "d",
+          "text": "Увеличить socket.request.max.bytes: текущий лимит не позволяет принимать большие batch"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "RequestHandlerAvgIdlePercent измеряет именно I/O потоки (не сетевые). idle=0.22 означает: 78% времени все I/O потоки заняты. Это прямой индикатор нехватки num.io.threads. num.io.threads -- dynamic config: можно изменить без перезапуска через kafka-configs.sh --alter. Рекомендуется увеличить поэтапно: 8 -> 12, наблюдать за метрикой, при необходимости 12 -> 16. Максимальное эффективное значение: 2 × CPU cores. num.network.threads -- другой пул, отвечает за приём/отправку запросов по сети, не за их обработку.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 01: JMX Metrics -- RequestHandlerAvgIdlePercent; Урок 03: Performance Tuning -- Broker-side tuning"
+    },
+    {
+      "id": "kafka-m10-exam-q3",
+      "type": "multiple-choice",
+      "question": "Producer имеет конфигурацию: batch.size=1048576, linger.ms=50, compression.type=lz4. Мониторинг показывает: record-send-rate=8,000 records/s, batch-size-avg=12KB, record-queue-time-avg=50ms. Throughput ниже ожидаемого 100K records/s. В чём проблема и что это говорит об использовании системы?",
+      "options": [
+        {
+          "id": "a",
+          "text": "batch-size-avg=12KB при batch.size=1MB -- конфиг неверный. Нужно уменьшить batch.size до 12KB"
+        },
+        {
+          "id": "b",
+          "text": "record-send-rate=8,000 records/s при linger.ms=50ms и batch-size-avg=12KB: producer ждёт 50ms и отправляет batch из ~8000/20 = 400 записей per 50ms. 400 × 30 bytes? Нет -- 12KB/50ms batch = ~240 records per batch. Реальная нагрузка: 8K records/s -- НЕ 100K records/s. Конфиг для 100K records/s правильный, но текущая нагрузка намного ниже -- это нормальное поведение при low traffic"
+        },
+        {
+          "id": "c",
+          "text": "lz4 сжатие уменьшает batch-size-avg: 1MB batch сжимается до 12KB. Нужно отключить сжатие для честного сравнения"
+        },
+        {
+          "id": "d",
+          "text": "record-queue-time-avg=50ms означает проблему с брокером: запросы застревают в очереди 50ms. Нужно проверить RequestHandlerAvgIdlePercent"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "batch-size-avg=12KB при batch.size=1MB означает: текущая нагрузка недостаточна для заполнения 1MB batch за 50ms. Расчёт: 8,000 records/s × 50ms = 400 записей за linger.ms. 12KB / 400 = 30 bytes avg record size -- или 12KB / 50ms = batch заполнен маленькими записями. Это нормально: throughput-конфиг (batch.size=1MB, linger.ms=50) рассчитан для 100K+ records/s. При 8K records/s он работает субоптимально (batch не заполняется), но не ломается. record-queue-time-avg=50ms = ровно linger.ms -- producer ждёт полные 50ms, batch уходит по timeout, не по размеру. Это подтверждает: нагрузка низкая, не конфиг плохой.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 03: Performance Tuning -- Producer throughput optimization"
+    },
+    {
+      "id": "kafka-m10-exam-q4",
+      "type": "multiple-choice",
+      "question": "Рассчитайте суммарный объём дискового пространства для кластера: 30,000 msg/s, avg size 2 KB, RF=3, retention=14 дней. С поправкой на сжатие lz4 (ratio 2.0x) и headroom 40%.",
+      "options": [
+        {
+          "id": "a",
+          "text": "Без сжатия: daily = 30000 × 2000 × 86400 × 3 / 1073741824 = 14485 GB. Total = 14485 × 14 = 202,790 GB. С lz4 (÷2): 101,395 GB. С headroom (×1.4): 141,953 GB ≈ 142 TB"
+        },
+        {
+          "id": "b",
+          "text": "daily = 30000 × 2000 × 86400 / 1073741824 = 4828 GB (без RF). Total = 4828 × 14 = 67,592 GB. С lz4: 33,796 GB. С headroom: 47,314 GB ≈ 47 TB"
+        },
+        {
+          "id": "c",
+          "text": "daily = 30000 × 2 × 86400 × 3 / 1000 = 15,552 GB. Total = 217,728 GB. С lz4: 108,864 GB. С headroom: 152,410 GB ≈ 152 TB"
+        },
+        {
+          "id": "d",
+          "text": "daily = 30000 × 2000 × 86400 × 3 / (1024×1024×1024) = 14485 GB. Total = 202,790 GB. lz4 не применяется к данным на диске -- только к сетевому трафику. С headroom: 283,906 GB ≈ 284 TB"
+        }
+      ],
+      "correctAnswer": "a",
+      "explanation": "Расчёт шаг за шагом: daily_bytes = 30000 × 2000 × 86400 × 3 = 15,552,000,000,000 bytes. daily_GB = 15,552,000,000,000 / 1,073,741,824 = 14,484.9 GB ≈ 14,485 GB/день. total_GB = 14,485 × 14 = 202,790 GB (без сжатия). С lz4 (ratio 2.0): 202,790 / 2 = 101,395 GB. С headroom 40% (×1.4): 101,395 × 1.4 = 141,953 GB ≈ 142 TB. Важно: lz4 применяется producer'ом до записи -- данные хранятся на диске уже сжатыми (вариант D неверен). При 3 брокерах: 142 TB / 3 ≈ 47 TB per broker.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 04: Capacity Planning -- Формула 1: Disk sizing"
+    },
+    {
+      "id": "kafka-m10-exam-q5",
+      "type": "multiple-choice",
+      "question": "Команда планирует топик для аналитики: target throughput 80 MB/s, NVMe SSD (partition throughput 100 MB/s), 6 consumer groups, broker count=3. Сколько партиций создать и как распределить по брокерам?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Throughput-based: ceil(80/100) = 1 партиция. Consumer-based: 6 partitions. max(1,6) = 6. Распределение: 2 per broker. С запасом: 12 партиций (4 per broker)"
+        },
+        {
+          "id": "b",
+          "text": "Throughput-based: ceil(80/100) = 1 партиция. Consumer-based: 6 partitions. max(1,6) = 6. Только 6 партиций достаточно: 2 per broker. Добавление запаса избыточно"
+        },
+        {
+          "id": "c",
+          "text": "Нужно 80 партиций: 1 MB/s per partition -- это стандарт для SSD. 80 / 1 = 80 партиций"
+        },
+        {
+          "id": "d",
+          "text": "Нужно 6 × 3 = 18 партиций: каждый consumer group должен иметь свои партиции на каждом брокере"
+        }
+      ],
+      "correctAnswer": "a",
+      "explanation": "Расчёт: throughput_MB_s = 80 MB/s. partition_throughput (NVMe SSD) = 100 MB/s. throughput-based min = ceil(80/100) = 1 партиция. consumer-based min = 6 (максимальный параллелизм для каждой из 6 consumer groups). Итоговый min = max(1, 6) = 6. Рекомендованная практика: умножить на 2-3 для запаса и сделать кратным числу брокеров. 6 × 2 = 12, 12 / 3 = 4 per broker -- идеально. При 12 партициях: каждая consumer group может использовать до 12 параллельных consumers. NVMe throughput позволяет: 12 × 100 MB/s = 1200 MB/s потенциальная пропускная способность -- намного больше target 80 MB/s.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 04: Capacity Planning -- Формула 2: Partition count"
+    },
+    {
+      "id": "kafka-m10-exam-q6",
+      "type": "multiple-choice",
+      "question": "Consumer group 'realtime-alerts' имеет records-lag-max=45,000. Инженер хочет немедленно снизить lag. Топик 'events' имеет 12 партиций. Сейчас в группе 4 consumer инстанса. Какова максимальная польза от добавления инстансов и когда добавление перестаёт помогать?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Можно добавить бесконечное число consumers: каждый новый consumer ускоряет обработку пропорционально"
+        },
+        {
+          "id": "b",
+          "text": "Максимальный параллелизм = 12 (число партиций). Сейчас 4 consumers: каждый обрабатывает 3 партиции. Можно добавить до 8 инстансов (итого 12). 13-й и последующие инстансы будут idle -- нет партиций для назначения. Каждый дополнительный consumer уменьшает партиции на consumer: от 3 (при 4) до 1 (при 12)"
+        },
+        {
+          "id": "c",
+          "text": "Максимальный параллелизм = 4: Kafka не позволяет более 1 consumer group на брокер"
+        },
+        {
+          "id": "d",
+          "text": "Добавление consumers не поможет: lag определяется скоростью обработки, а не числом consumers"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Фундаментальный принцип: один consumer в группе = одна или несколько партиций. Одну партицию нельзя назначить двум consumers одной группы. При 12 партициях: максимум 12 parallel consumers. Сейчас 4 consumers × 3 партиции/consumer. Добавив до 12 consumers: каждый обрабатывает 1 партицию, максимальный параллелизм. 12 consumers × (lag/12 per partition / consumer throughput) = минимальное время восстановления. При lag=45,000 по 12 партициям: ~3,750 records lag per partition. Если consumer processing speed = 5K records/s per consumer: каждая партиция восстанавливается за 0.75 секунды. Добавление 13-го consumer: ребалансировка (прерывание обработки) без выигрыша в throughput.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 03: Performance Tuning -- Consumer throughput, Consumer lag thresholds"
+    },
+    {
+      "id": "kafka-m10-exam-q7",
+      "type": "multiple-choice",
+      "question": "JMX Exporter kafka-broker.yml содержит паттерн: pattern: 'kafka.network<type=(.+), name=(.+), request=(.+)><>(\\w+)'. Какие метрики будет экспортировать этот паттерн и что останется за его пределами?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Паттерн захватывает все kafka.network метрики: RequestsPerSec, TotalTimeMs, LocalTimeMs, RequestQueueTimeMs -- с label request=Produce/FetchConsumer/FetchFollower. За пределами: kafka.server и kafka.controller метрики -- требуют отдельных паттернов"
+        },
+        {
+          "id": "b",
+          "text": "Паттерн захватывает только TotalTimeMs: это единственная метрика с тремя параметрами (type, name, request)"
+        },
+        {
+          "id": "c",
+          "text": "Паттерн экспортирует все kafka.network метрики включая kafka.server и kafka.controller: domain не имеет значения"
+        },
+        {
+          "id": "d",
+          "text": "Паттерн не будет работать: в Kafka 4.0 все request-level метрики перемещены в kafka.server домен"
+        }
+      ],
+      "correctAnswer": "a",
+      "explanation": "Паттерн 'kafka.network<type=(.+), name=(.+), request=(.+)><>(\\w+)' матчит MBeans с доменом kafka.network, тремя ключами (type, name, request) и атрибутом. Под паттерн попадают: kafka.network:type=RequestMetrics,name=TotalTimeMs,request=Produce, kafka.network:type=RequestMetrics,name=RequestsPerSec,request=FetchConsumer, kafka.network:type=RequestMetrics,name=RequestQueueTimeMs,request=FetchFollower -- и т.д. Label request= позволяет различать метрики по типу запроса в Grafana. НЕ захватывает: kafka.server (ReplicaManager, BrokerTopicMetrics, KafkaRequestHandlerPool) и kafka.controller (KafkaController) -- у них другой domain. Они требуют отдельных правил.",
+      "bloomLevel": "conceptual",
+      "studyHint": "Урок 02: Monitoring Stack -- JMX Exporter config, kafka-broker.yml"
+    },
+    {
+      "id": "kafka-m10-exam-q8",
+      "type": "multiple-choice",
+      "question": "Вы добавляете пятый брокер в кластер из четырёх. После регистрации запускаете kafka-reassign-partitions --generate для 20 топиков (total 100 партиций, RF=3). Throttle: 80 MB/s. Данные для перемещения: 800 GB. Оцените: (1) время завершения reassignment, (2) нужно ли удалять throttle после завершения.",
+      "options": [
+        {
+          "id": "a",
+          "text": "(1) 800 GB / 80 MB/s = 10,240 секунд ≈ 2.84 часа. (2) Throttle удалять не нужно -- он автоматически сбрасывается после verify"
+        },
+        {
+          "id": "b",
+          "text": "(1) 800 GB / 80 MB/s = 10,240 секунд ≈ 2.84 часа. (2) Throttle НЕ удаляется автоматически: после verify нужно вручную удалить leader.replication.throttled.rate и follower.replication.throttled.rate на КАЖДОМ затронутом брокере через kafka-configs.sh --alter --delete-config"
+        },
+        {
+          "id": "c",
+          "text": "(1) 800 GB / 80 MB/s = 10 GB/s ≈ 80 секунд. (2) Throttle удалять после verify"
+        },
+        {
+          "id": "d",
+          "text": "(1) 2.84 часа плюс preferred leader election: суммарно 3-4 часа. (2) Throttle удаляется командой kafka-reassign-partitions --throttle 0"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Расчёт времени: 800 GB × 1024 MB/GB / 80 MB/s = 819,200 MB / 80 MB/s = 10,240 секунд ≈ 2.84 часа. Это теоретический минимум при равномерной нагрузке. Реально может быть немного дольше из-за write overhead на новых репликах и конкурирующего трафика. Throttle управление: команда --throttle при --execute устанавливает конфиги через AdminClient, но НЕ регистрирует автоматическую очистку. После verify 'all completed': вручную удалить для каждого брокера: kafka-configs.sh --bootstrap-server localhost:9092 --entity-type brokers --entity-name N --alter --delete-config 'leader.replication.throttled.rate,follower.replication.throttled.rate'. Если забыть -- обычная репликация (например после rolling restart) будет работать медленнее.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 05: Topic Rebalancing -- Throttle, оценка времени завершения"
+    },
+    {
+      "id": "kafka-m10-exam-q9",
+      "type": "multiple-choice",
+      "question": "Финтех система требует: producer latency p99 меньше 3ms. Сообщения содержат финансовые транзакции (важна durability). Выберите оптимальную конфигурацию producer.",
+      "options": [
+        {
+          "id": "a",
+          "text": "batch.size=1048576, linger.ms=50, compression.type=lz4, acks=all -- максимальный throughput с durability"
+        },
+        {
+          "id": "b",
+          "text": "batch.size=16384, linger.ms=0, compression.type=none, acks=all -- latency оптимизация с durability. acks=1 недопустимо для финансовых транзакций. linger.ms=0 и минимальный batch для минимальной задержки. Достижимо менее 3ms p99 в одном датацентре"
+        },
+        {
+          "id": "c",
+          "text": "batch.size=16384, linger.ms=0, compression.type=none, acks=1 -- минимальная latency. Durability не критична в реальном времени"
+        },
+        {
+          "id": "d",
+          "text": "batch.size=65536, linger.ms=5, compression.type=snappy, acks=all -- компромисс между throughput и latency"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Требования: latency p99 < 3ms И durability (финансовые транзакции). acks=1 недопустимо: если лидер упадёт до репликации -- транзакция потеряна. acks=all при min.insync.replicas=2 гарантирует: запись подтверждена минимум двумя брокерами. linger.ms=0: не ждать заполнения batch -- отправлять немедленно. В пределах одного датацентра RTT = 0.1-1ms, broker processing = 0.5-2ms, ISR replication (acks=all) = 1-5ms. Суммарно: 1-8ms. При хороших условиях (NVMe, низкий network latency): 2-5ms p99 достижимо. batch.size=16384 (default): быстрое заполнение. compression.type=none: нет CPU overhead. Этот конфиг -- правильный trade-off для latency-критичных финансовых систем.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 03: Performance Tuning -- Producer latency optimization"
+    },
+    {
+      "id": "kafka-m10-exam-q10",
+      "type": "multiple-choice",
+      "question": "Кластер: 5 брокеров, 1 Gbps NIC каждый. Нагрузка: 100 MB/s inbound, RF=3, 4 consumer groups. Рассчитайте network utilization per broker и определите: является ли NIC bottleneck?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Total = 100 (in) + 200 (replication RF-1=2) + 400 (consumers × 4) = 700 MB/s. Per broker: 700/5 = 140 MB/s. 1 Gbps = 125 MB/s. 140 > 125: NIC перегружен. Нужны 10 Gbps NIC"
+        },
+        {
+          "id": "b",
+          "text": "Total = 100 (in) + 200 (replication) + 400 (consumers) = 700 MB/s. Per broker: 700/5 = 140 MB/s. 70% лимит 1 Gbps = 87.5 MB/s. 140 >> 87.5: critical NIC bottleneck"
+        },
+        {
+          "id": "c",
+          "text": "Total = 100 + 200 + 400 = 700 MB/s. Per broker: 140 MB/s. 1 Gbps = 125 MB/s. 140/125 = 112% -- слегка перегружен. Допустимо при редких пиках"
+        },
+        {
+          "id": "d",
+          "text": "Consumer groups не создают исходящий трафик с брокеров. Total = 100 (in) + 200 (replication) = 300 MB/s. Per broker: 60 MB/s. Нормально"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Полный расчёт: inbound = 100 MB/s. Replication = 100 × (3-1) = 200 MB/s. Consumer outbound = 100 × 4 = 400 MB/s (каждая из 4 consumer groups получает полную копию данных). Total network = 700 MB/s. Per broker (5 брокеров, равномерно) = 140 MB/s. Правило 70%: max sustained = 125 × 0.7 = 87.5 MB/s. Фактически: 140 MB/s >> 87.5 MB/s -- критический bottleneck. Даже без 70% правила: 140 MB/s > 125 MB/s (физический максимум 1 Gbps NIC) -- трафик физически не пройдёт. Решение: 10 Gbps NIC (1250 MB/s, 70% = 875 MB/s >> 140 MB/s) или добавить больше брокеров.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 04: Capacity Planning -- Формула 3: Network bandwidth"
+    },
+    {
+      "id": "kafka-m10-exam-q11",
+      "type": "multiple-choice",
+      "question": "После kafka-reassign-partitions --verify все партиции показывают 'completed'. UnderReplicatedPartitions вернулся к 0. Однако broker-4 (новый) является preferred leader для 0 из 50 партиций, весь лидерский трафик на broker-1/2/3. Почему и как исправить без повторного reassignment?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Это нормально: Kafka автоматически балансирует лидеров по нагрузке, игнорируя preferred leader в replicas[]"
+        },
+        {
+          "id": "b",
+          "text": "Proposed plan был сгенерирован неверно: broker-4 не указан как preferred leader ни в одной партиции. Нужно повторно запустить --generate с корректным распределением preferred leaders"
+        },
+        {
+          "id": "c",
+          "text": "Preferred leader election не был запущен после завершения reassignment. Запустить: kafka-leader-election.sh --bootstrap-server localhost:9092 --election-type preferred --all-topic-partitions. Это переместит лидерство к preferred replica (первый в replicas[]) мгновенно без копирования данных"
+        },
+        {
+          "id": "d",
+          "text": "Перезапустить broker-1/2/3 по очереди (rolling restart): при перезапуске лидерство временно переходит к другим брокерам и балансируется автоматически"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "После завершения reassignment данные находятся на правильных брокерах (URP=0, все реплики синхронизированы). Но Kafka не меняет текущего лидера автоматически, если он уже в ISR. Если broker-1 был лидером для партиции до reassignment, и после reassignment broker-4 стал preferred leader (первый в replicas[]), но broker-1 всё ещё в ISR -- leadership остаётся на broker-1. kafka-leader-election.sh --election-type preferred запускает Preferred Replica Leader Election: для каждой партиции, где current leader != preferred leader, переносит лидерство к preferred. Это metadata-only операция: нет копирования данных, занимает секунды для всего кластера. Это ОБЯЗАТЕЛЬНЫЙ шаг после любого reassignment для балансировки лидерской нагрузки.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 05: Topic Rebalancing -- Playbook добавления брокера, Шаг 8"
+    },
+    {
+      "id": "kafka-m10-exam-q12",
+      "type": "multiple-choice",
+      "question": "Команда настраивает monitoring: JMX Exporter для broker internals + danielqsj/kafka-exporter для consumer lag. Оба Prometheus job'а настроены. Инженер замечает дублирование: kafka_consumergroup_lag доступна в обоих job'ах. Что делать?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Удалить kafka-exporter: JMX Exporter полностью покрывает все метрики"
+        },
+        {
+          "id": "b",
+          "text": "kafka_consumergroup_lag не доступна через JMX Exporter (он не видит consumer group offsets через JMX MBeans). Дублирования нет. Если метрика видна в обоих job'ах -- возможно JMX Exporter неверно матчит MBeans или kafka-exporter неверно настроен. Проверить имена метрик: JMX Exporter экспортирует client-side JMX (kafka.consumer:type=consumer-fetch-manager-metrics), kafka-exporter -- server-side consumer group offsets"
+        },
+        {
+          "id": "c",
+          "text": "Дублирование нормально: Prometheus автоматически дедублицирует метрики с одинаковыми именами"
+        },
+        {
+          "id": "d",
+          "text": "Использовать только kafka-exporter: он точнее измеряет consumer lag"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Фактического дублирования нет: (1) JMX Exporter видит JMX MBeans внутри JVM клиентских приложений (если consumer запускает JMX-агент). Метрика: kafka.consumer:type=consumer-fetch-manager-metrics,name=records-lag-max -- per-client lag в JMX. (2) kafka-exporter читает consumer group offsets через Kafka AdminClient API (kafka-consumer-groups.sh logic). Метрика: kafka_consumergroup_lag{consumergroup=,topic=,partition=} -- server-side lag. Это разные источники: JMX-метрика видна только если consumer приложение запущено с JMX-агентом и имеет client-id. kafka-exporter видит все consumer groups в кластере независимо от JMX. Для production: kafka-exporter предпочтителен для consumer lag мониторинга (видит все группы).",
+      "bloomLevel": "conceptual",
+      "studyHint": "Урок 02: Monitoring Stack -- JMX Exporter vs kafka-exporter"
+    },
+    {
+      "id": "kafka-m10-exam-q13",
+      "type": "multiple-choice",
+      "question": "Production ops сценарий: 3 брокера, disk broker-1=88%, broker-2=42%, broker-3=40%. URP=0. Нужно добавить 4-й брокер и перебалансировать. Топиков 15, партиций 90 (RF=3), данных 600 GB на broker-1. Throttle 50 MB/s. Оцените время reassignment и опишите полный порядок действий.",
+      "options": [
+        {
+          "id": "a",
+          "text": "Время: 600 GB / 50 MB/s = 12,288 с ≈ 3.4 часа. Порядок: запустить broker-4, ждать ActiveBrokerCount=4, --generate, --execute --throttle 52428800, --verify, удалить throttle, leader-election"
+        },
+        {
+          "id": "b",
+          "text": "Время reassignment нельзя рассчитать: зависит от сетевой топологии. Просто запустить --execute и смотреть прогресс"
+        },
+        {
+          "id": "c",
+          "text": "Время: 600 GB / 50 MB/s = 12,288 с ≈ 3.4 часа, но только broker-1 данные перемещаются -- нужно считать 600/3 брокера = 200 GB, т.е. 200/50 = 4096 с ≈ 1.1 часа"
+        },
+        {
+          "id": "d",
+          "text": "Время: 600 GB -- это весь объём broker-1. Но reassignment перемещает только часть: 90 партиций / 4 брокера = 22.5 партиции new на broker-4. С broker-1: перемещается ~22 партиции из ~30. Данных: 600 GB × (22/30) = 440 GB. Время: 440 GB × 1024 / 50 MB/s ≈ 9011 с ≈ 2.5 часа. Порядок: запустить broker-4, ActiveBrokerCount=4, --generate (broker-list 1,2,3,4), просмотреть план, --execute --throttle 52428800, мониторить --verify каждые 5 мин, после completed: удалить throttle на всех 4 брокерах, kafka-leader-election.sh preferred"
+        }
+      ],
+      "correctAnswer": "d",
+      "explanation": "Детальный расчёт: broker-1 несёт 30 партиций (90 / 3 брокера). После добавления broker-4: равномерное распределение = 90/4 = 22.5, т.е. 22-23 per broker. С broker-1 перемещается: 30 - 22 = 8 партиций (приблизительно). Каждая партиция RF=3 -- три реплики. Но перемещение партиции с broker-1 на broker-4 означает: broker-4 получает ОДНУ новую реплику (не три). Данные = 600 GB / 30 партиций × 8 партиций ≈ 160 GB. Плюс перемещения с broker-2 и broker-3 (по ~8 партиций каждый, меньше данных). Суммарно порядка 400-500 GB. При 50 MB/s: 400 GB × 1024 / 50 = 8192 с ≈ 2.3 часа. Полный порядок действий описан в варианте D и является правильным операционным runbook.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 05: Topic Rebalancing -- Playbook добавления брокера; Урок 04: Capacity Planning"
+    }
+  ]
+}

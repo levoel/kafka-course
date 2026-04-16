@@ -1,0 +1,88 @@
+{
+  "lessonSlug": "10-production-ops/04-capacity-planning",
+  "moduleId": "10-production-ops",
+  "_meta": {
+    "idPrefix": "kafka-m10-04",
+    "description": "Quiz for capacity planning lesson with calculation-based questions. IDs: kafka-m10-04-q1, q2, q3"
+  },
+  "questions": [
+    {
+      "id": "kafka-m10-04-q1",
+      "type": "multiple-choice",
+      "question": "Рассчитайте ежедневный объём данных для кластера: 20,000 msg/s, средний размер 1 KB, RF=3. Используйте формулу: daily_GB = (msg_rate × avg_bytes × 86400 × RF) / 1073741824. Какой ответ верен?",
+      "options": [
+        {
+          "id": "a",
+          "text": "daily_GB = 20000 × 1000 × 86400 × 3 / 1073741824 = 4838 GB ≈ 4.84 TB/день"
+        },
+        {
+          "id": "b",
+          "text": "daily_GB = 20000 × 1024 × 86400 × 3 / 1073741824 = 4831 GB ≈ 4.72 TB/день"
+        },
+        {
+          "id": "c",
+          "text": "daily_GB = 20000 × 1000 × 86400 / 1073741824 = 1613 GB ≈ 1.57 TB/день (без учёта RF)"
+        },
+        {
+          "id": "d",
+          "text": "daily_GB = 20000 × 1000 × 3600 × 24 × 3 / 1000000000 = 5184 GB (в GB через 10^9)"
+        }
+      ],
+      "correctAnswer": "a",
+      "explanation": "Расчёт: 20000 msg/s × 1000 bytes × 86400 s × 3 (RF) = 5,184,000,000,000 bytes. Делим на 1,073,741,824 (= 1024^3, 1 GB) = 4828 GB ≈ 4.84 TB/день. Вариант A верен с небольшим округлением. RF=3 обязательно учитывается: каждый байт хранится 3 раза (лидер + 2 фолловера). Забыть RF -- самая распространённая ошибка при capacity planning. Для 7-дневного retention: 4838 × 7 = 33,866 GB ≈ 33.9 TB суммарно, или ~11.3 TB per broker при 3 брокерах.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m10-04-q2",
+      "type": "multiple-choice",
+      "question": "Команда проектирует Kafka-кластер: 30 MB/s target throughput, 10 consumer groups, 3 брокера, NIC 1 Gbps. Сколько партиций минимально необходимо (SSD диски, partition throughput 30 MB/s) и не превышает ли NIC лимит?",
+      "options": [
+        {
+          "id": "a",
+          "text": "min_partitions = ceil(30/30) = 1 партиция. NIC: 30 (in) + 60 (RF=3-1, replication) + 300 (30×10 consumers) = 390 MB/s. Это 390/125 = 312% от 1 Gbps NIC -- NIC перегружен"
+        },
+        {
+          "id": "b",
+          "text": "min_partitions = ceil(30/30) = 1 партиция. NIC per broker: 390/3 = 130 MB/s. 1 Gbps=125 MB/s -- NIC перегружен на 4%. Нужны 10 Gbps NIC"
+        },
+        {
+          "id": "c",
+          "text": "min_partitions = 10 (по числу consumer groups). NIC: 390 MB/s суммарно / 3 брокера = 130 MB/s per broker. Превышает 70% лимит 1 Gbps NIC (87.5 MB/s). Нужны 10 Gbps NIC или больше брокеров"
+        },
+        {
+          "id": "d",
+          "text": "min_partitions = 30 (1 партиция per MB/s). NIC не является bottleneck при 1 Gbps"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Расчёт партиций: throughput-based = ceil(30/30) = 1. Если нужно 10 independent consumer groups читать параллельно -- каждой нужна своя партиция для максимального параллелизма. Однако минимальный throughput-based = 1. Используем max из соображений design: пусть 6 партиций (2 per broker, равномерно). Расчёт NIC: inbound = 30 MB/s. Replication (RF=3): 30 × 2 = 60 MB/s. Outbound consumers: 30 × 10 = 300 MB/s. Total = 390 MB/s суммарно. Per broker: 390/3 = 130 MB/s. 1 Gbps = 125 MB/s maximum. 130 > 125 -- NIC превышен. 70% rule: 125 × 0.7 = 87.5 MB/s. 130 >> 87.5. Нужны 10 Gbps NIC (1250 MB/s, 70% = 875 MB/s >> 130 MB/s).",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m10-04-q3",
+      "type": "multiple-choice",
+      "question": "Инженер хочет увеличить JVM Heap брокера с 6 GB до 16 GB, мотивируя это 'больше памяти = лучше производительность'. Что на самом деле произойдёт?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Производительность вырастет: больше heap = больше данных можно закэшировать в памяти JVM"
+        },
+        {
+          "id": "b",
+          "text": "Heap 16 GB не помогает Kafka: данные хранятся в OS page cache (не JVM heap). При Full GC на 16 GB heap: stop-the-world паузы 2-5 секунд. Брокер не обрабатывает запросы во время GC -- producers получат timeout. Page cache на тех же 64 GB RAM уменьшится на 10 GB (16-6). Производительность снизится"
+        },
+        {
+          "id": "c",
+          "text": "Heap 16 GB безопасен при использовании G1GC в Java 17+ -- GC паузы минимальны. Рекомендован для high-load кластеров"
+        },
+        {
+          "id": "d",
+          "text": "Увеличение heap с 6 до 16 GB даст 10 GB дополнительного кэша для метаданных партиций -- полезно при 100,000+ партициях"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Kafka -- I/O-bound система. Данные хранятся в OS page cache, не в JVM heap. JVM heap используется для: объектов запросов/ответов, ISR metadata, producer connection state -- относительно маленькие объёмы. При heap 16 GB: (1) Full GC (даже с G1GC) периодически останавливает все потоки. На 16 GB heap Full GC может занять 2-8 секунд. Брокер замолкает -- клиенты получают timeout. (2) 16 GB heap вместо 6 GB = 10 GB меньше для OS page cache при том же объёме RAM. Меньше page cache = больше disk reads = выше latency. Правило: -Xms6g -Xmx6g, фиксированный размер (предотвращает динамическое изменение), не выше 8 GB.",
+      "bloomLevel": "analytical"
+    }
+  ]
+}

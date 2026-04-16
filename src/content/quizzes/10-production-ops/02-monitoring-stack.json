@@ -1,0 +1,88 @@
+{
+  "lessonSlug": "10-production-ops/02-monitoring-stack",
+  "moduleId": "10-production-ops",
+  "_meta": {
+    "idPrefix": "kafka-m10-02",
+    "description": "Quiz for monitoring stack lesson (Prometheus + JMX Exporter + Grafana). IDs: kafka-m10-02-q1, q2, q3"
+  },
+  "questions": [
+    {
+      "id": "kafka-m10-02-q1",
+      "type": "multiple-choice",
+      "question": "Команда использует danielqsj/kafka-exporter для мониторинга production кластера Kafka. SRE хочет добавить алерт на RequestHandlerAvgIdlePercent < 0.3. Какова проблема с этим планом?",
+      "options": [
+        {
+          "id": "a",
+          "text": "RequestHandlerAvgIdlePercent экспортируется kafka-exporter, но с другим именем: kafka_broker_handler_idle_percent"
+        },
+        {
+          "id": "b",
+          "text": "kafka-exporter подключается через Kafka client API и не имеет доступа к JMX-метрикам broker internals. RequestHandlerAvgIdlePercent доступна только через JMX Exporter (Java-агент). Нужно добавить JMX Exporter"
+        },
+        {
+          "id": "c",
+          "text": "kafka-exporter поддерживает RequestHandlerAvgIdlePercent только при kafka версии 3.x и выше"
+        },
+        {
+          "id": "d",
+          "text": "Алерт возможен, но нужно добавить job_name: kafka-broker в prometheus.yml"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "danielqsj/kafka-exporter -- это Go-бинарник, который подключается к Kafka через обычный consumer/admin client API. Он видит только то, что доступно через Kafka protocol: consumer group offsets, topic partition offsets, количество брокеров. JMX-метрики (RequestHandlerAvgIdlePercent, TotalTimeMs percentiles, BrokerTopicMetrics байты) живут внутри JVM брокера и доступны только через JMX. JMX Exporter (Java-агент, присоединяется к JVM через KAFKA_OPTS) -- единственный инструмент для экспорта этих метрик. Правильное решение: использовать ОБА инструмента.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m10-02-q2",
+      "type": "multiple-choice",
+      "question": "Grafana alert KafkaConsumerLagHigh срабатывает: consumer group 'fraud-detection' lag = 25,000. Одновременно: BytesInPerSec = 0 MB/s, MessagesInPerSec = 0 на всех брокерах. Что это означает?",
+      "options": [
+        {
+          "id": "a",
+          "text": "fraud-detection consumer group не справляется с нагрузкой. Нужно scale up: добавить инстансы"
+        },
+        {
+          "id": "b",
+          "text": "BytesInPerSec=0 и MessagesInPerSec=0 означают: producers не отправляют данные (нет входящего трафика). Lag = 25,000 -- это накопленный ранее lag. Проблема не в consumer group, а в отсутствии producer активности. Возможно: плановое обслуживание, сбой upstream сервисов"
+        },
+        {
+          "id": "c",
+          "text": "Kafka кластер недоступен. BytesInPerSec=0 -- признак полного отказа кластера"
+        },
+        {
+          "id": "d",
+          "text": "Retention истёк. Данные удалены -- fraud-detection читает удалённые данные, отсюда lag"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "BytesInPerSec=0 и MessagesInPerSec=0 -- нет входящего трафика от producers. Это НЕ означает отказ кластера (иначе были бы другие сигналы: UnderReplicatedPartitions, проблемы с ActiveControllerCount). Lag=25,000 -- это накопленный ранее отставание: consumer group прочитала до определённой позиции, а потом producers перестали писать. Если producers возобновят запись, fraud-detection может догнать. Первый шаг диагностики: выяснить, почему producers не отправляют данные (сбой upstream, maintenance window, network issue upstream).",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m10-02-q3",
+      "type": "multiple-choice",
+      "question": "Prometheus scrape_interval для kafka-broker установлен на 15s, для kafka-exporter -- на 30s. SRE хочет уменьшить kafka-broker scrape_interval до 5s для более точного графика latency. Какие trade-offs нужно учесть?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Уменьшение scrape_interval до 5s не имеет никаких недостатков -- только более точные данные"
+        },
+        {
+          "id": "b",
+          "text": "При scrape_interval=5s: количество временных рядов умножается на 3 (15s/5s=3x). RAM Prometheus вырастет с 2-4 GB до 6-12 GB. Дисковое пространство: в 3 раза больше. HTTP нагрузка на JMX Exporter endpoint: 1 запрос каждые 5s с 3 брокеров. Оправдано только если latency аномалии длятся менее 15 секунд"
+        },
+        {
+          "id": "c",
+          "text": "JMX Exporter обновляет данные раз в 15s -- уменьшение scrape_interval ниже этого не даст более точных данных"
+        },
+        {
+          "id": "d",
+          "text": "Kafka broker не может обслуживать более одного scrape запроса в 10 секунд -- 5s interval вызовет ошибки"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "JMX Exporter читает JMX MBeans в момент каждого scrape запроса -- данные актуальны в момент опроса, не кэшируются между scrapes. Поэтому уменьшение до 5s технически даст более частые данные. Но цена: (1) Объём данных в Prometheus растёт пропорционально: ~200K time series × 3x = 600K time series. При 15 байтах per sample это значительно больше RAM и диска. (2) CPU нагрузка на Prometheus (ingestion) и на брокер (HTTP endpoint). (3) Latency аномалии обычно длятся десятки секунд -- 15s resolution достаточно для большинства случаев. Компромисс: оставить 15s для большинства метрик, использовать alert rules для immediate notification.",
+      "bloomLevel": "applied"
+    }
+  ]
+}

@@ -1,0 +1,88 @@
+{
+  "lessonSlug": "10-production-ops/03-performance-tuning",
+  "moduleId": "10-production-ops",
+  "_meta": {
+    "idPrefix": "kafka-m10-03",
+    "description": "Quiz for performance tuning lesson with numeric targets. IDs: kafka-m10-03-q1, q2, q3"
+  },
+  "questions": [
+    {
+      "id": "kafka-m10-03-q1",
+      "type": "multiple-choice",
+      "question": "Throughput-оптимизированный producer настроен: batch.size=1048576, linger.ms=50, compression.type=lz4, acks=all. Текущая производительность: 15K records/s при целевой 100K records/s. JMX batch-size-avg = 950KB, record-queue-time-avg = 50ms. Почему throughput ниже целевой?",
+      "options": [
+        {
+          "id": "a",
+          "text": "batch-size-avg=950KB близко к batch.size=1MB -- batch заполнен. Но 15K records/s означает что средний размер записи слишком большой. Нужно уменьшить размер сообщений"
+        },
+        {
+          "id": "b",
+          "text": "batch-size-avg=950KB и record-queue-time-avg=50ms означают: batching работает хорошо (batch почти заполнен, ждёт полные 50ms). Bottleneck НЕ в producer конфигурации -- скорее всего ограничение на стороне брокера или сети. Проверить: RequestHandlerAvgIdlePercent, NIC утилизацию, disk I/O"
+        },
+        {
+          "id": "c",
+          "text": "linger.ms=50 слишком мало -- нужно увеличить до 500ms чтобы batch заполнялся полностью"
+        },
+        {
+          "id": "d",
+          "text": "acks=all замедляет producer: ISR-ожидание ограничивает throughput. Нужно переключить на acks=1"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "batch-size-avg=950KB (95% от batch.size=1MB) и record-queue-time-avg=50ms (равно linger.ms) означают: producer конфигурация работает оптимально. Batching эффективен, batch почти полностью заполнен перед отправкой. При этих показателях producer делает всё правильно. Bottleneck находится downstream: (1) Брокер: проверить RequestHandlerAvgIdlePercent -- если ниже 0.3, I/O потоки перегружены. (2) Сеть: NIC утилизация может быть близка к 70%. (3) Диск: disk I/O на брокере при записи и репликации. Добавление acks=1 может помочь throughput, но это trade-off с durability, а не исправление bottleneck.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m10-03-q2",
+      "type": "multiple-choice",
+      "question": "Команда обнаружила в server.properties: log.flush.interval.messages=1. На этой конфигурации работает Kafka 4.0. Каков эффект этой настройки на производительность?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Максимальная durability: каждое сообщение немедленно сохранено на диск. Throughput снизится незначительно (5-10%)"
+        },
+        {
+          "id": "b",
+          "text": "Каждое сообщение вызывает системный вызов fsync(). Это уничтожает throughput: вместо батчированных fsync через OS page cache -- один fsync per message. Ожидаемое снижение throughput: 10-100x. Durability при этом не лучше чем с acks=all+RF=3 без явного flush"
+        },
+        {
+          "id": "c",
+          "text": "log.flush.interval.messages=1 не влияет на производительность в Kafka 4.0 -- это deprecated параметр"
+        },
+        {
+          "id": "d",
+          "text": "Настройка ускоряет producer ACK: брокер подтверждает получение сразу после fsync, без ожидания репликации"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "log.flush.interval.messages=1 означает fsync() после каждого одного сообщения. fsync() -- это системный вызов, блокирующий выполнение до полной записи на диск (не только в OS buffer). На SSD: 0.1-1ms per fsync. На HDD: 5-20ms per fsync. При 10,000 msg/s: 10,000 fsync/s = 100% disk I/O только на fsync -- никакой полезной нагрузки. Kafka специально избегает явного fsync: данные пишутся в OS page cache (быстро), ОС периодически сбрасывает на диск (pdflush/flusher). Durability в production обеспечивается репликацией (acks=all, min.insync.replicas=2): если лидер упадёт до fsync -- фолловер уже имеет копию. fsync в этом сценарии избыточен.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m10-03-q3",
+      "type": "multiple-choice",
+      "question": "Consumer group processing 200K records/s. Текущая конфигурация: fetch.min.bytes=1 (default), max.poll.records=500. JMX fetch-rate = 8000 fetch/s per consumer. Что изменить для снижения overhead на fetch-запросы?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Увеличить число consumer инстансов: больше consumers = меньше записей per consumer = меньше fetch-запросов"
+        },
+        {
+          "id": "b",
+          "text": "Установить fetch.min.bytes=1048576 (1MB): брокер будет ждать накопления 1MB перед ответом. fetch-rate снизится с 8000 до нескольких сотен в секунду. Одновременно увеличить max.poll.records=1000 для обработки большего числа записей за poll()"
+        },
+        {
+          "id": "c",
+          "text": "Уменьшить fetch.max.wait.ms до 50ms: более частые ответы снизят latency и позволят consumer обрабатывать данные батчами"
+        },
+        {
+          "id": "d",
+          "text": "8000 fetch/s -- это нормально для 200K records/s. fetch-rate = records/max.poll.records = 200K/500 = 400 fetch/s. 8000 fetch/s указывает на другую проблему"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "fetch.min.bytes=1 (default) означает: брокер отвечает на fetch запрос немедленно, даже если есть только один байт данных. При 200K records/s и частых poll() это генерирует тысячи fetch-запросов в секунду. При fetch.min.bytes=1048576 (1MB): брокер накапливает 1MB данных (или ждёт fetch.max.wait.ms=500ms) перед ответом. 200K records/s × 1KB avg = 200MB/s. 200MB/s / 1MB = 200 fetch/s -- в 40 раз меньше fetch запросов. Снижается CPU overhead на обе стороны. max.poll.records=1000 позволяет за один poll() получать больше записей, снижая overhead на poll() вызовы.",
+      "bloomLevel": "analytical"
+    }
+  ]
+}
