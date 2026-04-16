@@ -1,0 +1,218 @@
+---
+title: "Rack Awareness"
+description: "Размещение реплик с учётом стоек и зон доступности — broker.rack и минимизация потери данных"
+order: 5
+difficulty: "intermediate"
+estimatedTime: 15
+topics: ["Rack Awareness", "broker.rack", "Replica Placement", "Availability Zones"]
+---
+
+# Rack Awareness
+
+Replication factor 3 означает: у каждой партиции 3 копии. Но что если все 3 копии хранятся на брокерах в одной физической стойке — и питание этой стойки пропадает? Вы потеряете все реплики одновременно.
+
+**Rack awareness** решает эту проблему: Kafka распределяет реплики партиций по разным стойкам (или зонам доступности), чтобы выход одной стойки не приводил к потере кворума.
+
+---
+
+## broker.rack: идентификатор стойки или AZ
+
+`broker.rack` — конфигурационный параметр, который сообщает Kafka, в какой физической стойке (или зоне доступности) находится брокер:
+
+```properties
+# В server.properties каждого брокера
+broker.rack=rack-a      # для брокеров в стойке A
+broker.rack=rack-b      # для брокеров в стойке B
+broker.rack=rack-c      # для брокеров в стойке C
+```
+
+В облачных окружениях (AWS, GCP, Azure) вместо физической стойки используют зону доступности:
+
+```properties
+# AWS us-east-1
+broker.rack=us-east-1a   # брокеры в AZ a
+broker.rack=us-east-1b   # брокеры в AZ b
+broker.rack=us-east-1c   # брокеры в AZ c
+```
+
+Значение `broker.rack` — произвольная строка. Kafka не интерпретирует её содержимое; важно лишь, что у разных брокеров разные значения (если они в разных стойках).
+
+---
+
+## Алгоритм размещения реплик с учётом rack
+
+Когда для нового топика выбирается размещение реплик, Kafka использует **rack-aware replica assignment algorithm**:
+
+1. Отсортировать брокеры по (rack, broker_id).
+2. Для каждой партиции выбирать брокеров из разных rack.
+3. Минимизировать число партиций-лидеров на одном брокере.
+
+Результат: при RF=3 и 3 rack — каждая реплика гарантированно находится в отдельной rack.
+
+<DiagramContainer title="Rack-Aware Replica Placement: 6 брокеров, 3 стойки" color="emerald">
+  <div className="space-y-6 p-2">
+    <div className="text-center text-sm text-slate-400">Топик orders: partitions=3, replication-factor=3. Каждая реплика — в отдельной стойке.</div>
+    <FlowRow>
+      <FlowColumn>
+        <FlowNode
+          variant="cluster"
+          size="sm"
+          tooltip="Стойка A (rack-a): содержит Broker 1 и Broker 2. Broker 1 — лидер Partition 0. Если стойка A отключится, Partition 0 продолжит работу через реплику на стойке B или C."
+        >
+          Стойка A
+        </FlowNode>
+        <FlowNode
+          variant="service"
+          size="sm"
+          tooltip="Broker 1 (rack-a, node.id=1): лидер Partition 0. Принимает все записи и чтения для P0."
+        >
+          Broker 1
+        </FlowNode>
+        <FlowNode
+          variant="service"
+          size="sm"
+          tooltip="Broker 2 (rack-a, node.id=2): фолловер Partition 1 (лидер на Broker 3). В ISR для P1."
+        >
+          Broker 2
+        </FlowNode>
+      </FlowColumn>
+      <Arrow direction="right" />
+      <FlowColumn>
+        <FlowNode
+          variant="cluster"
+          size="sm"
+          tooltip="Стойка B (rack-b): содержит Broker 3 и Broker 4. Broker 3 — лидер Partition 1. Физически изолирована от стойки A и C — другой блок питания, другой TOR-свитч."
+        >
+          Стойка B
+        </FlowNode>
+        <FlowNode
+          variant="service"
+          size="sm"
+          tooltip="Broker 3 (rack-b, node.id=3): лидер Partition 1. Фолловер Partition 0 (реплика лидера на Broker 1)."
+        >
+          Broker 3
+        </FlowNode>
+        <FlowNode
+          variant="service"
+          size="sm"
+          tooltip="Broker 4 (rack-b, node.id=4): фолловер Partition 2 (лидер на Broker 5 в стойке C)."
+        >
+          Broker 4
+        </FlowNode>
+      </FlowColumn>
+      <Arrow direction="right" />
+      <FlowColumn>
+        <FlowNode
+          variant="cluster"
+          size="sm"
+          tooltip="Стойка C (rack-c): содержит Broker 5 и Broker 6. Broker 5 — лидер Partition 2. Rack awareness гарантирует: при отказе любой одной стойки все партиции остаются доступны."
+        >
+          Стойка C
+        </FlowNode>
+        <FlowNode
+          variant="service"
+          size="sm"
+          tooltip="Broker 5 (rack-c, node.id=5): лидер Partition 2. Фолловер Partition 1 (реплика лидера на Broker 3)."
+        >
+          Broker 5
+        </FlowNode>
+        <FlowNode
+          variant="service"
+          size="sm"
+          tooltip="Broker 6 (rack-c, node.id=6): фолловер Partition 0 (реплика лидера на Broker 1 в стойке A)."
+        >
+          Broker 6
+        </FlowNode>
+      </FlowColumn>
+    </FlowRow>
+    <div className="text-center text-sm text-slate-500">
+      Partition 0: Leader=Broker1(A), Replica=Broker3(B), Replica=Broker6(C) — по одной в каждой стойке
+    </div>
+  </div>
+</DiagramContainer>
+
+---
+
+## Пример: 6 брокеров, 3 стойки, RF=3
+
+Конфигурация:
+
+| Broker | node.id | broker.rack |
+|--------|---------|-------------|
+| Broker 1 | 1 | rack-a |
+| Broker 2 | 2 | rack-a |
+| Broker 3 | 3 | rack-b |
+| Broker 4 | 4 | rack-b |
+| Broker 5 | 5 | rack-c |
+| Broker 6 | 6 | rack-c |
+
+Результат rack-aware placement для `orders` (partitions=3, RF=3):
+
+```
+Partition 0: Leader=1(rack-a), Replicas=3(rack-b), 5(rack-c)
+Partition 1: Leader=3(rack-b), Replicas=5(rack-c), 2(rack-a)
+Partition 2: Leader=5(rack-c), Replicas=2(rack-a), 4(rack-b)
+```
+
+Каждая партиция имеет реплики в трёх разных стойках. Если стойка B целиком отключится (Broker 3 и Broker 4):
+
+- **Partition 0**: Leader=1(A), ISR=[1(A), 5(C)] — работает (2 из 3 реплик доступны).
+- **Partition 1**: Leader=3(B) — недоступен. KRaft выберет нового лидера из ISR: либо 5(C), либо 2(A). Downtime: время leader election (менее 20 секунд в Kafka 4.0).
+- **Partition 2**: Leader=5(C), ISR=[5(C), 2(A)] — работает.
+
+При `min.insync.replicas=2`: только Partition 1 временно недоступна для записи в момент смены лидера. Данные не теряются.
+
+---
+
+## Облачный deployment: broker.rack = Availability Zone
+
+В AWS, GCP, Azure стойки соответствуют зонам доступности:
+
+```properties
+# AWS: us-east-1 с тремя AZ
+# server.properties для брокеров в us-east-1a
+broker.rack=us-east-1a
+
+# server.properties для брокеров в us-east-1b
+broker.rack=us-east-1b
+
+# server.properties для брокеров в us-east-1c
+broker.rack=us-east-1c
+```
+
+При использовании MSK (Amazon Managed Streaming for Kafka) или Confluent Cloud — rack awareness настраивается автоматически на основе размещения брокеров по AZ.
+
+<Callout type="tip">
+Рекомендуемое minimum для production в облаке: 3 брокера в 3 разных AZ с RF=3 и `broker.rack=<az-name>`. Это защищает от полной недоступности одной AZ (что бывает в AWS несколько раз в год). Убедитесь, что `num.partitions * RF` равномерно делится на число AZ — иначе часть AZ получит больше нагрузки.
+</Callout>
+
+---
+
+## Что происходит без broker.rack
+
+Если `broker.rack` не задан, Kafka **не знает** о физической топологии и размещает реплики случайно. Алгоритм без rack awareness:
+
+1. Выбрать случайный брокер для лидера Partition 0.
+2. Для следующей реплики сдвинуться на 1 по списку брокеров.
+3. Для следующей партиции начать с другого случайного брокера.
+
+Проблема: при случайном размещении высока вероятность того, что две или три реплики одной партиции окажутся на брокерах в одной стойке — особенно в маленьких кластерах (6 брокеров, 3 стойки = 2 брокера в каждой стойке).
+
+<Callout type="warning">
+Rack awareness работает только при создании топика. Если вы добавили `broker.rack` к уже существующим брокерам, существующие партиции не будут автоматически перебалансированы. Для их перераспределения используйте `kafka-reassign-partitions.sh` с указанием rack-aware assignment.
+</Callout>
+
+---
+
+## Ключевые выводы
+
+1. `broker.rack` — строка, идентифицирующая физическую стойку или зону доступности брокера.
+2. Rack-aware placement гарантирует: при RF=3 и 3 rack — каждая реплика в отдельной rack.
+3. При отказе одной стойки кластер продолжает работать (лидер election из оставшихся реплик).
+4. В облаке: `broker.rack = availability_zone_name`.
+5. Rack awareness работает только при **создании топика**. Существующие топики требуют ручной reassign.
+
+<KnowledgeCheck
+  question="Администратор создаёт кластер из 6 брокеров, но забывает задать broker.rack. Позже добавляет broker.rack=rack-a/b/c в server.properties всех брокеров и перезапускает их. Что произойдёт с существующими топиками?"
+  answer="Существующие топики останутся с текущим (не rack-aware) размещением реплик. broker.rack влияет только на алгоритм выбора реплик при создании нового топика. Для существующих партиций нужно явно запустить kafka-reassign-partitions.sh с новым rack-aware планом размещения. До этого момента реплики могут находиться в одной стойке, что снижает надёжность при rack-level failure."
+/>

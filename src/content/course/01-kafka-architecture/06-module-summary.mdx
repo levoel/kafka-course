@@ -1,0 +1,167 @@
+---
+title: "Итоги модуля: Архитектура Kafka"
+description: "Обзор ключевых концепций модуля — commit log, брокеры, репликация, KRaft, rack awareness"
+order: 6
+difficulty: "intermediate"
+estimatedTime: 10
+topics: ["Summary", "Review"]
+---
+
+# Итоги модуля: Архитектура Kafka
+
+Этот модуль заложил фундамент для понимания Kafka. Разберём ключевые концепции и их взаимосвязь.
+
+---
+
+## Что вы изучили в этом модуле
+
+### Урок 1: Распределённый Commit Log
+
+Kafka — это **append-only commit log**. Этим определяется всё остальное:
+
+- Записи добавляются только в конец, никогда не изменяются.
+- **Offset** — монотонный целочисленный адрес записи в пределах партиции. Разные consumer groups читают один и тот же offset независимо.
+- Kafka оптимизирована для последовательного I/O — миллионы записей в секунду при правильной конфигурации.
+- Данные хранятся до истечения `retention.ms` или `retention.bytes`. Replay — прочитать с offset 0.
+
+### Урок 2: Брокеры, Топики, Партиции
+
+Физическая реальность commit log в кластере:
+
+- **Брокер** = JVM-процесс с `node.id` и `process.roles` (broker/controller/combined).
+- **Топик** = именованный поток, разбитый на партиции. CLI: `kafka-topics.sh --bootstrap-server`.
+- **Партиция** = единица параллелизма. Порядок гарантирован только внутри одной партиции.
+- `num.partitions` — только увеличивать, не уменьшать. `replication.factor=3` для production.
+
+### Урок 3: Репликация и ISR
+
+Механизм надёжности хранения:
+
+- **ISR** = реплики в синхронизации с лидером (в пределах `replica.lag.time.max.ms`).
+- **LEO** (Log End Offset) — следующий свободный offset каждой реплики.
+- **HW** (High Watermark) = min(LEO всех ISR-реплик). Потребитель читает только до HW.
+- `acks=all` + `min.insync.replicas=2` — правильная комбинация для production durability.
+
+### Урок 4: KRaft контроллер
+
+Управление метаданными кластера без ZooKeeper:
+
+- **KRaft** — встроенный Raft-протокол. ZooKeeper удалён в Kafka 4.0.
+- **Metadata log** — event-sourced append-only лог всех изменений кластера.
+- **Quorum**: нечётное число voter-узлов (3 или 5). Кворум = большинство.
+- **Epoch fencing** — команды с устаревшим epoch отклоняются. Защита от split-brain.
+- `kafka-metadata-quorum.sh describe --status` — инструмент мониторинга KRaft.
+
+### Урок 5: Rack Awareness
+
+Защита от стоечных и зональных сбоев:
+
+- `broker.rack` — строка-идентификатор стойки или AZ.
+- При RF=3 и 3 rack — каждая реплика в отдельной rack.
+- В облаке: `broker.rack = availability_zone_name`.
+- Действует только при создании топика; существующие топики требуют ручной reassign.
+
+---
+
+## Как концепции связаны между собой
+
+<DiagramContainer title="Архитектурная карта: Kafka Module 01" color="emerald">
+  <div className="space-y-4 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="external"
+        size="sm"
+        tooltip="Producer: отправляет ProducerRecord с topic, key, value. acks=all — ждать ISR-реплик. Partitioner хэширует key для выбора partition."
+      >
+        Producer
+      </FlowNode>
+      <Arrow direction="right" label="ProduceRequest (acks=all)" />
+      <FlowNode
+        variant="cluster"
+        size="md"
+        tooltip="Partition Leader: принимает запись. Добавляет в append-only лог (LEO++). Ждёт FetchRequest от ISR-фолловеров. После ISR-подтверждений двигает HW вверх. Отвечает продюсеру."
+      >
+        Partition Leader
+      </FlowNode>
+      <Arrow direction="right" label="FetchRequest (ISR replication)" dashed />
+      <FlowNode
+        variant="cluster"
+        size="md"
+        tooltip="ISR Follower: периодически запрашивает новые записи от лидера. LEO фолловера растёт. Когда лидер видит LEO фолловера >= new_offset — фолловер подтвердил запись."
+      >
+        ISR Follower
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <Arrow direction="down" label="High Watermark advance" />
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="process"
+        size="sm"
+        tooltip="Consumer: читает только до HW (High Watermark). FetchRequest { offset: current_position }. Kafka возвращает записи до HW. Consumer коммитит offset в __consumer_offsets."
+      >
+        Consumer (читает до HW)
+      </FlowNode>
+      <Arrow direction="right" label="metadata (leader, ISR)" />
+      <FlowNode
+        variant="service"
+        size="sm"
+        tooltip="KRaft Controller Quorum: хранит metadata log — брокеры, топики, ISR-статус, epoch. Epoch fencing защищает от split-brain. kafka-metadata-quorum.sh describe."
+      >
+        KRaft Controller
+      </FlowNode>
+      <Arrow direction="right" label="broker.rack" dashed />
+      <FlowNode
+        variant="queue"
+        size="sm"
+        tooltip="Rack Awareness: реплики распределены по разным стойкам/AZ. При RF=3 в 3 AZ — одна AZ может упасть без потери данных."
+      >
+        Rack-Aware Placement
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+---
+
+## Что важно помнить для экзамена
+
+<Callout type="tip">
+Эти связи часто проверяются в экзаменационных вопросах — убедитесь, что понимаете причинно-следственные отношения, а не просто определения.
+</Callout>
+
+**Цепочка: acks → ISR → HW → Consumer visibility**
+
+Producer ack получен от ISR-реплик → HW продвигается → Consumer видит новые записи.
+
+Если ISR = 1 и min.isr = 1 → acks=all = acks=1 → нет дополнительных гарантий.
+
+**Цепочка: Kafka 4.0 = KRaft only**
+
+`zookeeper.connect` не существует. `kafka-topics.sh --zookeeper` не существует. Используйте `--bootstrap-server`.
+
+**Цепочка: broker.rack → rack-aware assignment → отказоустойчивость**
+
+`broker.rack` задаётся один раз при настройке. Влияет только на новые топики. Существующие партиции требуют ручной reassign.
+
+**Цепочка: LEO per replica → HW = min(ISR LEOs) → потребитель ждёт**
+
+HW не продвигается быстрее самой медленной ISR-реплики. Медленный фолловер = staleness для потребителей.
+
+---
+
+## Типичные ошибки
+
+1. **ISR = 1 + acks=all** без min.insync.replicas=2 — иллюзия надёжности. Реально: один узел отказа = потеря данных.
+2. **Слишком много партиций** — >4000 на брокер создаёт overhead для leader election и metadata management.
+3. **Не устанавливать broker.rack** в production — реплики случайно распределяются, не учитывая физическую топологию.
+4. **Уменьшать num.partitions** — невозможно без пересоздания топика и потери данных.
+5. **Думать, что порядок гарантирован в топике** — нет, только в партиции.
+
+---
+
+<KnowledgeCheck
+  question="Продюсер записал сообщение с acks=all. Broker 1 — лидер, Broker 2 и Broker 3 — фолловеры (все в ISR). Broker 3 медленно реплицирует из-за GC pause. Через 30 секунд Broker 3 выбывает из ISR (остаётся ISR=[1,2]). min.insync.replicas=2. Что изменилось для продюсера и что изменилось для потребителя?"
+  answer="Для продюсера: ничего критичного не изменилось. acks=all по-прежнему требует подтверждения от всех ISR-реплик, теперь их 2 (Broker 1 и Broker 2). min.insync.replicas=2 соблюдается (ISR=2 >= min.isr=2). Записи продолжают приниматься. Если ISR уменьшится до 1 (ещё один брокер выпадет), продюсер начнёт получать NotEnoughReplicasException. Для потребителя: HW может немного вырасти — медленный Broker 3 больше не тормозит продвижение HW. Без Broker 3 в ISR, min(LEO[1], LEO[2]) вместо min(LEO[1], LEO[2], LEO[3]). Это потенциально ускоряет видимость новых записей для потребителя."
+/>

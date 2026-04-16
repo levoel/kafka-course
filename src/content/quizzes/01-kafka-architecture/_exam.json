@@ -1,0 +1,336 @@
+{
+  "lessonSlug": "01-kafka-architecture/_exam",
+  "moduleId": "01-kafka-architecture",
+  "examTitle": "Экзамен: Архитектура Kafka",
+  "passThreshold": 70,
+  "_meta": {
+    "idPrefix": "kafka-m01-exam",
+    "description": "12 analytical/applied scenario-based questions covering the full Module 01 architecture content"
+  },
+  "questions": [
+    {
+      "id": "kafka-m01-exam-q1",
+      "type": "multiple-choice",
+      "question": "Кластер из 5 брокеров (Broker 1-5). Топик `payments` создан с partitions=6, replication-factor=3. Broker 2 падает. Partition 3 имел Leader=Broker2, ISR=[2,4,5]. Что произойдёт с Partition 3?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Partition 3 становится полностью недоступна до восстановления Broker 2"
+        },
+        {
+          "id": "b",
+          "text": "KRaft-контроллер выберет нового лидера Partition 3 из ISR={4,5} — данные не потеряны, запись восстановится"
+        },
+        {
+          "id": "c",
+          "text": "Kafka автоматически повысит RF до 4 для компенсации потери брокера"
+        },
+        {
+          "id": "d",
+          "text": "Оставшиеся брокеры проголосуют за нового лидера через пользовательский Raft quorum"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "При падении Broker 2 KRaft-контроллер обнаруживает потерю лидера Partition 3. ISR=[4,5] (Broker 2 исключён). KRaft выбирает нового лидера из ISR — например, Broker 4. LeaderAndIsr-команда отправляется Broker 4 (epoch++). Данные не потеряны: ISR содержит актуальные реплики. Запись приостанавливается на время leader election (~5-20 секунд), затем продолжается. RF остаётся 3, но одна из реплик теперь under-replicated (Broker 2 недоступен). Kafka пометит партицию как под-реплицированную в метриках.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 3: Репликация и ISR — раздел 'ISR: In-Sync Replicas'"
+    },
+    {
+      "id": "kafka-m01-exam-q2",
+      "type": "multiple-choice",
+      "question": "KRaft controller quorum состоит из 3 voter-узлов. Voter 1 и Voter 2 изолированы от Voter 3 сетевым разделением. Какая сторона сможет избрать нового лидера контроллера?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Voter 3 — у него больше данных, так как он был активнее"
+        },
+        {
+          "id": "b",
+          "text": "Voter 1 и Voter 2 — они образуют кворум (2 из 3)"
+        },
+        {
+          "id": "c",
+          "text": "Обе стороны изберут лидера — возникнет split-brain"
+        },
+        {
+          "id": "d",
+          "text": "Ни одна сторона — Kafka требует восстановления всех узлов перед выборами"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Кворум Raft для N=3: нужно (3/2)+1 = 2 узла. Сторона с Voter 1 + Voter 2 имеет 2 узла = кворум. Они проводят выборы и избирают нового лидера. Voter 3 в одиночку не может набрать кворум (1 < 2) и переходит в follower-mode (ожидает контакта с большинством). Split-brain невозможен: ровно одна сторона набирает кворум при любом разделении 1-2. Это ключевое свойство Raft consensus.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 4: KRaft контроллер — раздел 'Raft consensus: кворум большинства'"
+    },
+    {
+      "id": "kafka-m01-exam-q3",
+      "type": "multiple-choice",
+      "question": "Продюсер настроен: acks=all, min.insync.replicas=2 (установлено на топике), RF=3. ISR=[Leader, Follower1]. Follower2 выбыл из ISR 5 минут назад из-за медленной репликации. Продюсер записывает сообщение. Что произойдёт?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Запись успешна: ISR=2 >= min.isr=2; acks=all ожидает Leader и Follower1"
+        },
+        {
+          "id": "b",
+          "text": "Запись отклонена: NotEnoughReplicasException, так как RF=3, а ISR<3"
+        },
+        {
+          "id": "c",
+          "text": "Запись успешна, но продюсер автоматически переключается на acks=1"
+        },
+        {
+          "id": "d",
+          "text": "Запись отклонена: Follower2 вне ISR нарушает replication-factor"
+        }
+      ],
+      "correctAnswer": "a",
+      "explanation": "min.insync.replicas проверяется против числа реплик в ISR, а не против RF. ISR=[Leader, Follower1] = 2 реплики. min.isr=2: условие выполнено (2 >= 2). acks=all: лидер ждёт подтверждения от всех ISR-реплик (Leader + Follower1). Запись успешна. Follower2 вне ISR — партиция помечена как under-replicated в метриках, но это не блокирует запись. Если следующий фолловер тоже выйдет из ISR (ISR=[Leader]), тогда ISR=1 < min.isr=2 → NotEnoughReplicasException.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 3: Репликация и ISR — раздел 'min.insync.replicas: нижняя граница ISR'"
+    },
+    {
+      "id": "kafka-m01-exam-q4",
+      "type": "multiple-choice",
+      "question": "Partition 0 имеет: Leader LEO=1000, Follower1 LEO=998, Follower2 LEO=1000. ISR=[Leader, Follower1, Follower2]. Consumer group читает топик. Какой offset является максимальным для чтения потребителем прямо сейчас?",
+      "options": [
+        {
+          "id": "a",
+          "text": "999 (HW=1000, читает до HW-1=999 включительно)"
+        },
+        {
+          "id": "b",
+          "text": "997 (HW=998 = min(1000,998,1000), читает до HW-1=997)"
+        },
+        {
+          "id": "c",
+          "text": "1000 (потребитель всегда читает до LEO лидера)"
+        },
+        {
+          "id": "d",
+          "text": "998 (HW=998, потребитель читает до HW включительно)"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "HW = min(LEO всех ISR-реплик) = min(1000, 998, 1000) = 998. Потребитель читает записи с offset от текущей позиции до HW - 1 = 997 включительно. Запись с offset 998 и 999 есть у лидера и Follower2 (LEO=1000), но не у Follower1 (LEO=998) — они не 'committed'. Как только Follower1 реплицирует до LEO=1000, HW=1000, и записи 998..999 станут видны потребителю. Важно: LEO=998 означает 'следующий offset для записи = 998', то есть реплика содержит записи 0..997.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 3: Репликация и ISR — раздел 'High Watermark: граница безопасного чтения'"
+    },
+    {
+      "id": "kafka-m01-exam-q5",
+      "type": "multiple-choice",
+      "question": "Команда планирует топик для системы платежей: нужна максимальная надёжность (нельзя потерять ни одну запись), кластер из 5 брокеров. Какая комбинация конфигурации обеспечит наилучшие гарантии?",
+      "options": [
+        {
+          "id": "a",
+          "text": "RF=2, acks=all, min.insync.replicas=1"
+        },
+        {
+          "id": "b",
+          "text": "RF=5, acks=0, min.insync.replicas=5"
+        },
+        {
+          "id": "c",
+          "text": "RF=3, acks=all, min.insync.replicas=2"
+        },
+        {
+          "id": "d",
+          "text": "RF=3, acks=1, min.insync.replicas=2"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "RF=3 + acks=all + min.isr=2 — стандартная production-комбинация для критичных данных. Анализ альтернатив: (a) RF=2, min.isr=1: при потере одного брокера ISR=[leader], acks=all = acks=1 — нет реальных гарантий. (b) RF=5, acks=0: fire-and-forget, нулевые гарантии — ни один брокер не подтверждает запись. (d) acks=1: только лидер подтверждает запись, фолловеры могут не успеть реплицировать до падения лидера — потеря данных. Вариант (c): запись подтверждена минимум 2 из 3 ISR-реплик (acks=all + min.isr=2). Кластер переживает одновременный отказ 1 брокера без потери данных.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 3: Репликация и ISR — раздел 'acks: гарантии подтверждения для продюсера'"
+    },
+    {
+      "id": "kafka-m01-exam-q6",
+      "type": "multiple-choice",
+      "question": "Новый KRaft controller-лидер только что избран (epoch 12). Первое, что он делает — загружает снапшот metadata log и воспроизводит события после снапшота. Зачем нужны снапшоты в KRaft metadata log?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Снапшоты хранят резервную копию пользовательских данных партиций"
+        },
+        {
+          "id": "b",
+          "text": "Снапшоты предотвращают неограниченный рост metadata log: новый узел загружает снапшот + только новые события, а не воспроизводит весь лог с offset 0"
+        },
+        {
+          "id": "c",
+          "text": "Снапшоты заменяют Raft voting — после снапшота новые выборы не нужны"
+        },
+        {
+          "id": "d",
+          "text": "Снапшоты используются только для disaster recovery и не влияют на нормальную работу"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Metadata log — append-only: каждое изменение кластера добавляет запись. Без снапшотов: кластер с историей в несколько лет накопит миллионы записей; каждый новый broker/controller при запуске воспроизводил бы весь лог с offset 0 — это занимало бы минуты или часы. Снапшоты: периодически (например, каждые 1000 записей или 60 секунд) текущее состояние сохраняется как снапшот. При запуске: загрузить последний снапшот (полное состояние) + воспроизвести только новые записи после снапшота. Это ограничивает время восстановления до секунд. Аналогия: PostgreSQL checkpoint + WAL replay от checkpoint.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 4: KRaft контроллер — раздел 'Metadata log: event-sourced журнал состояния кластера'"
+    },
+    {
+      "id": "kafka-m01-exam-q7",
+      "type": "multiple-choice",
+      "question": "Разработчик хочет обеспечить порядок обработки событий для каждого пользователя. Топик `user-actions` имеет 12 партиций. Как правильно конфигурировать продюсера?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Использовать num.partitions=1 для глобального порядка всех событий"
+        },
+        {
+          "id": "b",
+          "text": "Отправлять все события с key=user_id; DefaultPartitioner обеспечит одну партицию на user_id"
+        },
+        {
+          "id": "c",
+          "text": "Использовать timestamp в качестве ключа для хронологического порядка"
+        },
+        {
+          "id": "d",
+          "text": "Порядок событий для пользователя невозможно гарантировать в Kafka"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Kafka гарантирует порядок внутри партиции. Для порядка событий конкретного пользователя: все события user_id=123 должны попасть в одну партицию. DefaultPartitioner: hash(key) % num_partitions детерминирован — одинаковый ключ всегда попадает в одну партицию. key=user_id гарантирует: все события user 123 → partition P, все события user 456 → partition Q. Потребитель, читающий partition P, видит события user 123 в строгом порядке offset. Альтернатива (a) не масштабируется (1 партиция = 1 поток потребления). Timestamp как ключ не работает — уникальный ключ для каждого события → все разные партиции.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 2: Брокеры, Топики, Партиции — раздел 'Партиция: единица параллелизма и упорядоченности'"
+    },
+    {
+      "id": "kafka-m01-exam-q8",
+      "type": "multiple-choice",
+      "question": "Инженер обнаруживает в конфигурации legacy Kafka-кластера строку `zookeeper.connect=zk1:2181`. Что это означает с точки зрения Kafka 4.0?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Конфигурация актуальна — Kafka 4.0 поддерживает ZooKeeper в режиме совместимости"
+        },
+        {
+          "id": "b",
+          "text": "Конфигурация устаревшая — zookeeper.connect не существует в Kafka 4.0; этот кластер работает на Kafka 3.x или старее"
+        },
+        {
+          "id": "c",
+          "text": "zookeeper.connect — необязательный параметр в Kafka 4.0 для backup coordinator"
+        },
+        {
+          "id": "d",
+          "text": "zookeeper.connect используется в Kafka 4.0 только для Schema Registry"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Kafka 4.0 полностью удалила ZooKeeper. Параметр zookeeper.connect не существует в Kafka 4.0 server.properties. Его наличие означает, что кластер работает на Kafka 3.x (где ZooKeeper deprecated, но ещё поддерживался) или на более ранних версиях. Для миграции на Kafka 4.0 необходимо: (1) мигрировать на KRaft mode в Kafka 3.5-3.x (ZooKeeper → KRaft migration), (2) обновить до Kafka 4.0. Все CLI-команды также изменились: kafka-topics.sh --zookeeper не существует в 4.0, только --bootstrap-server.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 4: KRaft контроллер — вводная часть и Callout о ZooKeeper"
+    },
+    {
+      "id": "kafka-m01-exam-q9",
+      "type": "multiple-choice",
+      "question": "Production-кластер: 9 брокеров, 3 датацентра (по 3 брокера в каждом, broker.rack=dc1/dc2/dc3). Топик с RF=3 создан корректно с rack awareness. DC2 полностью недоступен (плановые работы). Что произойдёт с партициями, лидеры которых были в DC2?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Все партиции с лидером в DC2 станут полностью недоступны на время работ"
+        },
+        {
+          "id": "b",
+          "text": "KRaft выберет новых лидеров из ISR (реплики в DC1 и DC3); запись восстановится после leader election"
+        },
+        {
+          "id": "c",
+          "text": "Kafka автоматически перенесёт данные из DC2 в DC1 и DC3 до отключения"
+        },
+        {
+          "id": "d",
+          "text": "min.insync.replicas=2 немедленно блокирует все записи при потере DC2"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Rack-aware placement с RF=3 в 3 DC: каждая партиция имеет реплики в DC1, DC2, DC3. При потере DC2: ISR=[реплика в DC1, реплика в DC3] = 2 реплики. min.insync.replicas=2 соблюдается (2 >= 2). KRaft-контроллер проводит leader election для партиций, лидеры которых были в DC2: новый лидер выбирается из ISR (DC1 или DC3). Время недоступности: только период leader election (~5-20 секунд). После этого записи продолжаются. ISR=[DC1, DC3] — RF временно 2 (under-replicated), но запись работает. При восстановлении DC2: реплики синхронизируются и RF вернётся к 3.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 5: Rack Awareness — раздел 'Пример: 6 брокеров, 3 стойки, RF=3'"
+    },
+    {
+      "id": "kafka-m01-exam-q10",
+      "type": "multiple-choice",
+      "question": "Consumer group `billing` читает топик `orders` с 6 партициями. Группа имеет 6 активных потребителей (по одному на партицию). Один из потребителей (читал Partition 3) неожиданно завершается. Что произойдёт?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Partition 3 остановит обработку до ручного перезапуска упавшего потребителя"
+        },
+        {
+          "id": "b",
+          "text": "Kafka group coordinator инициирует rebalance: Partition 3 будет переназначена одному из оставшихся 5 потребителей"
+        },
+        {
+          "id": "c",
+          "text": "Оставшиеся 5 потребителей автоматически начнут параллельно читать Partition 3"
+        },
+        {
+          "id": "d",
+          "text": "Kafka создаёт новый потребитель для замены упавшего"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "При выбытии потребителя из группы (session.timeout.ms истёк) group coordinator инициирует rebalance. Partition 3 назначается одному из оставшихся 5 потребителей. После rebalance: 5 потребителей читают 6 партиций (один потребитель читает 2 партиции). В Kafka 4.0 с KIP-848 next-gen protocol rebalance происходит через ConsumerGroupHeartbeat API — быстрее, чем classic JoinGroup/SyncGroup. Только один потребитель читает одну партицию в группе одновременно — параллельное чтение одной партиции несколькими потребителями в группе невозможно.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 2: Брокеры, Топики, Партиции — раздел 'Партиция: единица параллелизма и упорядоченности'"
+    },
+    {
+      "id": "kafka-m01-exam-q11",
+      "type": "multiple-choice",
+      "question": "Аналитик утверждает: 'Kafka — это просто быстрая очередь, как RabbitMQ, но с партициями'. Что из перечисленного опровергает это утверждение как архитектурное неверное понимание?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Kafka поддерживает GraphQL API, RabbitMQ — нет"
+        },
+        {
+          "id": "b",
+          "text": "В RabbitMQ сообщение удаляется после чтения; в Kafka иммутабельный лог хранится по retention, любая consumer group читает независимо и может делать replay"
+        },
+        {
+          "id": "c",
+          "text": "Kafka написана на Java, RabbitMQ — на Erlang"
+        },
+        {
+          "id": "d",
+          "text": "Kafka использует TCP, RabbitMQ — AMQP"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Ключевое архитектурное отличие: модель хранения данных. RabbitMQ (FIFO queue): сообщение принято → потребитель забрал → сообщение удалено. Нет replay, нет независимых consumer groups (fan-out требует дублирования через exchanges), нет долгосрочного хранения. Kafka (commit log): сообщение добавлено в append-only log → хранится до retention → любая consumer group читает в своём темпе → новая группа может читать с offset 0. Это не просто 'быстрее' — это принципиально иная семантика: от 'доставки' к 'чтению из лога'. Следствие: event sourcing, replay, независимые analytics pipeline и microservices — всё это невозможно в RabbitMQ без значительных архитектурных усилий.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 1: Распределённый Commit Log — раздел 'Почему не база данных'"
+    },
+    {
+      "id": "kafka-m01-exam-q12",
+      "type": "multiple-choice",
+      "question": "Команда планирует добавить четвёртый KRaft controller-узел в существующий quorum из 3 узлов (Kafka 4.0). Что нужно знать об этой операции?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Невозможно добавить controller без полной остановки кластера и пересоздания quorum"
+        },
+        {
+          "id": "b",
+          "text": "KIP-853 (Kafka 4.0) поддерживает динамическое добавление voter-узлов без рестарта; но 4 voter — чётное число, рекомендуется сразу планировать 5"
+        },
+        {
+          "id": "c",
+          "text": "Добавить можно мгновенно через kafka-metadata-quorum.sh; 4 voter — оптимальное число"
+        },
+        {
+          "id": "d",
+          "text": "Необходимо увеличить num.partitions для пропорционального масштабирования"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "KIP-853 в Kafka 4.0 добавляет online quorum membership changes: новый voter-узел добавляется через kafka-metadata-quorum.sh add-controller без остановки кластера. Но архитектурное предостережение: 4 voter — чётное число. Quorum для N=4 = (4/2)+1 = 3. При split-brain 2-2: ни одна сторона не достигает 3 — кластер зависает. 4 voter дают ту же отказоустойчивость (1 сбой), что и 3 voter, но стоят дороже. Правильный план: добавить сразу 2 узла (с 3 до 5 voter), что даёт отказоустойчивость к 2 одновременным сбоям. KIP-853 поддерживает добавление нескольких узлов последовательно.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 4: KRaft контроллер — раздел 'KIP-853: динамическое членство в quorum'"
+    }
+  ]
+}

@@ -1,0 +1,195 @@
+---
+title: "KRaft контроллер: консенсус без ZooKeeper"
+description: "Внутреннее устройство KRaft quorum — Raft-протокол, metadata log, leader election и epoch fencing"
+order: 4
+difficulty: "advanced"
+estimatedTime: 20
+topics: ["KRaft", "Raft", "Metadata Log", "Leader Election", "Epoch"]
+---
+
+# KRaft контроллер: консенсус без ZooKeeper
+
+<Callout type="note">
+ZooKeeper использовался в Kafka до версии 3.3 (deprecated), полностью удалён в Kafka 4.0. Если вы встретите `zookeeper.connect` в документации или Stack Overflow — это устаревший подход. В Kafka 4.0 этого параметра не существует.
+</Callout>
+
+Kafka 4.0 управляет метаданными кластера через **KRaft** (Kafka Raft) — встроенный консенсусный протокол на основе Raft. KRaft — не внешний сервис, а часть самого Kafka.
+
+---
+
+## Почему убрали ZooKeeper
+
+ZooKeeper (Apache ZooKeeper) выполнял роль распределённого хранилища метаданных: список брокеров, назначение лидеров партиций, конфигурация топиков. Это создавало несколько проблем:
+
+**Внешняя зависимость.** Отдельный кластер ZooKeeper нужно было развёртывать, мониторить и обслуживать независимо от Kafka. Два отдельных кластера вместо одного.
+
+**Ограничение масштаба.** ZooKeeper плохо масштабировался при большом числе партиций. Кластер с 200 000+ партиций имел заметные задержки leader election и controller failover (от 30 секунд до нескольких минут).
+
+**Двойная модель согласованности.** Kafka-брокеры и ZooKeeper имели разные модели транзакционности — это усложняло обработку граничных случаев при сбоях.
+
+KRaft устраняет все эти проблемы: метаданные хранятся внутри самих Kafka-узлов, масштабирование до 1 000 000+ партиций, failover менее чем за 20 секунд (vs минуты с ZooKeeper).
+
+---
+
+## Raft consensus: кворум большинства
+
+KRaft реализует протокол Raft. Ключевая идея: **кворум большинства** (majority quorum).
+
+Для N-узлового quorum необходимо `(N/2)+1` узлов для принятия решения (округление вверх). Примеры:
+
+| Размер quorum | Необходимо для решения | Терпит отказов |
+|--------------|----------------------|----------------|
+| 1 | 1 | 0 |
+| 3 | 2 | 1 |
+| 5 | 3 | 2 |
+| 7 | 4 | 3 |
+
+Стандарт для production: **3 или 5 voter-узлов**. Чётное число (2, 4, 6) не рекомендуется: при split-brain кластер 4/2 не может принять решение (ни одна сторона не имеет большинства из 3), тогда как при 2/2 ни одна сторона не имеет большинства из 3.
+
+<Callout type="note">
+Почему нечётное число важнее чётного? При 4 voter-узлах и одном сбое у вас остаётся 3 узла — кворум 3/4 работает. Но при втором сбое остаётся 2 узла — кворум 2/4 не работает (нужно 3). При 5 voter-узлах: 2 сбоя оставляют 3 узла — кворум 3/5 работает. Нечётные числа максимизируют отказоустойчивость для данного числа узлов.
+</Callout>
+
+---
+
+## Metadata log: event-sourced журнал состояния кластера
+
+**Metadata log** — это append-only commit log (та же структура, что и пользовательские топики Kafka), в котором хранится вся история изменений состояния кластера.
+
+Каждое изменение — новая запись в metadata log:
+
+```
+offset 0: RegisterBroker { nodeId: 1, host: "broker1", ... }
+offset 1: RegisterBroker { nodeId: 2, host: "broker2", ... }
+offset 2: CreateTopic { name: "orders", partitions: 6, rf: 3 }
+offset 3: PartitionRecord { topic: "orders", partition: 0, leader: 1, isr: [1,2,3] }
+...
+offset 42: LeaderChange { topic: "orders", partition: 0, newLeader: 2 }
+```
+
+Это **не реляционная таблица**. Текущее состояние восстанавливается воспроизведением (replay) всего лога от начала. Для ускорения создаются **снапшоты** (snapshots) — сохранённое состояние на определённый offset. При запуске брокер загружает последний снапшот и воспроизводит только новые записи.
+
+Инструмент для просмотра состояния KRaft quorum:
+
+```bash
+kafka-metadata-quorum.sh \
+  --bootstrap-server localhost:9092 \
+  describe --status
+
+# Вывод:
+# ClusterId:              abc123
+# LeaderId:               1
+# LeaderEpoch:            5
+# HighWatermark:          1042
+# MaxFollowerLag:         0
+# MaxFollowerLagTimeMs:   12
+# CurrentVoters:          [1,2,3]
+# CurrentObservers:       []
+```
+
+---
+
+## KRaft leader election: последовательность событий
+
+Когда контроллер-лидер недоступен (сбой, перегрузка, сетевая проблема), оставшиеся voter-узлы проводят новые выборы. Посмотрим на протокол выборов:
+
+<DiagramContainer title="KRaft Leader Election: Raft Vote Protocol" color="violet">
+  <SequenceDiagram
+    client:visible
+    actors={[
+      { id: "c1", label: "Controller 1 (Candidate)", variant: "service", tooltip: "Controller 1 инициирует голосование после истечения election timeout. Увеличивает свой term, переходит в состояние Candidate, голосует за себя." },
+      { id: "c2", label: "Controller 2 (Voter)", variant: "service", tooltip: "Controller 2 — passive voter. Получает VoteRequest, проверяет term и полноту лога кандидата, отвечает VoteResponse." },
+      { id: "c3", label: "Controller 3 (Voter)", variant: "service", tooltip: "Controller 3 — passive voter. Аналогично Controller 2 обрабатывает VoteRequest." }
+    ]}
+    messages={[
+      { id: "m1", from: "c1", to: "c2", label: "VoteRequest { term: 6, lastOffset: 1042 }", variant: "sync", tooltip: "Controller 1 рассылает VoteRequest. term: 6 — новый election term (epoch). lastOffset: 1042 — последний offset в metadata log кандидата. Voter проверяет: term кандидата >= my term AND log кандидата не хуже моего." },
+      { id: "m2", from: "c1", to: "c3", label: "VoteRequest { term: 6, lastOffset: 1042 }", variant: "sync", tooltip: "VoteRequest отправляется параллельно всем voter-узлам. Первый, кто получит кворум (2 из 3 включая себя), становится лидером." },
+      { id: "m3", from: "c2", to: "c1", label: "VoteResponse { granted: true }", variant: "return", tooltip: "Controller 2 голосует 'за': term кандидата > моего term (5), log кандидата полный (lastOffset 1042 >= мой 1042). Я отдаю голос и обновляю свой term до 6." },
+      { id: "m4", from: "c3", to: "c1", label: "VoteResponse { granted: true }", variant: "return", tooltip: "Controller 3 также голосует 'за'. Теперь Controller 1 имеет 3 голоса из 3 (включая свой) — кворум достигнут." },
+      { id: "m5", from: "c1", to: "c2", label: "BeginEpoch { leaderId: 1, epoch: 6 }", variant: "sync", tooltip: "Controller 1 объявляет себя лидером epoch 6. BeginEpoch записывается в metadata log. Все voter-узлы обновляют leaderEpoch = 6." },
+      { id: "m6", from: "c1", to: "c3", label: "BeginEpoch { leaderId: 1, epoch: 6 }", variant: "sync", tooltip: "BeginEpoch рассылается всем. После подтверждения кворумом — лидер начинает принимать metadata-команды (создание топиков, изменение ISR)." },
+      { id: "m7", from: "c1", to: "c2", label: "MetadataUpdate { brokers, topics, ... }", variant: "sync", tooltip: "Новый лидер публикует полный снапшот метаданных кластера. Брокеры подключаются к новому лидеру и получают актуальное состояние." },
+      { id: "m8", from: "c1", to: "c3", label: "MetadataUpdate { brokers, topics, ... }", variant: "sync", tooltip: "Metadata propagation завершает failover. С этого момента новый лидер обрабатывает все metadata-изменения (ISR shrink/expand, topic creation/deletion)." }
+    ]}
+    messageSpacing={50}
+  />
+</DiagramContainer>
+
+---
+
+## Epoch fencing: защита от split-brain
+
+**Epoch** — монотонно возрастающий счётчик, присваиваемый каждому новому лидеру контроллера. При каждых новых выборах epoch увеличивается на единицу.
+
+Проблема split-brain: старый лидер (не знающий, что его заменили) продолжает рассылать команды брокерам. Без защиты — два контроллера одновременно управляют кластером, что приводит к несогласованности метаданных.
+
+**Epoch fencing** решает это просто: каждая metadata-команда включает epoch отправителя. Брокер отклоняет любую команду с epoch, меньшим чем текущий известный epoch:
+
+```
+Старый лидер (epoch 5): LeaderChange { epoch: 5, ... }
+Брокер (знает epoch 6): "Epoch 5 < 6 — отклонено. Команда устаревшего лидера."
+
+Новый лидер (epoch 6): LeaderChange { epoch: 6, ... }
+Брокер (знает epoch 6): "Epoch 6 = 6 — принято."
+```
+
+Epoch fencing гарантирует: в любой момент времени команды принимаются только от текущего легитимного лидера. Старый лидер автоматически становится безвредным.
+
+---
+
+## KIP-853: динамическое членство в quorum
+
+**KIP-853** (Kafka 4.0) добавляет возможность изменять состав KRaft voter-узлов без остановки кластера.
+
+До KIP-853: изменение quorum (добавление или замена controller-узла) требовало остановки кластера. Это делало операции по масштабированию control plane болезненными.
+
+После KIP-853: новый voter-узел добавляется через `kafka-metadata-quorum.sh`:
+
+```bash
+# Добавить узел node.id=4 в quorum (без рестарта)
+kafka-metadata-quorum.sh \
+  --bootstrap-server localhost:9092 \
+  add-controller \
+  --controller-id 4 \
+  --controller-directory-id <directory-id>
+```
+
+Новый узел сначала выступает как **observer** (получает metadata log, но не голосует), затем переходит в **voter** статус после достижения кворума существующих voter-узлов. Это полностью онлайн-операция.
+
+---
+
+## Конфигурация KRaft в production
+
+Минимальная конфигурация для dedicated controller-узла (Kafka 4.0):
+
+```properties
+# Controller-only node: не хранит пользовательские данные
+process.roles=controller
+node.id=1
+
+# KRaft quorum: 3 voter-узла
+controller.quorum.voters=1@controller1:9093,2@controller2:9093,3@controller3:9093
+
+# Controller listener (не для клиентов)
+listeners=CONTROLLER://0.0.0.0:9093
+controller.listener.names=CONTROLLER
+listener.security.protocol.map=CONTROLLER:PLAINTEXT
+
+# Metadata log storage
+log.dirs=/var/kafka/metadata
+```
+
+---
+
+## Ключевые выводы
+
+1. **KRaft** — встроенный Raft-протокол, заменивший ZooKeeper в Kafka 4.0. `zookeeper.connect` не существует.
+2. **Metadata log** — append-only event-sourced лог всех изменений кластера (не реляционная таблица).
+3. **Raft quorum**: нечётное число voter-узлов (3 или 5). Кворум = большинство.
+4. **Epoch** монотонно возрастает при каждых выборах. **Epoch fencing** отклоняет команды от устаревшего лидера.
+5. **KIP-853**: добавление/удаление controller-узлов без остановки кластера (Kafka 4.0+).
+
+<KnowledgeCheck
+  question="KRaft quorum состоит из 3 voter-узлов: controller-1, controller-2, controller-3. Controller-1 был лидером (epoch 4). Произошёл сетевой сбой: controller-1 изолирован, controller-2 и controller-3 провели выборы и избрали controller-2 новым лидером (epoch 5). Через 30 секунд сеть восстановилась. Controller-1 снова видит кластер и пытается отправить LeaderChange-команду с epoch 4. Что произойдёт?"
+  answer="Epoch fencing отклонит команду. Брокеры уже знают epoch 5 от нового лидера (controller-2). Любая команда с epoch 4 (меньше текущего epoch 5) будет отклонена как устаревшая. Controller-1 сам обнаружит, что он больше не лидер (получит BeginEpoch с epoch 5 от controller-2), и перейдёт в follower-режим. Это ключевое свойство epoch fencing: старый лидер автоматически становится безвредным без ручного вмешательства."
+/>
