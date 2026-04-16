@@ -1,0 +1,315 @@
+---
+title: "Подготовка окружения"
+description: "Docker, Docker Compose, CLI-инструменты Kafka, Python — всё необходимое для практических упражнений"
+order: 3
+difficulty: "beginner"
+estimatedTime: 20
+topics: ["Docker", "Docker Compose", "kafka-topics.sh", "Python", "KRaft"]
+---
+
+# Подготовка окружения
+
+Прежде чем перейти к практике, нужно настроить локальное окружение. Этот урок проведёт вас от нуля до работающего Kafka-кластера на вашей машине за 15–20 минут.
+
+---
+
+## Требования
+
+Для прохождения курса вам понадобится:
+
+| Инструмент | Версия | Назначение |
+|------------|--------|------------|
+| Docker Desktop / Docker Engine | 24.0+ | Запуск Kafka-контейнеров |
+| Docker Compose | v2 (встроен в Docker Desktop) | Оркестрация multi-container сред |
+| Python | 3.10+ (опционально) | Локальная разработка вне browser challenges |
+
+**Не требуется:**
+- Java (JDK/JRE) — для browser challenges не нужна; для Docker lab Java уже внутри контейнера
+- Confluent Platform или Confluent Cloud аккаунт
+- Любые облачные сервисы
+
+<Callout type="note">
+Все browser code challenges работают без каких-либо локальных установок — только браузер. Docker нужен только для Docker-лаборатории (практических упражнений с реальным Kafka-кластером).
+</Callout>
+
+---
+
+## Kafka 4.0 и KRaft: почему нет ZooKeeper
+
+Если вы работали с Kafka ранее или ищете материалы в интернете, вы наверняка встретите конфигурации с ZooKeeper: отдельный контейнер `zookeeper`, свойство `zookeeper.connect`, флаг `--zookeeper` в CLI.
+
+В нашем курсе этого нет — и вот почему.
+
+**ZooKeeper был полностью удалён в Kafka 4.0** (релиз: 18 марта 2025 года). До Kafka 4.0 ZooKeeper хранил метаданные кластера: информацию о брокерах, топиках, партициях, ISR, ACL. В Kafka 4.0 эти функции взял на себя встроенный протокол **KRaft** (Kafka Raft) — реализация алгоритма Raft-консенсуса прямо внутри брокеров.
+
+В KRaft-режиме:
+- Брокеры сами ведут метаданные в **metadata log** (Raft-реплицированный append-only log)
+- Один или несколько брокеров выполняют роль **controller** (ведут Raft quorum)
+- `process.roles=broker,controller` — combined mode: один узел одновременно является и брокером, и контроллером
+- Не нужен отдельный ZooKeeper-кластер, не нужна синхронизация между двумя отдельными системами
+
+<Callout type="warning">
+Если вы нашли туториал с ZooKeeper в конфигурации Kafka — он написан до 2025 года и неприменим к Kafka 4.0+. Свойство `zookeeper.connect` не существует в Kafka 4.0. Флаг `--zookeeper` удалён из всех CLI-инструментов.
+</Callout>
+
+---
+
+## Docker Compose: быстрый старт
+
+Вот минимальный `docker-compose.yml` для запуска Kafka 4.0 в KRaft combined mode (один узел = брокер + контроллер):
+
+```yaml
+# docker-compose.yml — Kafka 4.0 KRaft single-node (для разработки)
+services:
+  kafka:
+    image: apache/kafka:4.0.0
+    container_name: kafka-lab
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG_DIRS: /var/kafka/logs
+
+volumes:
+  kafka-data:
+    driver: local
+```
+
+### Что означает каждая переменная окружения
+
+**`KAFKA_NODE_ID: 1`** — уникальный идентификатор этого узла в кластере. В многоброкерных кластерах каждый брокер получает разный `node.id`. Аналог `broker.id` из ZooKeeper-эпохи.
+
+**`KAFKA_PROCESS_ROLES: broker,controller`** — ключевая настройка KRaft. Этот узел одновременно принимает данные от producers (роль `broker`) и участвует в Raft quorum для управления метаданными (роль `controller`). В production часто разделяют: выделенные controller-узлы и отдельные broker-узлы.
+
+**`KAFKA_LISTENERS`** — два listener endpoint: `PLAINTEXT` (для clients на порту 9092) и `CONTROLLER` (для внутреннего Raft-трафика на порту 9093). CONTROLLER listener не должен быть доступен клиентам.
+
+**`KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092`** — адрес, который брокер сообщает clients для подключения. При запуске в Docker важно использовать `localhost` (или hostname машины), а не `0.0.0.0`.
+
+**`KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093`** — список участников Raft quorum в формате `node.id@host:port`. В нашем single-node случае — один участник. В production quorum из 3 или 5 контроллеров: `1@kafka1:9093,2@kafka2:9093,3@kafka3:9093`.
+
+**`KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1`** — replication factor для внутреннего топика `__consumer_offsets`. На одном брокере должно быть 1 (нельзя реплицировать данные на несуществующие брокеры).
+
+---
+
+## CLI-инструменты Kafka
+
+Все CLI-инструменты Kafka находятся внутри Docker-контейнера. Запускайте их через `docker exec`.
+
+### kafka-topics.sh — управление топиками
+
+```bash
+# Список всех топиков
+docker exec kafka-lab kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --list
+
+# Создать топик с 3 партициями и replication factor 1
+docker exec kafka-lab kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --create \
+  --topic my-events \
+  --partitions 3 \
+  --replication-factor 1
+
+# Подробная информация о топике (партиции, лидеры, ISR)
+docker exec kafka-lab kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --describe \
+  --topic my-events
+```
+
+<Callout type="tip">
+В Kafka 4.0 все CLI-инструменты используют флаг `--bootstrap-server`. Флаг `--zookeeper` удалён. Если вы видите ошибку `--zookeeper is not a recognized option`, убедитесь, что используете Kafka 4.0+ образ.
+</Callout>
+
+### kafka-console-producer.sh — отправка сообщений
+
+```bash
+# Интерактивный producer (каждая строка — одно сообщение)
+docker exec -it kafka-lab kafka-console-producer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic my-events
+
+# Отправить одно сообщение напрямую
+echo "Hello, Kafka!" | docker exec -i kafka-lab kafka-console-producer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic my-events
+```
+
+### kafka-console-consumer.sh — чтение сообщений
+
+```bash
+# Читать новые сообщения (начиная с конца топика)
+docker exec kafka-lab kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic my-events
+
+# Читать все сообщения с начала топика
+docker exec kafka-lab kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic my-events \
+  --from-beginning
+
+# Читать с конкретным group ID и выводить key
+docker exec kafka-lab kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic my-events \
+  --group my-consumer-group \
+  --from-beginning \
+  --print-key
+```
+
+---
+
+## Python: kafka-python для локальной разработки
+
+Для работы вне браузера (локальный Python-скрипт с реальным Kafka-кластером из Docker) установите библиотеку `kafka-python`:
+
+```bash
+pip install kafka-python==2.0.6
+```
+
+Проверка подключения:
+
+```python
+from kafka.admin import KafkaAdminClient
+
+admin = KafkaAdminClient(bootstrap_servers='localhost:9092')
+topics = admin.list_topics()
+print(f'Топики в кластере: {topics}')
+admin.close()
+```
+
+<Callout type="note">
+В browser code challenges `kafka_sim.py` подгружается автоматически — `pip install` не нужен. Установка kafka-python нужна только для локальных Python-скриптов, взаимодействующих с Docker-лабораторией.
+</Callout>
+
+---
+
+## Проверка установки
+
+Запустите кластер и выполните серию проверочных команд:
+
+```bash
+# 1. Запустить кластер
+docker compose up -d
+
+# 2. Подождать 10-15 секунд, пока брокер инициализируется
+# (KRaft election занимает несколько секунд)
+
+# 3. Проверить список топиков (должен вернуть пустой список или __consumer_offsets)
+docker exec kafka-lab kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --list
+
+# 4. Создать тестовый топик
+docker exec kafka-lab kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --create --topic test --partitions 1 --replication-factor 1
+
+# 5. Отправить тестовое сообщение
+echo "test-message-1" | docker exec -i kafka-lab kafka-console-producer.sh \
+  --bootstrap-server localhost:9092 --topic test
+
+# 6. Прочитать сообщение
+docker exec kafka-lab kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic test --from-beginning --max-messages 1
+```
+
+**Ожидаемый вывод шага 6:**
+
+```
+test-message-1
+Processed a total of 1 messages
+```
+
+Если вы видите это сообщение — окружение настроено правильно. Kafka 4.0 в KRaft-режиме работает.
+
+<DiagramContainer title="Схема локального окружения для курса" color="emerald">
+  <FlowColumn>
+    <FlowNode
+      variant="input"
+      size="md"
+      tooltip="Ваша машина: запускает Docker Compose. Все Kafka CLI-команды выполняются через docker exec. Python-скрипты подключаются через localhost:9092."
+    >
+      Ваша машина (localhost)
+    </FlowNode>
+    <Arrow direction="down" label="docker compose up -d" />
+    <FlowRow>
+      <FlowNode
+        variant="cluster"
+        size="md"
+        tooltip="Kafka Broker (KRaft combined mode): принимает соединения на порт 9092. Одновременно является брокером (хранит данные) и контроллером (ведёт Raft quorum для метаданных). Официальный образ apache/kafka:4.0.0."
+      >
+        Kafka Broker + Controller (port 9092)
+      </FlowNode>
+      <FlowNode
+        variant="service"
+        size="sm"
+        tooltip="CONTROLLER listener (port 9093): внутренний Raft-трафик между контроллерами. В single-node режиме контроллер общается сам с собой. Не доступен клиентам."
+      >
+        KRaft CONTROLLER (port 9093)
+      </FlowNode>
+    </FlowRow>
+    <Arrow direction="down" label="produce / consume" />
+    <FlowRow>
+      <FlowNode
+        variant="process"
+        size="sm"
+        tooltip="kafka-console-producer.sh: CLI-инструмент для отправки сообщений из stdin в топик. Запускается через docker exec. Использует --bootstrap-server."
+      >
+        kafka-console-producer.sh
+      </FlowNode>
+      <FlowNode
+        variant="process"
+        size="sm"
+        tooltip="kafka-console-consumer.sh: CLI для чтения сообщений. Поддерживает --from-beginning (с offset 0), --group (consumer group), --max-messages (лимит)."
+      >
+        kafka-console-consumer.sh
+      </FlowNode>
+      <FlowNode
+        variant="process"
+        size="sm"
+        tooltip="Python kafka-python: библиотека для написания producer/consumer скриптов. API: KafkaProducer, KafkaConsumer, KafkaAdminClient. Эквивалент kafka_sim.py в реальном окружении."
+      >
+        Python kafka-python
+      </FlowNode>
+    </FlowRow>
+  </FlowColumn>
+</DiagramContainer>
+
+---
+
+## Устранение типичных проблем
+
+**Ошибка: `Connection to node -1 could not be established`**
+Брокер ещё не успел стартовать. Подождите 15–20 секунд после `docker compose up -d` и попробуйте снова.
+
+**Ошибка: `LEADER_NOT_AVAILABLE`**
+Kafka только что создала топик и назначает лидера партиции. Это временно — повторите запрос через 1–2 секунды.
+
+**Ошибка: `Error: --zookeeper is not a recognized option`**
+Вы используете Kafka 3.x образ с командой Kafka 4.0. Убедитесь, что в `docker-compose.yml` указан `image: apache/kafka:4.0.0`, и выполните `docker compose pull` для обновления образа.
+
+---
+
+## Ключевые выводы
+
+1. Kafka 4.0 работает **без ZooKeeper** — KRaft встроен в брокеры через `KAFKA_PROCESS_ROLES`
+2. Все CLI-инструменты используют `--bootstrap-server`, а не `--zookeeper`
+3. `docker compose up -d` запускает полноценный Kafka-кластер за несколько секунд
+4. Browser challenges не требуют никаких локальных установок — kafka_sim.py включён автоматически
+5. `KAFKA_CONTROLLER_QUORUM_VOTERS` — ключевая настройка KRaft, перечисляет участников Raft quorum
+
+<KnowledgeCheck
+  question="Почему docker-compose.yml для Kafka 4.0 не содержит контейнера ZooKeeper?"
+  answer="В Kafka 4.0 ZooKeeper полностью удалён. Координация кластера выполняется через встроенный протокол KRaft (Kafka Raft). Каждый брокер может выполнять роль контроллера (process.roles=controller) или совмещать роли (process.roles=broker,controller). Метаданные хранятся в внутреннем Raft-логе, а не во внешнем ZooKeeper."
+/>

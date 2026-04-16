@@ -1,14 +1,224 @@
 ---
 title: "Что такое Apache Kafka"
-description: "Введение в Apache Kafka — потоковая обработка данных и её место в современной архитектуре"
+description: "Распределённый commit log, место Kafka в современной архитектуре, отличия от традиционных message broker"
 order: 1
 difficulty: "beginner"
-estimatedTime: 5
-topics: ["Kafka", "Введение", "Потоковые системы"]
+estimatedTime: 15
+topics: ["Kafka", "Event Streaming", "Commit Log", "Архитектура"]
 ---
 
 # Что такое Apache Kafka
 
-Kafka — это распределённая платформа для потоковой обработки данных.
+Apache Kafka — это не message broker. Это утверждение звучит парадоксально, если вы впервые слышите о Kafka. Большинство разработчиков впервые встречают её как «очередь для микросервисов». Но такое понимание ограничено и не объясняет, почему Kafka стала центральной инфраструктурой в Netflix, Uber, LinkedIn и тысячах других компаний.
 
-*Это placeholder-урок для валидации rendering pipeline. Полный контент будет добавлен в Phase 46.*
+Kafka — это **распределённый commit log** и **платформа потоковой обработки событий** (event streaming platform). Разница с привычными брокерами сообщений фундаментальная.
+
+---
+
+## Kafka — не message broker
+
+Традиционный message broker (RabbitMQ, ActiveMQ, IBM MQ) реализует паттерн **point-to-point queue**: сообщение отправлено — один потребитель его забрал — сообщение удалено. Брокер — это промежуточный посредник, который держит сообщение ровно до момента доставки.
+
+Kafka работает принципиально иначе. В её основе лежит **append-only log** — неизменяемая последовательность записей, в которую данные добавляются только в конец. Это та же структура данных, что и:
+
+- WAL (Write-Ahead Log) в PostgreSQL и MySQL
+- Raft log в распределённых системах на основе консенсуса
+- Binlog в MySQL репликации
+- Журнал транзакций в системах event sourcing
+
+Ключевое следствие из append-only природы: **сообщения не удаляются после прочтения**. Они хранятся на диске согласно настройке `retention.ms` (по умолчанию 7 дней) или `retention.bytes`. Потребитель не «забирает» сообщение — он читает его, продвигая свой **offset** (порядковый номер в log).
+
+<Callout type="note">
+Offset — это просто целое число. Partition содержит записи с offset 0, 1, 2, 3... Каждый consumer group хранит свой offset независимо от других. Это единственное, что Kafka помнит о потребителе.
+</Callout>
+
+### Что это означает на практике
+
+Если у вас три consumer group читают один и тот же топик, каждая из них ведёт **свой** offset. Consumer group A на offset 1000, consumer group B — на offset 500, consumer group C — на offset 2000. Они не мешают друг другу. Consumer group A не удаляет сообщения, которые ещё не прочла group B.
+
+Это невозможно в RabbitMQ или ActiveMQ — там сообщение удаляется после первого successful acknowledgement.
+
+---
+
+## Kafka vs традиционные очереди
+
+Понять Kafka проще всего через сравнение с системами, которые разработчики уже знают.
+
+| Свойство | RabbitMQ | ActiveMQ (JMS) | Apache Kafka |
+|----------|----------|----------------|--------------|
+| Модель доставки | Push (broker → consumer) | Push (JMS MessageListener) | Pull (consumer сам читает) |
+| Удаление после чтения | Да | Да | Нет (TTL-based retention) |
+| Replay прошлых событий | Нет | Нет | Да (rewind offset) |
+| Несколько consumer groups | Нет (fan-out через exchange) | Нет (topic duplicates) | Да, нативно |
+| Пропускная способность | Сотни тысяч msg/s | Десятки тысяч msg/s | Миллионы msg/s |
+| Гарантии порядка | Per-queue | Per-queue | Per-partition |
+| Персистентность | Опциональная | Опциональная | По умолчанию |
+| Горизонтальное масштабирование | Ограниченное | Ограниченное | Нативное (партиции) |
+
+**RabbitMQ** отлично подходит для task queues, где важна сложная маршрутизация через exchanges и bindings. Если вы хотите point-to-point delivery с гибкой топологией маршрутов — RabbitMQ уместен.
+
+**ActiveMQ** реализует JMS-спецификацию и хорошо интегрируется с Java EE экосистемой. Паттерн request-reply с correlation ID — его forte.
+
+**Kafka** выигрывает там, где важны: высокая пропускная способность, долгосрочное хранение событий, replay, независимые consumer groups и масштабирование до миллионов событий в секунду.
+
+<Callout type="warning">
+Kafka — неправильный выбор для request-reply паттернов (RPC через сообщения), low-latency одиночных задач (менее 10 мс latency), и сложной маршрутизации на уровне брокера. Для этого RabbitMQ и ActiveMQ подходят лучше.
+</Callout>
+
+---
+
+## Экосистема Apache Kafka
+
+Kafka — это не один инструмент, а целая экосистема. Понимание её компонентов критически важно для архитектурных решений.
+
+<DiagramContainer title="Экосистема Apache Kafka" color="emerald">
+  <div className="space-y-4 p-2">
+    <div className="text-center text-sm text-slate-400 mb-2">Источники данных</div>
+    <FlowRow>
+      <FlowNode
+        variant="input"
+        size="sm"
+        tooltip="Producers: приложения, сервисы, микросервисы, которые публикуют события в Kafka. Используют KafkaProducer API. Отправляют ProducerRecord с topic, key, value."
+      >
+        Producers
+      </FlowNode>
+      <FlowNode
+        variant="input"
+        size="sm"
+        tooltip="Kafka Connect Source: коннекторы для чтения из внешних систем (PostgreSQL CDC, MySQL binlog, S3, Elasticsearch) без написания кода продюсера."
+      >
+        Connect Source
+      </FlowNode>
+      <FlowNode
+        variant="input"
+        size="sm"
+        tooltip="Kafka Streams (as producer): обработанные потоки, записанные обратно в Kafka. Результат stream processing — новый топик."
+      >
+        Streams Output
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <Arrow direction="down" label="publish events" />
+    </FlowRow>
+    <div className="text-center text-sm text-slate-400">Ядро Kafka</div>
+    <FlowRow>
+      <FlowNode
+        variant="cluster"
+        size="lg"
+        tooltip="Kafka Broker Cluster: группа брокеров (серверов), которые совместно хранят топики. Kafka 4.0 использует KRaft — встроенный Raft-протокол без ZooKeeper. Брокеры хранят партиции как append-only log-файлы на диске."
+      >
+        Kafka Broker Cluster (KRaft)
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <Arrow direction="right" label="Schema Registry" dashed />
+      <FlowNode
+        variant="service"
+        size="sm"
+        tooltip="Schema Registry: централизованное хранилище Avro/Protobuf/JSON Schema схем. Producers регистрируют схему, consumers получают её по ID. Обеспечивает schema evolution — backward/forward compatibility."
+      >
+        Schema Registry
+      </FlowNode>
+    </FlowRow>
+    <div className="text-center text-sm text-slate-400">Топики и партиции</div>
+    <FlowRow>
+      <DataBox
+        label="Topic: orders"
+        tooltip="Топик — логический канал для событий. Физически разбит на партиции. Продюсер пишет в топик; партиционирование определяется ключом сообщения или custom partitioner."
+      >
+        Partition 0 | Partition 1 | Partition 2
+      </DataBox>
+      <DataBox
+        label="Topic: events"
+        tooltip="Каждый топик может иметь разные настройки: retention.ms, replication.factor, cleanup.policy. Топики изолированы — медленный consumer одного топика не влияет на другой."
+      >
+        Partition 0 | Partition 1
+      </DataBox>
+    </FlowRow>
+    <FlowRow>
+      <Arrow direction="down" label="consume" />
+    </FlowRow>
+    <div className="text-center text-sm text-slate-400">Потребители и обработка</div>
+    <FlowRow>
+      <FlowNode
+        variant="process"
+        size="sm"
+        tooltip="Consumer Groups: группа потребителей с общим group.id. Партиции топика равномерно распределяются между членами группы. Каждая группа ведёт свой offset — несколько групп читают независимо."
+      >
+        Consumer Groups
+      </FlowNode>
+      <FlowNode
+        variant="process"
+        size="sm"
+        tooltip="Kafka Connect Sink: коннекторы для записи из Kafka во внешние системы (S3, Snowflake, Elasticsearch, PostgreSQL). Connector framework управляет offset, retry, exactly-once."
+      >
+        Connect Sink
+      </FlowNode>
+      <FlowNode
+        variant="process"
+        size="sm"
+        tooltip="Kafka Streams: библиотека потоковой обработки на JVM. Stateful операции (windowing, joins, aggregations) с state stores (RocksDB). Топология = граф обработки из Source → Processor → Sink."
+      >
+        Kafka Streams
+      </FlowNode>
+      <FlowNode
+        variant="process"
+        size="sm"
+        tooltip="ksqlDB: SQL-интерфейс поверх Kafka Streams. Позволяет писать потоковые запросы на SQL: CREATE STREAM, CREATE TABLE, SELECT с windowing. Персистирует состояние в Kafka топиках."
+      >
+        ksqlDB
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+Ключевые компоненты экосистемы:
+
+**Kafka Broker Cluster** — ядро системы. Хранит данные, управляет репликацией, обслуживает producers и consumers. Kafka 4.0 использует KRaft-протокол (Raft-based координация) без внешнего ZooKeeper.
+
+**Schema Registry** — централизованный реестр схем данных. Критически важен в production: без него изменение формата сообщений может сломать потребителей. Поддерживает Avro, Protobuf, JSON Schema.
+
+**Kafka Connect** — фреймворк для интеграции с внешними системами без написания кода. Source connectors (читают данные в Kafka), Sink connectors (пишут из Kafka в хранилища). Сотни готовых коннекторов в экосистеме.
+
+**Kafka Streams** — библиотека потоковой обработки. Stateful операции, windowing, joins между топиками. Работает как обычная Java-библиотека — не требует отдельного кластера.
+
+**ksqlDB** — SQL-интерфейс для потоковой обработки. Хорошо подходит для аналитических команд, которые знают SQL, но не хотят писать Kafka Streams-код.
+
+---
+
+## Место Kafka в современной архитектуре
+
+Kafka стала центральной инфраструктурой в event-driven системах. Понимание её роли важно для принятия архитектурных решений.
+
+### Event-Driven Architecture (EDA)
+
+В традиционной микросервисной архитектуре сервисы общаются напрямую: Order Service вызывает Payment Service по REST/gRPC. Это создаёт **temporal coupling** (оба сервиса должны быть доступны в момент запроса) и **tight coupling** (Order Service знает о Payment Service).
+
+Event-driven архитектура решает это через события: Order Service публикует событие `OrderCreated` в Kafka. Payment Service, Notification Service, Inventory Service подписываются на этот топик и реагируют независимо, асинхронно, каждый в своём темпе.
+
+### CQRS и Event Sourcing
+
+Kafka идеально сочетается с **CQRS** (Command Query Responsibility Segregation) и **Event Sourcing**. В event sourcing состояние системы — это не строки в базе данных, а последовательность событий в append-only log. Kafka и является этим log. Текущее состояние восстанавливается воспроизведением (replay) событий с начала или со snapshot.
+
+### Kafka как «центральная нервная система»
+
+LinkedIn, создавшая Kafka, описывает её роль так: Kafka — это **центральная нервная система** data infrastructure. Все системы (OLTP базы, аналитические хранилища, ML-пайплайны, мониторинг) подключены к Kafka. Данные текут через брокеры, преобразуются в Kafka Streams или ksqlDB, материализуются в конечных хранилищах через Connect.
+
+<Callout type="tip">
+Признак того, что Kafka нужна вашей системе: у вас более двух сервисов, которые должны реагировать на одно и то же событие, или вы хотите сохранить возможность replay исторических данных для новых потребителей.
+</Callout>
+
+---
+
+## Ключевые выводы
+
+1. Kafka — **распределённый commit log**, не message broker. Данные не удаляются после чтения.
+2. **Consumer groups** читают независимо — каждая группа ведёт свой offset.
+3. **Replay** — уникальная возможность Kafka: новый потребитель может прочитать события с самого начала.
+4. **Kafka 4.0** работает без ZooKeeper — KRaft-протокол встроен в брокеры.
+5. Экосистема включает Connect, Streams, ksqlDB, Schema Registry — полный набор для event-driven архитектуры.
+
+<KnowledgeCheck
+  question="В чём главное отличие Kafka от традиционных message broker (RabbitMQ, ActiveMQ)?"
+  answer="Kafka хранит сообщения как неизменяемый append-only commit log. Потребители читают сообщения, но не удаляют их — каждая группа потребителей ведёт свой offset. Это позволяет replay, несколько независимых consumer groups, и длительное хранение данных. Традиционные брокеры удаляют сообщение после подтверждения потребителем."
+/>

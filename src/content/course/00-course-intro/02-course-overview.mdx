@@ -1,0 +1,139 @@
+---
+title: "Обзор курса и структура"
+description: "14 модулей курса, Docker-лаборатория, code challenges — как извлечь максимум из обучения"
+order: 2
+difficulty: "beginner"
+estimatedTime: 10
+topics: ["Структура курса", "Docker Lab", "Code Challenges"]
+---
+
+# Обзор курса и структура
+
+Этот курс — не поверхностное введение в Kafka API. Это глубокое погружение в архитектуру, внутреннее устройство и production-операции. За 14 модулей вы пройдёте путь от базовых концепций до проектирования надёжных распределённых систем на основе Kafka.
+
+---
+
+## Карта модулей
+
+Курс разбит на 14 модулей. Модуль 00 (этот) доступен бесплатно как предварительный просмотр. Модули 01–13 — платная часть курса.
+
+| Модуль | Название | Ключевые темы |
+|--------|----------|---------------|
+| **00** | Введение в курс (free) | Что такое Kafka, экосистема, настройка окружения |
+| **01** | Архитектура Kafka | KRaft, брокеры, топики, партиции, репликация, ISR |
+| **02** | Producers | Producer API, батчинг, сжатие, acks, idempotence, транзакции |
+| **03** | Consumers | Consumer API, offset management, consumer groups, KIP-848 rebalancing |
+| **04** | Внутреннее устройство | Log segments, LEO vs High Watermark, log compaction, tiered storage |
+| **05** | Kafka Connect | Source/Sink connectors, connector lifecycle, SMT, exactly-once delivery |
+| **06** | Schema Registry | Avro, Protobuf, JSON Schema, schema evolution, compatibility modes |
+| **07** | Kafka Streams | DSL API, state stores, windowing, joins, interactive queries |
+| **08** | ksqlDB | Потоковый SQL, STREAM vs TABLE, materialized views, push/pull queries |
+| **09** | Безопасность | TLS, SASL/SCRAM, ACL, межкластерное шифрование, audit logging |
+| **10** | Production Operations | Мониторинг, tuning, consumer lag, rolling restarts, capacity planning |
+| **11** | Multi-DC и репликация | MirrorMaker 2, active-active, active-passive, geo-replication patterns |
+| **12** | Design Patterns | Event sourcing, CQRS, saga, outbox pattern, CDC с Debezium |
+| **13** | Capstone Project | Комплексный проект: event-driven e-commerce платформа на Kafka |
+
+### Рекомендуемый порядок изучения
+
+Модули 01–04 образуют фундамент. Без них понимание последующих модулей будет поверхностным. Модули 05–08 можно изучать в произвольном порядке после освоения фундамента. Модули 09–11 — production-ориентированные, их можно читать параллельно с 05–08. Модуль 12 лучше читать последним из технических — он предполагает понимание всех предыдущих инструментов.
+
+<Callout type="tip">
+Если у вас уже есть опыт работы с Kafka, можно начать с Модуля 04 (Внутреннее устройство) или Модуля 10 (Production Operations) — эти модули максимально насыщены material, которого нет в большинстве курсов.
+</Callout>
+
+---
+
+## Docker-лаборатория
+
+Практические упражнения курса основаны на реальном Kafka-кластере, запущенном локально через **Docker Compose**. Не нужны облачные аккаунты, не нужны подписки на Confluent Cloud — только Docker.
+
+Лаборатория использует официальный образ `apache/kafka:4.0.0` в режиме **KRaft** (без ZooKeeper). Это значит, что вы работаете с той же конфигурацией, что и в современном production.
+
+В рамках курса лаборатория включает:
+- Одиночный KRaft-брокер для базовых упражнений (Модули 01–04)
+- Трёхброкерный кластер для репликации и failover (Модуль 01)
+- Полная экосистема (Kafka + Schema Registry + Connect + ksqlDB) для интеграционных упражнений (Модули 05–08)
+
+Детальная инструкция по настройке окружения — в Уроке 03 этого модуля.
+
+<Callout type="note">
+Минимальные требования: Docker Desktop (Mac/Windows) или Docker Engine + Docker Compose v2 (Linux). Python 3.10+ опционально — для локальной разработки вне браузерных challenges.
+</Callout>
+
+---
+
+## Code Challenges
+
+Каждый технический модуль содержит **code challenges** — интерактивные задания с автоматической проверкой. Они выполняются прямо в браузере, без установки Python или Kafka.
+
+### Как это работает
+
+Браузерные challenges используют **Pyodide** — Python-рантайм, скомпилированный в WebAssembly. Python-код выполняется локально в вашем браузере, без сервера.
+
+Для эмуляции Kafka API используется библиотека **kafka_sim.py** — специально разработанная mock-реализация, совместимая с API `kafka-python`:
+
+```python
+# Эти импорты работают в browser challenges через kafka_sim
+from kafka import KafkaProducer, KafkaConsumer, TopicPartition
+from kafka.admin import KafkaAdminClient, NewTopic
+```
+
+Доступные классы:
+- `KafkaProducer` — send, flush, close, callbacks
+- `KafkaConsumer` — subscribe, assign, poll, commit, seek, beginning_offsets, end_offsets
+- `TopicPartition` — (topic, partition) именованный кортеж
+- `ConsumerRecord` — offset, key, value, timestamp, partition
+- `KafkaAdminClient` — create_topics, list_topics, describe_configs, delete_topics
+- `NewTopic` — name, num_partitions, replication_factor
+
+### Что проверяют challenges
+
+Challenges проверяют понимание концепций, а не синтаксис. Типичные задания:
+- Создать `KafkaProducer` с правильными настройками `acks` и `compression_type`
+- Написать consumer с ручным commit и обработкой `auto.offset.reset`
+- Проверить partition assignment через `AdminClient`
+- Реализовать транзакционную отправку с `transactional_id`
+
+<Callout type="note">
+Java для выполнения challenges не требуется. Все задания написаны на Python с kafka-python совместимым API. kafka_sim.py автоматически подгружается при старте challenge — никаких дополнительных установок.
+</Callout>
+
+---
+
+## Cross-ссылки на связанные курсы
+
+Kafka-курс не существует в вакууме. На платформе есть несколько курсов, которые глубоко связаны с темами этого курса:
+
+**Debezium: Change Data Capture** — Модуль 12 этого курса рассматривает Outbox Pattern и CDC. Debezium-курс погружает в детали CDC с PostgreSQL, MySQL, MongoDB: как настроить коннектор, обработать schema changes, организовать exactly-once delivery. Рекомендуется после Модуля 05 (Kafka Connect).
+
+**Storage Formats Deep-Dive** — Kafka Schema Registry (Модуль 06) использует Avro как основной формат сериализации. Storage Formats курс детально разбирает Avro: schema evolution правила, binary encoding, code generation. Полезен параллельно с Модулем 06.
+
+<CrossCourseRef
+  courseId="debezium-course"
+  lessonPath="01-cdc-fundamentals/01-what-is-cdc"
+  label="Debezium: Change Data Capture"
+  description="CDC-паттерны для Kafka Connect Source — как Debezium читает database changelog и публикует события в Kafka"
+/>
+
+<CrossCourseRef
+  courseId="storage-formats"
+  lessonPath="05-avro/01-avro-schema"
+  label="Apache Avro: полное руководство"
+  description="Схемы Avro, binary encoding, schema evolution — всё что нужно для работы с Kafka Schema Registry"
+/>
+
+---
+
+## Ключевые выводы
+
+1. Курс состоит из **14 модулей** — от архитектуры до production operations и design patterns
+2. **Модуль 00** (этот) — бесплатный предварительный просмотр; модули 01–13 — платная часть
+3. **Docker-лаборатория** использует реальный Kafka 4.0 KRaft-кластер локально — без облачных сервисов
+4. **Code challenges** выполняются в браузере через Pyodide + kafka_sim.py — Java не требуется
+5. Курс связан с Debezium и Storage Formats курсами для углублённого изучения смежных тем
+
+<KnowledgeCheck
+  question="Какой язык программирования используется в code challenges курса?"
+  answer="Python. Code challenges выполняются в браузере через Pyodide — Python-рантайм скомпилированный в WebAssembly. Библиотека kafka_sim.py предоставляет мок-API, совместимый с kafka-python: KafkaProducer, KafkaConsumer, KafkaAdminClient. Java для challenges не требуется."
+/>
