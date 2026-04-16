@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "03-consumers/03-consumer-groups",
+  "moduleId": "03-consumers",
+  "_meta": {
+    "idPrefix": "kafka-m03-03",
+    "description": "Use IDs: kafka-m03-03-q1, q2, q3, q4 for MC/TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m03-03-q1",
+      "type": "multiple-choice",
+      "question": "Топик 'transactions' имеет 6 партиций. Consumer group 'fraud-detection' состоит из 4 consumer. Как партиции распределятся между consumer (при RangeAssignor)?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Consumer 1 и Consumer 2 получат по 2 партиции, Consumer 3 и Consumer 4 получат по 1 партиции"
+        },
+        {
+          "id": "b",
+          "text": "Consumer 1 получит 3 партиции (P0, P1, P2), Consumer 2 получит 2 партиции (P3, P4), Consumer 3 получит 1 партицию (P5), Consumer 4 не получит ничего"
+        },
+        {
+          "id": "c",
+          "text": "Каждый consumer получит по 1,5 партиции — Kafka автоматически разделит одну партицию"
+        },
+        {
+          "id": "d",
+          "text": "Все 4 consumer получат доступ ко всем 6 партициям — партиции читаются параллельно"
+        }
+      ],
+      "correctAnswer": "a",
+      "explanation": "При 6 партициях и 4 consumer: 6 / 4 = 1,5. RangeAssignor округляет: первые (6 % 4) = 2 consumer получают ceil(6/4) = 2 партиции, оставшиеся 2 consumer получают floor(6/4) = 1 партицию. Итог: Consumer 1 → P0, P1; Consumer 2 → P2, P3; Consumer 3 → P4; Consumer 4 → P5. Каждая партиция назначена ровно одному consumer — это гарантия consumer group модели.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m03-03-q2",
+      "type": "multiple-choice",
+      "question": "Как Group Coordinator определяется для конкретной consumer group?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Всегда брокер с наименьшим node.id (Broker 1 по умолчанию)"
+        },
+        {
+          "id": "b",
+          "text": "Детерминированно: hash(group.id) % num_partitions(__consumer_offsets) определяет партицию, лидер этой партиции является coordinator"
+        },
+        {
+          "id": "c",
+          "text": "Случайный брокер, выбираемый каждый раз при JoinGroup запросе"
+        },
+        {
+          "id": "d",
+          "text": "KRaft controller всегда является group coordinator для всех групп"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Group Coordinator определяется детерминированно: вычисляется хэш group.id, берётся остаток от деления на число партиций топика __consumer_offsets (по умолчанию 50). Это число является номером партиции __consumer_offsets. Брокер, который является лидером этой партиции, становится Group Coordinator для данной consumer group. Одинаковый group.id всегда указывает на один и тот же Coordinator (пока не сменится лидер этой партиции __consumer_offsets).",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m03-03-q3",
+      "type": "multiple-choice",
+      "question": "Consumer group A (group_id='analytics') читает топик 'orders' с offset 5000 по партиции 0. Consumer group B (group_id='billing') читает тот же топик с offset 3000 по партиции 0. Producer записывает новое сообщение в партицию 0 (offset 6000). Что произойдёт с Consumer group A и Consumer group B?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Consumer group A прочитает новое сообщение (с offset 6000 нет — с 5001). Consumer group B тоже прочитает его, когда дойдёт до offset 6000"
+        },
+        {
+          "id": "b",
+          "text": "Только Consumer group A прочитает новое сообщение — Consumer group B отстаёт и получит его позже"
+        },
+        {
+          "id": "c",
+          "text": "Новое сообщение достанется только одной из групп — Kafka не позволяет читать одно сообщение дважды"
+        },
+        {
+          "id": "d",
+          "text": "Consumer group A немедленно получит сообщение; Consumer group B никогда не получит — она уже прошла offset 6000"
+        }
+      ],
+      "correctAnswer": "a",
+      "explanation": "Обе consumer group читают топик 'orders' независимо, каждая ведя свой offset. Новое сообщение на offset 6000 будет прочитано Consumer group A в следующем poll() (она на offset 5000, до 6000 читает все промежуточные). Consumer group B также прочитает offset 6000, когда её poll() дойдёт до него (начиная с offset 3000). Kafka не 'распределяет' сообщения между группами — каждая группа получает полную копию данных. Это фундаментальное отличие от традиционных message broker.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m03-03-q4",
+      "type": "true-false",
+      "question": "Consumer lag (лаг consumer group) — это разница между текущим offset producer и последним закоммиченным offset consumer group.",
+      "correctAnswer": "true",
+      "explanation": "Верно. Consumer lag = Log End Offset (LEO, последний offset в партиции) - committed offset consumer group. Если LEO партиции 0 топика 'orders' равен 5200, а consumer group 'analytics' закоммитила offset 5000 — лаг по этой партиции равен 200. Суммарный лаг по всем партициям показывает, сколько сообщений ещё не обработано группой. Мониторинг лага критически важен: растущий лаг сигнализирует, что consumer не успевают за producer.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

@@ -1,0 +1,123 @@
+{
+  "lessonSlug": "03-consumers/02-offset-management",
+  "moduleId": "03-consumers",
+  "_meta": {
+    "idPrefix": "kafka-m03-02",
+    "description": "Use IDs: kafka-m03-02-q1, q2, q3 for MC/TF; kafka-m03-02-code-1 for code challenge"
+  },
+  "questions": [
+    {
+      "id": "kafka-m03-02-q1",
+      "type": "multiple-choice",
+      "question": "Consumer настроен с enable_auto_commit=False. После poll() consumer обработал все сообщения и вызвал consumer.commit(). Затем consumer пал. После рестарта consumer вызывает poll() снова. Какие сообщения он получит?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Те же сообщения, что были до падения — commit() не гарантирует сохранения"
+        },
+        {
+          "id": "b",
+          "text": "Новые сообщения, записанные после последнего commit() — уже обработанные пропущены"
+        },
+        {
+          "id": "c",
+          "text": "Все сообщения с самого начала топика — auto_offset_reset='earliest' сбрасывает позицию"
+        },
+        {
+          "id": "d",
+          "text": "Ничего — после рестарта нужно снова вызвать subscribe()"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "commitSync() (consumer.commit() без аргументов) блокирует до получения ACK от group coordinator и сохраняет offset в __consumer_offsets. После рестарта consumer получает закоммиченный offset от coordinator и начинает читать с него — то есть с позиции ПОСЛЕ последнего закоммиченного сообщения. Это именно at-least-once семантика: каждое сообщение обрабатывается минимум один раз. Если бы commit() не был вызван перед падением — consumer прочитал бы те же сообщения снова.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m03-02-q2",
+      "type": "multiple-choice",
+      "question": "Команда выбирает between at-least-once и at-most-once семантикой для consumer, обрабатывающего платёжные транзакции. Инженер предлагает коммитить offset сразу после poll(), до обработки — для простоты. Какой риск несёт это решение?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Небольшой: consumer может повторно обработать транзакцию, что легко дедуплицировать"
+        },
+        {
+          "id": "b",
+          "text": "Критический: если consumer упадёт после commit() но до завершения обработки транзакции — транзакция будет потеряна безвозвратно"
+        },
+        {
+          "id": "c",
+          "text": "Никакого: Kafka гарантирует exactly-once доставку для всех consumer"
+        },
+        {
+          "id": "d",
+          "text": "Минимальный: consumer автоматически перечитает незавершённые транзакции через session.timeout.ms"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Commit offset до обработки — это at-most-once семантика. Для платёжных транзакций это катастрофический риск: если consumer упадёт (OOM, kill, network failure) после commit() но до записи транзакции в БД — сообщение будет считаться обработанным (offset закоммичен), хотя транзакция не выполнена. После рестарта consumer начнёт с нового offset, пропустив потерянную транзакцию. Правильный паттерн: обработка → запись в БД → commit(). At-least-once с идемпотентностью — стандарт для финансовых систем.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m03-02-q3",
+      "type": "multiple-choice",
+      "question": "Consumer использует consumer.seek(TopicPartition('orders', 0), 500) и затем вызывает poll(). С какого offset начнётся чтение?",
+      "options": [
+        {
+          "id": "a",
+          "text": "С offset 500 — seek() устанавливает позицию ровно на offset 500"
+        },
+        {
+          "id": "b",
+          "text": "С offset 501 — seek() означает 'следующий после 500'"
+        },
+        {
+          "id": "c",
+          "text": "Зависит от auto_offset_reset — seek() только подсказка, реальная позиция определяется брокером"
+        },
+        {
+          "id": "d",
+          "text": "С закоммиченного offset — seek() игнорируется если есть committed offset"
+        }
+      ],
+      "correctAnswer": "a",
+      "explanation": "consumer.seek(partition, offset) устанавливает позицию чтения ровно на указанный offset. Следующий poll() вернёт запись с offset 500 первой. Seek полностью переопределяет позицию чтения, игнорируя как auto_offset_reset, так и закоммиченный offset. Именно поэтому seek() используется для replay: consumer.seek(tp, 0) начнёт читать с самого начала партиции. commit() после seek() зафиксирует новую позицию.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m03-02-q4",
+      "type": "true-false",
+      "question": "При enable_auto_commit=True Kafka коммитит offset сразу после того, как consumer получил сообщение через poll().",
+      "correctAnswer": "false",
+      "explanation": "Ложь. enable_auto_commit=True не коммитит offset сразу после poll(). Auto-commit происходит периодически — раз в auto_commit_interval_ms (по умолчанию 5000 мс = 5 секунд). Именно поэтому auto-commit рискован: между двумя авто-коммитами consumer может получить и обработать много сообщений, но если он упадёт до следующего авто-коммита — все они будут прочитаны снова. Авто-коммит обеспечивает at-least-once (не at-most-once как могло бы показаться при быстрой обработке) — при краше между poll() и авто-коммитом те же сообщения будут обработаны повторно.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m03-02-code-1",
+      "type": "code-challenge",
+      "question": "Создайте consumer с enable_auto_commit=False. Подпишитесь на топик 'orders'. Прочитайте сообщения через poll(timeout_ms=1000). Для каждого сообщения выведите его offset в формате 'Offset: N'. После обработки всех сообщений зафиксируйте offset вручную и выведите 'Committed'.",
+      "language": "python",
+      "starterCode": "from kafka import KafkaConsumer\nfrom kafka import seed_topic\n\n# Предзаполняем топик тестовыми данными\nseed_topic('orders', [\n    ('order-1', 'value-100'),\n    ('order-2', 'value-200'),\n    ('order-3', 'value-300'),\n])\n\n# TODO: создайте consumer с enable_auto_commit=False\n# consumer = KafkaConsumer(\n#     bootstrap_servers=['localhost:9092'],\n#     group_id='order-processor',\n#     enable_auto_commit=False,\n#     auto_offset_reset='earliest',\n# )\n\n# TODO: подпишитесь на топик 'orders'\n# consumer.subscribe(['orders'])\n\n# TODO: вызовите poll(timeout_ms=1000)\n# records = consumer.poll(timeout_ms=1000)\n\n# TODO: для каждого сообщения выведите 'Offset: N'\n# for tp, messages in records.items():\n#     for msg in messages:\n#         print(f'Offset: {msg.offset}')\n\n# TODO: зафиксируйте offset вручную\n# consumer.commit()\n\n# TODO: выведите 'Committed'\n# print('Committed')\n",
+      "solutionCode": "from kafka import KafkaConsumer\nfrom kafka import seed_topic\n\n# Предзаполняем топик тестовыми данными\nseed_topic('orders', [\n    ('order-1', 'value-100'),\n    ('order-2', 'value-200'),\n    ('order-3', 'value-300'),\n])\n\n# Consumer с ручным commit\nconsumer = KafkaConsumer(\n    bootstrap_servers=['localhost:9092'],\n    group_id='order-processor',\n    enable_auto_commit=False,\n    auto_offset_reset='earliest',\n)\n\n# Подписываемся на топик\nconsumer.subscribe(['orders'])\n\n# Читаем сообщения\nrecords = consumer.poll(timeout_ms=1000)\n\n# Обрабатываем и выводим offset каждого сообщения\nfor tp, messages in records.items():\n    for msg in messages:\n        print(f'Offset: {msg.offset}')\n\n# Фиксируем offset вручную (at-least-once)\nconsumer.commit()\nprint('Committed')\n",
+      "testCases": [
+        {
+          "id": "tc1",
+          "description": "Вывод содержит 'Committed'",
+          "expectedOutput": "Committed",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc2",
+          "description": "Вывод содержит номер offset",
+          "expectedOutput": "Offset: 0",
+          "matchMode": "contains",
+          "hidden": true
+        }
+      ],
+      "explanation": "enable_auto_commit=False отключает автоматический commit. consumer.commit() выполняет синхронный commit — блокирует до получения подтверждения от broker. Вызывать commit() нужно ПОСЛЕ завершения обработки всех сообщений батча, чтобы гарантировать at-least-once семантику: при падении до commit() сообщения будут прочитаны снова. msg.offset — порядковый номер сообщения внутри партиции (начинается с 0).",
+      "bloomLevel": "applied",
+      "useKafkaHelpers": true
+    }
+  ]
+}

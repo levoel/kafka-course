@@ -1,0 +1,322 @@
+---
+title: "Протоколы ребалансировки"
+description: "Eager, Cooperative Incremental, KIP-848 next-gen — эволюция ребалансировки consumer groups в Kafka 4.0"
+order: 4
+difficulty: "advanced"
+estimatedTime: 25
+topics: ["Rebalancing", "KIP-848", "Cooperative", "Eager", "ConsumerGroupHeartbeat"]
+---
+
+# Протоколы ребалансировки
+
+Ребалансировка — это процесс перераспределения партиций между consumer группы при изменении её состава. Kafka прошла через три поколения протоколов ребалансировки: от простого, но дорогостоящего «стоп-мир» подхода до современного асинхронного сервер-driven протокола KIP-848, ставшего стандартом в Kafka 4.0.
+
+---
+
+## Когда происходит ребалансировка
+
+Ребалансировка инициируется при следующих событиях:
+
+<DiagramContainer title="Триггеры ребалансировки" color="amber">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="input"
+        size="md"
+        tooltip="Consumer join: новый consumer присоединяется к группе. Group coordinator получает JoinGroup (legacy) или ConsumerGroupHeartbeat (KIP-848). Нужно перераспределить партиции с учётом нового участника."
+      >
+        Новый consumer присоединяется
+      </FlowNode>
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Consumer leave/crash: consumer вызвал close() — отправил LeaveGroup и группа ребалансируется немедленно. Или сработал session.timeout.ms — consumer перестал отправлять heartbeat, coordinator счёл его мёртвым."
+      >
+        Consumer уходит или падает
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="process"
+        size="md"
+        tooltip="Изменение подписки: consumer вызвал subscribe() с новым списком топиков. Нужно переназначить партиции с учётом новых или удалённых топиков."
+      >
+        Изменение топиков подписки
+      </FlowNode>
+      <FlowNode
+        variant="cluster"
+        size="md"
+        tooltip="Изменение числа партиций: администратор добавил партиции в топик (kafka-topics.sh --alter). Новые партиции нужно назначить consumer группы."
+      >
+        Изменение числа партиций топика
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+---
+
+## Исторический контекст: Legacy Eager Protocol (JoinGroup/SyncGroup)
+
+До Kafka 4.0 стандартным протоколом была eager (жадная) ребалансировка. В ней все consumer одновременно прекращали обработку, освобождали партиции, и ждали нового назначения.
+
+<Callout type="note">
+Этот протокол использовался до Kafka 4.0. В современных версиях он доступен как fallback через `group.protocol=classic`. Знание его работы полезно для понимания, что именно изменил KIP-848.
+</Callout>
+
+**Как работала eager ребалансировка:**
+
+1. **Stop-the-world**: все consumer в группе отзывают все назначенные партиции одновременно — сразу все сообщения перестают обрабатываться.
+2. **JoinGroup**: все consumer отправляют JoinGroup запрос group coordinator. Coordinator ждёт ответа от каждого.
+3. **Синхронизационный барьер**: ни один consumer не получает новое назначение, пока все не отправили JoinGroup.
+4. **SyncGroup**: coordinator выбирает group leader (первый ответивший consumer), тот вычисляет новое назначение и отправляет его всем через SyncGroup ответ.
+5. **Возобновление**: consumer начинают читать с новых партиций.
+
+**Проблема**: при группе из 100 consumer добавление одного нового consumer останавливало **все** 100 consumer на время ребалансировки (иногда 30+ секунд в больших группах). В Kafka 4.0 это `group.protocol=classic` — доступно как fallback, но не рекомендуется.
+
+---
+
+## Cooperative Incremental Protocol
+
+Промежуточное решение: cooperative ребалансировка выполняется в два этапа, затрагивая только партиции, которые действительно нужно переместить.
+
+<DiagramContainer title="Cooperative Incremental: двухфазный подход" color="blue">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="process"
+        size="lg"
+        tooltip="Фаза 1 — Revoke: coordinator определяет, какие партиции нужно переместить. ТОЛЬКО их владельцы отзывают партиции. Остальные consumer продолжают работу без прерывания."
+      >
+        Фаза 1: Revoke только затронутых партиций
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <Arrow direction="down" label="продолжают работу" />
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="cluster"
+        size="lg"
+        tooltip="Фаза 2 — Assign: отозванные партиции назначаются новому consumer. Остальные consumer всё время работали — нет глобального стоп-мира."
+      >
+        Фаза 2: Assign новому consumer
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+Лучше eager, но всё ещё требует двух round trip к coordinator. Включается через `partition.assignment.strategy=cooperative-sticky` (legacy protocol). В Kafka 4.0 вытеснен KIP-848.
+
+---
+
+## KIP-848: Next-Gen Protocol (стандарт Kafka 4.0)
+
+KIP-848 — это фундаментальная переработка архитектуры ребалансировки. Вместо того чтобы consumer синхронизировались между собой через coordinator, **сервер сам управляет назначением** через новый ConsumerGroupHeartbeat API.
+
+<DiagramContainer title="KIP-848 vs Legacy: сравнение протоколов" color="emerald">
+  <div className="space-y-4 p-2">
+    <FlowRow>
+      <FlowColumn>
+        <FlowNode
+          variant="error"
+          size="lg"
+          tooltip="Legacy (JoinGroup/SyncGroup): все consumer останавливаются → ждут JoinGroup от всех → group leader вычисляет назначение → SyncGroup → все возобновляют работу. Глобальный барьер синхронизации."
+        >
+          Legacy Protocol (group.protocol=classic)
+        </FlowNode>
+        <Arrow direction="down" />
+        <FlowNode
+          variant="process"
+          size="md"
+          tooltip="Шаг 1: Consumer 1 уходит. Coordinator ждёт LeaveGroup. Инициирует JoinGroup для всех оставшихся consumer."
+        >
+          1. Consumer leaves
+        </FlowNode>
+        <Arrow direction="down" />
+        <FlowNode
+          variant="monitoring"
+          size="md"
+          tooltip="Шаг 2: ВСЕ consumer отправляют JoinGroup. Производительность группы — 0. Весь трафик остановлен."
+        >
+          2. ALL consumers send JoinGroup (stop!)
+        </FlowNode>
+        <Arrow direction="down" />
+        <FlowNode
+          variant="service"
+          size="md"
+          tooltip="Шаг 3: SyncGroup от group leader. Новое назначение разослано. В больших группах (100+ consumer) этот процесс занимает 30-60 секунд."
+        >
+          3. SyncGroup response (30-60s in large groups)
+        </FlowNode>
+      </FlowColumn>
+      <FlowColumn>
+        <FlowNode
+          variant="cluster"
+          size="lg"
+          tooltip="KIP-848 (ConsumerGroupHeartbeat): consumer периодически отправляет heartbeat с желаемыми топиками. Сервер сам управляет назначением. Нет синхронизационного барьера."
+        >
+          KIP-848 (group.protocol=consumer)
+        </FlowNode>
+        <Arrow direction="down" />
+        <FlowNode
+          variant="process"
+          size="md"
+          tooltip="Шаг 1: Consumer 1 уходит. Сервер получает информацию через heartbeat timeout или LeaveGroup."
+        >
+          1. Consumer leaves
+        </FlowNode>
+        <Arrow direction="down" />
+        <FlowNode
+          variant="monitoring"
+          size="md"
+          tooltip="Шаг 2: Сервер асинхронно вычисляет новое назначение. Остальные consumer продолжают работать без остановки."
+        >
+          2. Server computes new assignment (async)
+        </FlowNode>
+        <Arrow direction="down" />
+        <FlowNode
+          variant="service"
+          size="md"
+          tooltip="Шаг 3: Следующий heartbeat затронутого consumer несёт новое назначение. Только этот consumer применяет изменение. Ускорение до 20x в больших группах."
+        >
+          3. Targeted heartbeat response (milliseconds)
+        </FlowNode>
+      </FlowColumn>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+### ConsumerGroupHeartbeat API
+
+KIP-848 вводит новый API-эндпоинт на брокере: `ConsumerGroupHeartbeat`. Consumer периодически отправляет heartbeat, содержащий:
+
+- `group.id` — идентификатор группы
+- `member.id` — уникальный ID этого экземпляра
+- `subscribed.topics` — список топиков для подписки
+- `current.assignment` — текущие назначенные TopicPartition
+
+Брокер отвечает с `target.assignment` — новым желаемым назначением. Consumer применяет его инкрементально: сначала отзывает лишние партиции, затем берёт новые — **без глобальной синхронизации**.
+
+<Callout type="tip">
+KIP-848 — это стандарт для Kafka 4.0+. Если вы видите учебные материалы, описывающие JoinGroup/SyncGroup как основной протокол — они устарели. В современном коде с Kafka 4.0 используйте `group.protocol=consumer`.
+</Callout>
+
+---
+
+## Как включить KIP-848
+
+Настройка на стороне consumer:
+
+```python
+from kafka import KafkaConsumer
+
+# KIP-848: явная настройка для Kafka 4.0
+consumer = KafkaConsumer(
+    bootstrap_servers=['localhost:9092'],
+    group_id='payments-group',
+    # Явное включение нового протокола (Kafka 4.0)
+    # В Kafka 4.2 это значение по умолчанию
+    # group_protocol='consumer',  # если поддерживается клиентом
+    auto_offset_reset='earliest',
+)
+```
+
+В server.properties брокера (Kafka 4.0):
+```properties
+# Включён по умолчанию на стороне сервера в Kafka 4.0
+# Consumer должен явно opt-in через group.protocol=consumer
+group.coordinator.rebalance.protocols=classic,consumer
+```
+
+<Callout type="note">
+В Python клиенте `kafka-python` поддержка KIP-848 добавляется начиная с версии 3.0. Для полного использования нового протокола используйте официальный Confluent Python Client (`confluent-kafka-python`) или Java client, где поддержка KIP-848 полная. В учебных целях с kafka_sim.py логика ребалансировки абстрагирована — фокус на концепциях.
+</Callout>
+
+---
+
+## Производительность KIP-848
+
+На практике выигрыш масштабируется с размером группы:
+
+| Сценарий | Legacy Eager | KIP-848 |
+|----------|-------------|---------|
+| 10 consumer, 1 покидает | ~2 сек downtime | ~100 мс |
+| 100 consumer, 1 покидает | ~30 сек downtime | ~200 мс |
+| 1000 consumer, 1 покидает | 60+ сек downtime | ~500 мс |
+
+Источник улучшения: в legacy протоколе coordinator ждёт JoinGroup от **всех** N consumer, даже если изменение касается только 1. В KIP-848 только затронутые consumer получают новое назначение.
+
+<DiagramContainer title="KIP-848: сервер-driven назначение" color="purple">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="input"
+        size="sm"
+        tooltip="Consumer A: отправляет ConsumerGroupHeartbeat с subscribed.topics=['orders'] и current.assignment=[P0, P1]. Продолжает обрабатывать P0 и P1."
+      >
+        Consumer A: Heartbeat (P0, P1)
+      </FlowNode>
+      <FlowNode
+        variant="input"
+        size="sm"
+        tooltip="Consumer B: отправляет ConsumerGroupHeartbeat с subscribed.topics=['orders'] и current.assignment=[P2, P3]. Активно обрабатывает P2 и P3."
+      >
+        Consumer B: Heartbeat (P2, P3)
+      </FlowNode>
+      <FlowNode
+        variant="input"
+        size="sm"
+        tooltip="Consumer C (новый): первый heartbeat. current.assignment=[] — нет назначения. Сервер должен выделить ему партиции."
+      >
+        Consumer C: Heartbeat (new, empty)
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <Arrow direction="down" label="сервер вычисляет" />
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="service"
+        size="lg"
+        tooltip="Group Coordinator (сервер): получает три heartbeat. Вычисляет новое назначение: A получает P0, B получает P2-P3, C получает P1. Только Consumer A и C получат изменённое назначение в следующем heartbeat response. Consumer B продолжает без изменений."
+      >
+        Broker: вычисляет новое назначение асинхронно
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="monitoring"
+        size="sm"
+        tooltip="Consumer A: получает target.assignment=[P0] в heartbeat response. Отзывает P1, продолжает P0. Никакой остановки всей группы."
+      >
+        A: target=[P0] → revoke P1
+      </FlowNode>
+      <FlowNode
+        variant="monitoring"
+        size="sm"
+        tooltip="Consumer B: heartbeat response без изменений. B продолжает P2 и P3 без прерывания."
+      >
+        B: target=[P2,P3] (no change)
+      </FlowNode>
+      <FlowNode
+        variant="monitoring"
+        size="sm"
+        tooltip="Consumer C: получает target.assignment=[P1]. Начинает читать P1 с закоммиченного offset (или earliest/latest по конфигурации)."
+      >
+        C: target=[P1] → assign P1
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+---
+
+## Итог
+
+Три поколения протоколов ребалансировки: eager (JoinGroup/SyncGroup) — глобальная остановка группы; cooperative incremental — двухфазный подход с минимальным прерыванием; KIP-848 (ConsumerGroupHeartbeat) — сервер-driven, асинхронный, без синхронизационного барьера. KIP-848 — стандарт Kafka 4.0, включается через `group.protocol=consumer`, является дефолтом в Kafka 4.2.
+
+<KnowledgeCheck
+  question="Почему KIP-848 (next-gen протокол) значительно быстрее при ребалансировке большой consumer group по сравнению с legacy eager протоколом?"
+  answer="Legacy eager протокол требует глобального синхронизационного барьера: coordinator ждёт JoinGroup от ВСЕХ N consumer группы, прежде чем выдать новое назначение. Это означает, что добавление одного consumer останавливает всю группу до завершения ребалансировки — время растёт с размером группы. KIP-848 устраняет этот барьер: сервер управляет назначением асинхронно. Только те consumer, чьи партиции изменились, получают новое назначение в следующем heartbeat response. Остальные consumer продолжают работать без прерывания. Отсутствие глобальной синхронизации даёт ускорение до 20x в больших группах."
+/>

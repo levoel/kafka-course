@@ -1,0 +1,123 @@
+{
+  "lessonSlug": "02-producers/01-producer-api",
+  "moduleId": "02-producers",
+  "_meta": {
+    "idPrefix": "kafka-m02-01",
+    "description": "Use IDs: kafka-m02-01-q1, q2, q3 for MC; kafka-m02-01-q4 for TF; kafka-m02-01-code-1 for code challenge"
+  },
+  "questions": [
+    {
+      "id": "kafka-m02-01-q1",
+      "type": "multiple-choice",
+      "question": "Что возвращает метод producer.send(topic, value=data) в kafka-python?",
+      "options": [
+        {
+          "id": "a",
+          "text": "RecordMetadata с topic, partition и offset — синхронно блокирует поток до получения ответа от брокера"
+        },
+        {
+          "id": "b",
+          "text": "FutureRecordMetadata — объект будущего результата, который разрешается асинхронно; поток не блокируется"
+        },
+        {
+          "id": "c",
+          "text": "None — метод не возвращает ничего, статус отправки проверяется через колбэки"
+        },
+        {
+          "id": "d",
+          "text": "True или False — булево значение, указывающее успешность постановки в очередь"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "send() возвращает FutureRecordMetadata — объект, который разрешается асинхронно после получения ответа от брокера. Сам вызов send() немедленно помещает запись в Record Accumulator и возвращает Future, не блокируя поток. Для получения результата используется future.get(timeout=N) — это блокирует поток до ответа. Для асинхронной обработки — add_callback() и add_errback().",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m02-01-q2",
+      "type": "multiple-choice",
+      "question": "Продюсер настроен с key_serializer=str.encode. Два вызова: send('orders', key='user-42', value=b'buy') и send('orders', key='user-42', value=b'sell'). В какую партицию попадут оба сообщения?",
+      "options": [
+        {
+          "id": "a",
+          "text": "В разные партиции — round-robin распределяет сообщения равномерно независимо от ключа"
+        },
+        {
+          "id": "b",
+          "text": "В одну и ту же партицию — murmur2 хеш от ключа 'user-42' детерминирован и всегда даёт один результат"
+        },
+        {
+          "id": "c",
+          "text": "В партицию 0 — продюсер без явного указания партиции всегда выбирает нулевую"
+        },
+        {
+          "id": "d",
+          "text": "Зависит от нагрузки кластера — broker выбирает наименее загруженную партицию"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Когда ключ задан, партиция вычисляется как murmur2(key) % num_partitions. Функция murmur2 детерминирована: один и тот же ключ всегда даёт одно и то же значение хеша. Оба сообщения с key='user-42' попадут в одну партицию. Это гарантирует порядок событий для одного пользователя — 'buy' будет записан раньше 'sell' в рамках одной партиции.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m02-01-q3",
+      "type": "multiple-choice",
+      "question": "Команда пишет high-throughput продюсер для логов (100 000 записей/сек). Разработчик вставил future.get() после каждого send(). Что произойдёт?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Throughput останется прежним — get() просто проверяет статус в кеше, не обращаясь к брокеру"
+        },
+        {
+          "id": "b",
+          "text": "Пропускная способность упадёт на 80-99% — каждый get() блокирует поток на время сетевого round-trip (1-10 мс), превращая асинхронный продюсер в синхронный"
+        },
+        {
+          "id": "c",
+          "text": "Продюсер упадёт с OutOfMemoryError — get() заполняет Record Accumulator быстрее, чем Sender Thread успевает отправлять"
+        },
+        {
+          "id": "d",
+          "text": "Батчинг станет эффективнее — get() помогает продюсеру группировать записи"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "future.get() блокирует текущий поток до получения ответа от брокера. Типичный network round-trip — 1-10 мс. При 100 000 записях/сек с 1 мс на get() = 100 000 мс = 100 секунд задержки в секунду — продюсер физически не успевает. Реальный throughput упадёт до 100-1000 записей/сек вместо 100 000. Правильный паттерн: собирать futures в список, отправлять батчами через flush(), затем проверять результаты — или использовать add_callback()/add_errback().",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m02-01-q4",
+      "type": "true-false",
+      "question": "Вызов producer.flush() гарантирует, что все ранее вызванные send() были успешно подтверждены брокером.",
+      "correctAnswer": "true",
+      "explanation": "Верно. flush() блокирует вызывающий поток до тех пор, пока все записи, помещённые в буфер через send(), не будут либо успешно подтверждены брокером, либо завершены с ошибкой (которую можно поймать через future.get() или add_errback()). Это гарантирует, что Record Accumulator пуст после возврата из flush(). Если брокер недоступен, flush() будет ждать до истечения delivery.timeout.ms, после чего future.get() выбросит TimeoutException.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m02-01-code-1",
+      "type": "code-challenge",
+      "question": "Создайте KafkaProducer с acks='all' и compression_type='gzip'. Отправьте сообщение 'order-123' в топик 'orders' на партицию 0. Выведите offset из результата в формате 'Offset: {число}'.",
+      "language": "python",
+      "starterCode": "from kafka import KafkaProducer\n\n# TODO: Создайте продюсер с acks='all' и compression_type='gzip'\nproducer = KafkaProducer(\n    bootstrap_servers=['localhost:9092'],\n    # добавьте параметры здесь\n)\n\n# TODO: Отправьте 'order-123' в топик 'orders', партиция 0\nfuture = producer.send(\n    # заполните аргументы\n)\n\n# TODO: Получите RecordMetadata через future.get()\nmetadata = future.get()\n\n# TODO: Выведите offset в формате 'Offset: {число}'\nprint()\n\nproducer.close()",
+      "solutionCode": "from kafka import KafkaProducer\n\nproducer = KafkaProducer(\n    bootstrap_servers=['localhost:9092'],\n    acks='all',\n    compression_type='gzip',\n)\n\nfuture = producer.send('orders', value=b'order-123', partition=0)\n\nmetadata = future.get()\n\nprint(f'Offset: {metadata.offset}')\n\nproducer.close()",
+      "testCases": [
+        {
+          "id": "tc1",
+          "description": "Вывод содержит 'Offset:'",
+          "expectedOutput": "Offset:",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc2",
+          "description": "Offset равен 0 (первая запись в новый топик)",
+          "expectedOutput": "Offset: 0",
+          "matchMode": "contains",
+          "hidden": true
+        }
+      ],
+      "explanation": "KafkaProducer принимает acks и compression_type как kwargs. send() возвращает FutureRecordMetadata. Вызов future.get() блокирует до получения RecordMetadata с полями topic, partition и offset. Первая запись в новый топик получает offset=0. В kafka_sim.py offset = количество записей в партиции до отправки данной записи.",
+      "bloomLevel": "applied",
+      "useKafkaHelpers": true
+    }
+  ]
+}

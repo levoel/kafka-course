@@ -1,0 +1,298 @@
+---
+title: "Управление Offset"
+description: "auto.offset.reset, enable.auto.commit, commitSync, commitAsync — стратегии фиксации прогресса"
+order: 2
+difficulty: "intermediate"
+estimatedTime: 20
+topics: ["Offset", "auto.offset.reset", "enable.auto.commit", "commitSync", "commitAsync"]
+---
+
+# Управление Offset
+
+Offset — это порядковый номер сообщения в партиции, который определяет, что consumer уже прочитал. Kafka хранит закоммиченные offsets в служебном топике `__consumer_offsets`. От правильной стратегии управления offset зависит, получат ли потребители сообщения **ровно один раз**, **хотя бы один раз** или **не более одного раза**.
+
+---
+
+## auto.offset.reset: старт без закоммиченного offset
+
+Когда consumer впервые присоединяется к группе или создаётся новая consumer group для существующего топика, в `__consumer_offsets` нет записей для этой группы. Параметр `auto_offset_reset` определяет, откуда начать чтение.
+
+<DiagramContainer title="auto.offset.reset — поведение при старте" color="blue">
+  <div className="space-y-4 p-2">
+    <FlowRow>
+      <FlowColumn>
+        <FlowNode
+          variant="input"
+          size="lg"
+          tooltip="auto_offset_reset='earliest': consumer читает с самого начала партиции — с offset 0 (или с первого доступного offset, если часть данных удалена retention-политикой). Используется когда важно обработать всю историю топика."
+        >
+          earliest
+        </FlowNode>
+        <Arrow direction="down" label="начинает с offset 0" />
+        <FlowNode
+          variant="storage"
+          size="md"
+          tooltip="Партиция: [msg0, msg1, msg2, ..., msg999, msg1000 (new)]. earliest → начинает с msg0. Обработает всю историю топика до текущего момента."
+        >
+          {'[msg0] → [msg1] → ... → [msgN]'}
+        </FlowNode>
+      </FlowColumn>
+      <FlowColumn>
+        <FlowNode
+          variant="process"
+          size="lg"
+          tooltip="auto_offset_reset='latest': consumer читает только новые сообщения, записанные после его старта. Пропускает всю существующую историю. Используется для real-time обработки где исторические данные не нужны."
+        >
+          latest
+        </FlowNode>
+        <Arrow direction="down" label="начинает с конца" />
+        <FlowNode
+          variant="monitoring"
+          size="md"
+          tooltip="Партиция: [msg0...msg999 (ignored)] → [msg1000 (first read)]. latest → ждёт только новые сообщения. Историческая часть игнорируется."
+        >
+          {'Пропускает историю → только новые'}
+        </FlowNode>
+      </FlowColumn>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="warning"
+        size="lg"
+        tooltip="none: если нет закоммиченного offset — выбрасывает исключение. Используется в production для обнаружения ошибок конфигурации — consumer не должен стартовать без явного указания начального offset."
+      >
+        none → exception (нет committed offset)
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+<Callout type="tip">
+`earliest` — безопасный выбор при разработке: вы всегда увидите все данные, записанные в топик. `latest` — для production real-time сервисов, где историческая обработка нежелательна. Не путайте `auto_offset_reset` с управлением offset при повторном запуске — он применяется **только** когда нет закоммиченного offset для данной consumer group.
+</Callout>
+
+---
+
+## enable.auto.commit: автоматическая фиксация offset
+
+По умолчанию Kafka автоматически коммитит offset каждые `auto.commit.interval.ms` миллисекунд (5000 мс по умолчанию). Это удобно, но несёт риск потери сообщений.
+
+<DiagramContainer title="Риск авто-коммита" color="amber">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="input"
+        size="md"
+        tooltip="Шаг 1: Consumer получает сообщения msg1000-msg1099 через poll(). enable_auto_commit=True."
+      >
+        poll() → msg1000...msg1099
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="process"
+        size="md"
+        tooltip="Шаг 2: Auto-commit интервал истекает. Kafka автоматически коммитит offset=1100 в __consumer_offsets. Это происходит внутри следующего вызова poll()."
+      >
+        auto-commit → offset=1100
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <Arrow direction="down" label="consumer падает" />
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="process"
+        size="md"
+        tooltip="Шаг 3: Consumer обрабатывает msg1000-msg1050, затем падает (crash)."
+      >
+        Обработано: msg1000...msg1050
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="monitoring"
+        size="md"
+        tooltip="Шаг 4: После рестарта consumer читает с закоммиченного offset=1100. Сообщения msg1051-msg1099 пропущены навсегда — они были закоммичены, но не обработаны."
+      >
+        Рестарт → читает с offset=1100
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="error"
+        size="lg"
+        tooltip="Результат: msg1051-msg1099 потеряны. Offset был закоммичен авто-коммитом до завершения их обработки. Это at-most-once семантика — каждое сообщение обрабатывается не более одного раза, но возможна потеря."
+      >
+        ПОТЕРЯ: msg1051-msg1099 пропущены
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+```python
+# Авто-коммит (по умолчанию):
+consumer = KafkaConsumer(
+    bootstrap_servers=['localhost:9092'],
+    group_id='my-group',
+    enable_auto_commit=True,          # по умолчанию True
+    auto_commit_interval_ms=5000,     # каждые 5 секунд
+)
+```
+
+---
+
+## Ручной commit: commitSync и commitAsync
+
+Для контроля над семантикой доставки используется ручной commit с `enable_auto_commit=False`.
+
+<DiagramContainer title="Ручной commit — последовательность" color="emerald">
+  <div className="space-y-3 p-2">
+    <FlowColumn>
+      <FlowNode
+        variant="input"
+        size="md"
+        tooltip="poll(): получаем батч сообщений. enable_auto_commit=False — Kafka не коммитит автоматически."
+      >
+        1. records = consumer.poll(timeout_ms=1000)
+      </FlowNode>
+      <Arrow direction="down" />
+      <FlowNode
+        variant="process"
+        size="md"
+        tooltip="Полная обработка: бизнес-логика, запись в БД, вызов API. Только после успешной обработки — commit. Если здесь падение, сообщения будут прочитаны снова после рестарта."
+      >
+        2. Обработать каждое сообщение
+      </FlowNode>
+      <Arrow direction="down" />
+      <FlowNode
+        variant="cluster"
+        size="md"
+        tooltip="consumer.commit(): синхронный commit. Блокирует до получения подтверждения от брокера. Гарантирует, что offset зафиксирован перед следующим poll(). Медленнее, но надёжнее."
+      >
+        3. consumer.commit()  # commitSync
+      </FlowNode>
+      <Arrow direction="down" />
+      <FlowNode
+        variant="monitoring"
+        size="md"
+        tooltip="Следующий poll() начнёт чтение с нового offset. При падении между шагом 2 и 3 — сообщения будут повторно доставлены. Это at-least-once семантика."
+      >
+        4. Следующий poll() с нового offset
+      </FlowNode>
+    </FlowColumn>
+  </div>
+</DiagramContainer>
+
+```python
+consumer = KafkaConsumer(
+    bootstrap_servers=['localhost:9092'],
+    group_id='analytics',
+    auto_offset_reset='earliest',
+    enable_auto_commit=False,  # отключаем авто-коммит
+)
+consumer.subscribe(['orders'])
+
+while True:
+    records = consumer.poll(timeout_ms=1000)
+    for tp, messages in records.items():
+        for msg in messages:
+            # Обработка сообщения
+            process_order(msg.value)
+
+    # Коммитим только после успешной обработки всего батча
+    consumer.commit()  # commitSync — блокирует
+```
+
+**commitSync vs commitAsync:**
+
+| Метод | Блокировка | Надёжность | Latency |
+|-------|-----------|------------|---------|
+| `consumer.commit()` (sync) | Да — ждёт ACK от брокера | Высокая — retry при ошибке | Выше |
+| `commitAsync()` | Нет — неблокирующий | Ниже — нет авто-retry | Ниже |
+
+<Callout type="note">
+В kafka_sim.py `consumer.commit()` — это синхронный commit. В реальном kafka-python `commitAsync(callback)` принимает callback, вызываемый после подтверждения. Для максимальной надёжности в production используйте commitSync в блоке `finally`, чтобы commit выполнился даже при исключении.
+</Callout>
+
+---
+
+## At-least-once vs At-most-once
+
+Выбор стратегии commit определяет гарантии доставки:
+
+<DiagramContainer title="Семантики доставки" color="purple">
+  <div className="space-y-4 p-2">
+    <FlowRow>
+      <FlowColumn>
+        <FlowNode
+          variant="process"
+          size="lg"
+          tooltip="At-most-once: коммитим offset ДО обработки. Сообщение никогда не обрабатывается повторно. При падении между commit и обработкой — сообщение теряется. Подходит для метрик, где потеря не критична."
+        >
+          At-most-once
+        </FlowNode>
+        <Arrow direction="down" />
+        <FlowNode
+          variant="monitoring"
+          size="md"
+          tooltip="Паттерн: commit() → process(). Если process() падает — сообщение уже закоммичено и потеряно. Авто-коммит ведёт себя аналогично."
+        >
+          commit() → process()
+        </FlowNode>
+      </FlowColumn>
+      <FlowColumn>
+        <FlowNode
+          variant="cluster"
+          size="lg"
+          tooltip="At-least-once: коммитим offset ПОСЛЕ обработки. Сообщение всегда будет обработано минимум один раз. При падении до commit — сообщение будет перечитано и обработано повторно (дубликат). Для дедупликации нужна идемпотентная обработка."
+        >
+          At-least-once
+        </FlowNode>
+        <Arrow direction="down" />
+        <FlowNode
+          variant="storage"
+          size="md"
+          tooltip="Паттерн: process() → commit(). Если consumer падает между process() и commit() — сообщение обрабатывается снова после рестарта. Требует идемпотентности бизнес-логики (проверка на дубликаты)."
+        >
+          process() → commit()
+        </FlowNode>
+      </FlowColumn>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+**Exactly-once** семантика в Kafka достигается через транзакции на стороне продюсера (enable.idempotence + transactional.id) и consume-transform-produce паттерн в Kafka Streams. Чистый consumer с ручным commit обеспечивает at-least-once при правильной реализации.
+
+---
+
+## Seek: сброс offset для replay
+
+`consumer.seek(partition, offset)` позволяет переместить позицию чтения в произвольное место партиции. Это мощный инструмент для повторной обработки событий.
+
+```python
+from kafka import TopicPartition
+
+tp = TopicPartition('events', 0)
+consumer.assign([tp])
+
+# Перемотать на начало партиции
+consumer.seek(tp, 0)
+
+# Читать 100 сообщений, начиная с offset 500
+consumer.seek(tp, 500)
+records = consumer.poll(timeout_ms=1000, max_records=100)
+```
+
+<Callout type="tip">
+Seek необходим при реализации event sourcing replay, исправлении данных после обнаружения ошибки в обработчике, или для точного воспроизведения конкретного инцидента. Seek работает только после `assign()` — нельзя использовать с `subscribe()` до получения назначения партиций (первый `poll()` после subscribe инициирует назначение).
+</Callout>
+
+---
+
+## Итог
+
+Управление offset — это компромисс между надёжностью и производительностью. `auto_offset_reset` определяет стартовую точку для новой группы. `enable_auto_commit` удобен, но создаёт риск потери при crash. Ручной commit (`enable_auto_commit=False`) + `commit()` после обработки — стандарт для at-least-once гарантий. `seek()` даёт полный контроль для replay-сценариев.
+
+<KnowledgeCheck
+  question="Consumer настроен с enable_auto_commit=True и auto_commit_interval_ms=5000. Consumer получает батч из 100 сообщений через poll(), начинает их обрабатывать — и через 2 секунды (ДО истечения 5-секундного интервала авто-коммита) падает после обработки первых 30 сообщений. Какие сообщения будут повторно обработаны после перезапуска?"
+  answer="Все 100 сообщений из батча будут прочитаны снова. Поскольку consumer упал до истечения auto_commit_interval_ms (5 сек), авто-коммит не произошёл. Последний закоммиченный offset остался на значении, предшествующем этому батчу. После рестарта consumer прочитает все 100 сообщений заново. Сообщения 1-30 будут обработаны повторно (дубликаты). Это at-least-once поведение при авто-коммите — он не гарантирует защиту от повторной обработки при crash."
+/>

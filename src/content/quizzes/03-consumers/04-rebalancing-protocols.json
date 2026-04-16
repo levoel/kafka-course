@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "03-consumers/04-rebalancing-protocols",
+  "moduleId": "03-consumers",
+  "_meta": {
+    "idPrefix": "kafka-m03-04",
+    "description": "Use IDs: kafka-m03-04-q1, q2, q3, q4 for MC/TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m03-04-q1",
+      "type": "multiple-choice",
+      "question": "Consumer group использует legacy eager protocol (group.protocol=classic). Группа состоит из 50 consumer с 100 партициями. Один consumer падает. Что происходит с производительностью группы в момент ребалансировки?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Производительность снижается примерно на 2% — только 1 из 50 consumer теряет свои партиции"
+        },
+        {
+          "id": "b",
+          "text": "Производительность падает до 0 — все 50 consumer останавливают обработку, ожидая синхронизации"
+        },
+        {
+          "id": "c",
+          "text": "Производительность не снижается — ребалансировка происходит в фоне"
+        },
+        {
+          "id": "d",
+          "text": "Производительность снижается на 50% — половина consumer ждёт, другая продолжает работу"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Legacy eager protocol реализует глобальный синхронизационный барьер: при ребалансировке ВСЕ consumer в группе одновременно отзывают свои партиции и отправляют JoinGroup запросы. Coordinator ждёт JoinGroup от каждого из 50 consumer, прежде чем вычислить новое назначение. На всё это время (иногда 30-60 секунд в больших группах) ни один consumer не обрабатывает данные — производительность = 0. Это главная проблема eager protocol, решённая в KIP-848.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m03-04-q2",
+      "type": "multiple-choice",
+      "question": "В чём ключевое архитектурное отличие KIP-848 (ConsumerGroupHeartbeat) от legacy протокола (JoinGroup/SyncGroup)?",
+      "options": [
+        {
+          "id": "a",
+          "text": "KIP-848 использует UDP вместо TCP для меньшей latency"
+        },
+        {
+          "id": "b",
+          "text": "В KIP-848 сервер управляет назначением партиций и обновляет его асинхронно через heartbeat, без глобального синхронизационного барьера"
+        },
+        {
+          "id": "c",
+          "text": "KIP-848 позволяет consumer самостоятельно выбирать партиции без участия брокера"
+        },
+        {
+          "id": "d",
+          "text": "KIP-848 требует ZooKeeper для хранения состояния группы"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Архитектурное ключевое отличие KIP-848: перенос ответственности за назначение партиций на сторону сервера. В legacy протоколе group leader (один из consumer) вычисляет назначение и рассылает его через SyncGroup — требуя участия всех consumer. В KIP-848 сервер (group coordinator) асинхронно вычисляет target.assignment и доставляет его только затронутым consumer через ответ на heartbeat. Нет блокирующего ожидания от всей группы — это устраняет синхронизационный барьер и даёт до 20x ускорение.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m03-04-q3",
+      "type": "multiple-choice",
+      "question": "Разработчик настраивает consumer для Kafka 4.0 и хочет использовать KIP-848 протокол. Какую конфигурацию ему нужно добавить?",
+      "options": [
+        {
+          "id": "a",
+          "text": "rebalance.protocol=kip848"
+        },
+        {
+          "id": "b",
+          "text": "consumer.rebalance.strategy=new-gen"
+        },
+        {
+          "id": "c",
+          "text": "group.protocol=consumer"
+        },
+        {
+          "id": "d",
+          "text": "partition.assignment.strategy=kip848"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "group.protocol=consumer — это параметр конфигурации consumer, включающий KIP-848 протокол ребалансировки. Значение 'consumer' активирует новый ConsumerGroupHeartbeat-based протокол. Противоположное значение — 'classic' (legacy JoinGroup/SyncGroup). В Kafka 4.0 этот параметр нужно указывать явно; в Kafka 4.2 'consumer' стал значением по умолчанию. Параметр устанавливается в consumer.properties или через конфигурацию KafkaConsumer клиента.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m03-04-q4",
+      "type": "true-false",
+      "question": "Cooperative incremental protocol (IncSyncGroup) полностью устраняет downtime при ребалансировке — все consumer продолжают читать без прерывания.",
+      "correctAnswer": "false",
+      "explanation": "Неверно. Cooperative incremental protocol значительно улучшает ситуацию, но не устраняет downtime полностью. Он работает в два этапа: сначала только consumer, теряющие партиции, отзывают их (Фаза 1 — Revoke), а затем новый owner получает эти партиции (Фаза 2 — Assign). Consumer, которые не теряют и не получают партиции, продолжают работу без прерывания. Но сам процесс revoke/assign для затронутых партиций всё равно создаёт краткое окно без обработки этих конкретных партиций. KIP-848 ещё лучше: асинхронный процесс на сервере минимизирует это окно.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

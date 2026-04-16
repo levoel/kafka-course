@@ -1,0 +1,336 @@
+{
+  "moduleId": "02-producers",
+  "title": "Экзамен модуля: Producers",
+  "description": "Итоговый экзамен по модулю Producers. Проверяет понимание Producer API, батчинга, компрессии, гарантий доставки, идемпотентности и транзакций на уровне применения и анализа.",
+  "passThreshold": 70,
+  "_meta": {
+    "idPrefix": "kafka-m02-exam",
+    "bloomDistribution": "40% applied, 60% analytical"
+  },
+  "questions": [
+    {
+      "id": "kafka-m02-exam-q1",
+      "type": "multiple-choice",
+      "question": "Продюсер отправляет 1000 записей/сек, каждая запись ~2 KB. Конфигурация: linger.ms=0, batch.size=16384 (16 KB). Что произойдёт с большинством батчей?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Батчи будут заполнены до 16 KB (~8 записей), что даёт высокую эффективность батчинга"
+        },
+        {
+          "id": "b",
+          "text": "Каждая запись будет отправляться как отдельный батч — при linger.ms=0 батчинга фактически нет, throughput inefficiency максимальна"
+        },
+        {
+          "id": "c",
+          "text": "Батчи будут периодически переполняться и теряться из-за слишком быстрой скорости записи"
+        },
+        {
+          "id": "d",
+          "text": "Продюсер автоматически увеличит linger.ms при высокой нагрузке для оптимизации батчей"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "При linger.ms=0 Sender Thread отправляет батч при любом количестве записей в нём, не дожидаясь заполнения до batch.size. При 1000 записей/сек = 1 запись каждые 1 мс. В 1 мс скорее всего накапливается 1-2 записи (2-4 KB из 16 KB), и Sender Thread отправляет неполный батч. Каждый ProduceRequest несёт 1-2 записи вместо возможных 8. Это означает ~8x больше сетевых запросов, больше overhead на broker side. Решение: linger.ms=10-20 позволит накапливать 10-20 записей (~20-40 KB) до отправки.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 02 — linger.ms и batch.size: условия отправки батча"
+    },
+    {
+      "id": "kafka-m02-exam-q2",
+      "type": "multiple-choice",
+      "question": "Транзакционный продюсер отправил 3 записи в 3 разные партиции в рамках одной транзакции. Crash продюсера произошёл между EndTxnRequest(COMMIT) и получением ответа от Transaction Coordinator. При рестарте продюсер вызывает init_transactions(). Что произойдёт с этими 3 записями?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Записи будут откатаны — coordinator не получил подтверждения от продюсера, транзакция считается ABORT"
+        },
+        {
+          "id": "b",
+          "text": "Transaction Coordinator завершит двухфазный коммит самостоятельно (PREPARE_COMMIT state уже записан), при init_transactions() новый экземпляр найдёт транзакцию уже COMMITTED"
+        },
+        {
+          "id": "c",
+          "text": "Записи будут продублированы — новый экземпляр повторит отправку всех 3 записей"
+        },
+        {
+          "id": "d",
+          "text": "Состояние неопределённо — транзакция зависнет навсегда в PREPARE_COMMIT"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Двухфазный коммит Kafka устойчив к crash продюсера. PREPARE_COMMIT записан в __transaction_state с replication.factor=3 до того, как coordinator ответил продюсеру. Coordinator знает об этой транзакции. При инициализации нового экземпляра (init_transactions() с тем же transactional.id), coordinator видит транзакцию в статусе PREPARE_COMMIT и продолжает commit: рассылает WriteTxnMarkersRequest(COMMIT) на partition leaders. Записи становятся видимы консьюмерам с read_committed. Именно для этого нужен двухфазный коммит — coordinator может завершить транзакцию без участия продюсера.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 05 — Transaction Coordinator, двухфазный commit"
+    },
+    {
+      "id": "kafka-m02-exam-q3",
+      "type": "multiple-choice",
+      "question": "Консьюмер с isolation.level=read_committed читает топик, в который транзакционный продюсер пишет длинные транзакции (5 секунд каждая). Какой эффект это оказывает на консьюмера?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Никакого — read_committed консьюмер работает без задержек, маркеры прозрачны"
+        },
+        {
+          "id": "b",
+          "text": "Консьюмер накапливает latency до 5 секунд — он буферизует транзакционные записи до получения COMMIT маркера и не выдаёт их пользователю до завершения транзакции"
+        },
+        {
+          "id": "c",
+          "text": "Консьюмер пропускает транзакционные записи и читает только нетранзакционные записи в топике"
+        },
+        {
+          "id": "d",
+          "text": "Консьюмер получает KafkaException после 1 секунды ожидания маркера"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "read_committed консьюмер буферизует (hold) транзакционные записи до получения COMMIT или ABORT маркера. Если транзакция длится 5 секунд, консьюмер накапливает до 5 секунд задержки для записей этой транзакции. После COMMIT маркера — выдаёт все буферизованные записи разом. Для последующих потребителей это выглядит как 'пакетная' доставка с высокой latency. Рекомендация: держите транзакции короткими (единицы-десятки миллисекунд), не секунды. Если долгая транзакция необходима — рассмотрите read_uncommitted для потребителей с компенсирующей логикой.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 05 — read_committed изоляция и буферизация"
+    },
+    {
+      "id": "kafka-m02-exam-q4",
+      "type": "multiple-choice",
+      "question": "Команда обнаружила, что broker CPU высокий из-за компрессии. При расследовании выяснилось: продюсер использует compression.type='gzip', но топик настроен с compression.type='lz4'. Почему broker испытывает высокий CPU?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Broker декомпрессирует gzip батчи перед репликацией — это нормальная операция"
+        },
+        {
+          "id": "b",
+          "text": "Broker получает батч сжатый gzip, декомпрессирует его и перекомпрессирует в lz4 (как указано в настройке топика) перед записью — двойная конвертация"
+        },
+        {
+          "id": "c",
+          "text": "Broker никогда не участвует в компрессии — CPU высокий из-за другой причины"
+        },
+        {
+          "id": "d",
+          "text": "gzip всегда потребляет больше CPU независимо от настроек топика"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Когда compression.type топика отличается от compression.type продюсера, broker вынужден перекомпрессировать: декомпрессировать входящий gzip батч и сжать заново в lz4. Это CPU-intensive операция, происходящая на каждый входящий батч. Правило: compression.type топика должен совпадать с compression.type продюсера (или быть 'producer' — хранить в формате продюсера). Рекомендация: установить compression.type='producer' на топике (default behaviour) или явно согласовать алгоритмы. Mixing алгоритмов — распространённая production-ошибка.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 02 — где происходит компрессия/декомпрессия"
+    },
+    {
+      "id": "kafka-m02-exam-q5",
+      "type": "multiple-choice",
+      "question": "Идемпотентный продюсер (PID=50) отправил батч seq=10 в partition 0. Потом продюсер перезапустился (новый PID=51). Новый продюсер отправляет те же данные повторно. Защищает ли идемпотентность от этого дубликата?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Да — брокер помнит содержимое записей и отбросит семантически идентичные данные"
+        },
+        {
+          "id": "b",
+          "text": "Нет — PID изменился (50 → 51), брокер не связывает новые записи с предыдущим продюсером. Это новая последовательность. Для защиты от такого дубликата нужен transactional.id."
+        },
+        {
+          "id": "c",
+          "text": "Частично — брокер проверяет содержимое value, если оно совпадает — отбрасывает"
+        },
+        {
+          "id": "d",
+          "text": "Да — брокер хранит хеш каждой записи независимо от PID"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Идемпотентность основана на (PID, partition, sequence_number). При рестарте продюсера без transactional.id брокер присваивает НОВЫЙ PID. Новый PID=51 с seq=0 — это абсолютно новый продюсер с точки зрения broker. Дубликат не обнаружится: (PID=50, seq=10) != (PID=51, seq=0). Для защиты от дубликатов при рестарте продюсера нужен transactional.id: он связывает продюсера с конкретным transactional ID независимо от PID, а механизм epoch и offset tracking в __transaction_state помогает восстановить состояние.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 04 — ограничения идемпотентности: PID reset при рестарте"
+    },
+    {
+      "id": "kafka-m02-exam-q6",
+      "type": "multiple-choice",
+      "question": "Сценарий: лог-агрегатор пишет в Kafka 500 MB/сек. compression.type='zstd' (сжатие 5x). Какой реальный трафик продюсер создаёт на сетевом уровне?",
+      "options": [
+        {
+          "id": "a",
+          "text": "500 MB/сек — продюсер сначала сжимает, потом данные разворачиваются обратно перед отправкой"
+        },
+        {
+          "id": "b",
+          "text": "~100 MB/сек — продюсер отправляет батчи уже сжатыми, 500 / 5 = 100 MB/сек"
+        },
+        {
+          "id": "c",
+          "text": "1000 MB/сек — сжатые данные требуют дополнительного overhead в протоколе"
+        },
+        {
+          "id": "d",
+          "text": "500 MB/сек — компрессия происходит на broker, не на продюсере"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Компрессия выполняется на продюсере ПЕРЕД отправкой по сети. Батч сжимается в памяти продюсера, затем сжатый батч отправляется по сети. При compression_ratio=5x: 500 MB/сек несжатых данных → 100 MB/сек по сети. Broker получает сжатый батч и хранит его сжатым (без декомпрессии при стандартных настройках). Broker реплицирует тоже в сжатом виде. Декомпрессия происходит только на консьюмере. Итог: компрессия снижает сетевой трафик, дисковое пространство broker и репликационный трафик одновременно.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 02 — где происходит компрессия в pipeline Kafka"
+    },
+    {
+      "id": "kafka-m02-exam-q7",
+      "type": "multiple-choice",
+      "question": "Продюсер настроен: acks=all, min.insync.replicas=2 (на топике), replication.factor=3. Оба follower'а синхронизированы (ISR=3). После commit leader падает. Consumer читает топик. Что происходит?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Данные теряются — leader упал и его данные недоступны"
+        },
+        {
+          "id": "b",
+          "text": "Один из follower'ов становится новым leader. Все записи доступны — они были реплицированы до падения (acks=all требовало подтверждения всех ISR). Consumer продолжает чтение без потерь."
+        },
+        {
+          "id": "c",
+          "text": "Consumer получает NotLeaderForPartitionException и должен переподключиться"
+        },
+        {
+          "id": "d",
+          "text": "Kafka ждёт восстановления упавшего leader'а, консьюмер блокируется на 30 секунд"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "acks=all означает: broker ответил ACK только после того, как ВСЕ реплики в ISR (все 3 в данном случае) записали данные. При падении leader оба follower'а содержат полную копию данных. Kafka автоматически выбирает нового leader из ISR (unclean.leader.election.enable=false по умолчанию). Consumer клиент автоматически получает обновлённые метаданные (новый leader) и продолжает чтение с корректного offset. С точки зрения consumer — незначительная пауза на время переизбрания (секунды), никаких потерь данных.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 03 — acks=all и гарантии при отказе broker"
+    },
+    {
+      "id": "kafka-m02-exam-q8",
+      "type": "multiple-choice",
+      "question": "Разработчик написал код: for i in range(10000): future = producer.send('topic', value=data); future.get(). Тест показывает throughput 200 записей/сек вместо ожидаемых 10000/сек. В чём причина?",
+      "options": [
+        {
+          "id": "a",
+          "text": "producer.send() синхронен и блокирует поток до записи на broker — по дизайну медленный"
+        },
+        {
+          "id": "b",
+          "text": "future.get() блокирует поток на каждой итерации цикла, ожидая ACK от broker (round-trip ~5 мс). 10000 итераций * 5 мс = 50 секунд = 200 записей/сек вместо 10000."
+        },
+        {
+          "id": "c",
+          "text": "Проблема в сети — broker отвечает медленно из-за высокой нагрузки"
+        },
+        {
+          "id": "d",
+          "text": "linger.ms=0 заставляет продюсера ждать между батчами"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Это классический anti-pattern: synchronous send в tight loop. future.get() блокирует вызывающий поток до получения ACK от broker. Если broker latency = 5 мс (типичная LAN latency), то 10000 записей * 5 мс = 50 секунд. Throughput = 10000 / 50 = 200 записей/сек. Правильный паттерн: (1) асинхронный send без get(), накапливать futures в список; (2) вызвать producer.flush() для ожидания всех ACK разом; (3) проверить futures через цикл. Это позволит накапливать батчи и получать throughput 100x выше.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 01 — синхронная vs асинхронная отправка"
+    },
+    {
+      "id": "kafka-m02-exam-q9",
+      "type": "multiple-choice",
+      "question": "Топик 'user-events' создан с replication.factor=3, min.insync.replicas=2. В кластере 3 broker'а. Два broker'а падают одновременно (ISR=1). Что произойдёт с продюсером (acks=all)?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Продюсер продолжает запись — один оставшийся broker принимает данные"
+        },
+        {
+          "id": "b",
+          "text": "Продюсер получает NotEnoughReplicasException (retriable), будет повторять попытки до delivery.timeout.ms. Запись не принимается — ISR(1) < min.insync.replicas(2)."
+        },
+        {
+          "id": "c",
+          "text": "Продюсер автоматически снижает acks до '1' для продолжения работы"
+        },
+        {
+          "id": "d",
+          "text": "Kafka переводит топик в read-only режим для сохранения существующих данных"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "NotEnoughReplicasException — retriable ошибка. Broker отклоняет запись когда текущий ISR меньше min.insync.replicas. ISR=1 < min.insync.replicas=2 → запись отклоняется. Продюсер повторяет с backoff (retry.backoff.ms) до delivery.timeout.ms. Это правильное поведение — система предпочитает недоступность (потеря записи) потере данных (запись без достаточной репликации). Когда один из упавших broker'ов восстановится и догонит ISR (partition leader), ISR снова станет >= 2 и запись пройдёт. min.insync.replicas — это защита от split-brain и неполной репликации.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 03 — min.insync.replicas и NotEnoughReplicasException"
+    },
+    {
+      "id": "kafka-m02-exam-q10",
+      "type": "multiple-choice",
+      "question": "Продюсер A с transactional.id='svc-1' начал транзакцию и завис (GC pause 90 сек). transaction.timeout.ms=60000. Что Transaction Coordinator делает с незавершённой транзакцией?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Ждёт бесконечно — только продюсер может завершить свою транзакцию"
+        },
+        {
+          "id": "b",
+          "text": "Coordinator автоматически откатывает транзакцию через 60 секунд (transaction.timeout.ms). Записи между begin и abort невидимы для read_committed консьюмеров."
+        },
+        {
+          "id": "c",
+          "text": "Coordinator откатывает транзакцию и уведомляет продюсера через callback"
+        },
+        {
+          "id": "d",
+          "text": "Coordinator фиксирует транзакцию автоматически — зависший продюсер считается успешно завершённым"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "transaction.timeout.ms (по умолчанию 60 000 мс = 60 секунд) — это максимальное время между HeartbeatRequest (или последним запросом продюсера) и автоматическим откатом. Transaction Coordinator запускает таймер при begin_transaction(). При истечении таймаута coordinator самостоятельно инициирует ABORT: записывает PREPARE_ABORT в __transaction_state и рассылает WriteTxnMarkersRequest(ABORT) на все partition leaders транзакции. read_committed консьюмеры видят ABORT маркер и отбрасывают буферизованные записи. Когда продюсер A 'оживает' через 90 сек и пытается commit_transaction() — получает InvalidProducerEpochException или TransactionalIdAuthorizationException.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 05 — transaction.timeout.ms и Transaction Coordinator"
+    },
+    {
+      "id": "kafka-m02-exam-q11",
+      "type": "multiple-choice",
+      "question": "Продюсер отправляет JSON-события: каждое содержит поля {user_id, timestamp, action, metadata}. Поле metadata — случайный UUID. Почему zstd даст лучший коэффициент сжатия, чем если бы metadata был действительно случайным бинарным значением?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Разницы нет — алгоритмы сжатия одинаково эффективны для любых данных"
+        },
+        {
+          "id": "b",
+          "text": "UUID в текстовом формате ('550e8400-e29b-41d4-a716-446655440000') — это 36 ASCII символов с фиксированной структурой. Алгоритм находит паттерны в структуре JSON и hex-символах. Случайный бинарный массив несжимаем."
+        },
+        {
+          "id": "c",
+          "text": "Случайный бинарный сжимается лучше — занимает меньше байт на то же значение"
+        },
+        {
+          "id": "d",
+          "text": "UUID хуже сжимается, чем числа, но лучше, чем случайный бинарный — из-за структуры 8-4-4-4-12"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Алгоритмы компрессии (особенно словарные — LZ77/LZ78 основа zstd/gzip/lz4) ищут повторяющиеся подстроки. JSON UUID в тексте: поле 'metadata':'550e8400-...' имеет паттерны: (1) само имя поля 'metadata' повторяется в каждом событии, (2) hex-символы [0-9a-f] образуют ограниченный алфавит, (3) структура JSON-обёртки повторяется. На батче из 100 событий словарь построит паттерны для этих повторений. Случайный бинарный массив = равномерное распределение байт = информационная энтропия максимальна = несжимаем (или даже больше исходного после overhead заголовков).",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 02 — алгоритмы компрессии и типы данных"
+    },
+    {
+      "id": "kafka-m02-exam-q12",
+      "type": "multiple-choice",
+      "question": "Kafka Streams приложение настроено с processing.guarantee=exactly_once_v2. Что это означает с точки зрения конфигурации продюсера под капотом?",
+      "options": [
+        {
+          "id": "a",
+          "text": "acks=all + enable.idempotence=True — достаточно для exactly-once в Streams"
+        },
+        {
+          "id": "b",
+          "text": "Каждый Stream Task использует транзакционного продюсера (transactional.id = '{appId}-{taskId}'). Commit offset входного топика и запись в выходной топик атомарны через одну транзакцию. Консьюмеры нижестоящих топиков должны иметь isolation.level=read_committed."
+        },
+        {
+          "id": "c",
+          "text": "Streams использует двойную запись — каждая запись дублируется в backup топик для проверки"
+        },
+        {
+          "id": "d",
+          "text": "exactly_once_v2 — это только маркетинговое название, под капотом это at-least-once с дедупликацией"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "exactly_once_v2 (EOS V2, Kafka 2.5+) использует транзакции для атомарного read-process-write. Для каждого Stream Task: transactional.id = '{application.id}-{task.id}-{epoch}'. Цикл: begin_transaction() → consume from input → process → produce to output → sendOffsetsToTransaction(input_offsets) → commit_transaction(). Это атомарно: либо output записан И offset закоммичен, либо ничего. V2 отличается от V1 (exactly_once) тем, что использует один продюсер на все Tasks вместо одного на Task — снижает количество транзакционных продюсеров. Нижестоящие топики обязательно читаются с isolation.level=read_committed.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 05 — Exactly-once в Kafka Streams"
+    }
+  ]
+}

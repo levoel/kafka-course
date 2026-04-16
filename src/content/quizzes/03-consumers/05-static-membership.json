@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "03-consumers/05-static-membership",
+  "moduleId": "03-consumers",
+  "_meta": {
+    "idPrefix": "kafka-m03-05",
+    "description": "Use IDs: kafka-m03-05-q1, q2, q3, q4 for MC/TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m03-05-q1",
+      "type": "multiple-choice",
+      "question": "Consumer настроен с group.instance.id='worker-0' и session.timeout.ms=60000 (60 сек). Consumer Pod перезапустился и поднялся за 20 секунд. Что произойдёт с партициями этого consumer?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Ребалансировка немедленно после падения — другой consumer получает партиции, затем ребалансировка снова при возврате"
+        },
+        {
+          "id": "b",
+          "text": "Партиции удерживаются coordinator 60 секунд. Consumer возвращается за 20 секунд с тем же group.instance.id — получает те же партиции без ребалансировки"
+        },
+        {
+          "id": "c",
+          "text": "Партиции заморожены навсегда до явного сброса через AdminClient"
+        },
+        {
+          "id": "d",
+          "text": "Consumer получит новые партиции — static membership не гарантирует возврат тех же партиций"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Static membership (group.instance.id) позволяет coordinator удерживать назначение партиций для статического члена группы в течение session.timeout.ms. Рестарт за 20 секунд (меньше 60 сек таймаута) означает: (1) Coordinator видит, что member с group.instance.id='worker-0' не отправляет heartbeat — отмечает его как временно недоступного, НО не перераспределяет партиции; (2) consumer возвращается с тем же group.instance.id — coordinator немедленно даёт ему те же партиции без полной ребалансировки группы.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m03-05-q2",
+      "type": "multiple-choice",
+      "question": "В чём отличие session.timeout.ms от max.poll.interval.ms?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Это одно и то же — оба параметра контролируют время до ребалансировки"
+        },
+        {
+          "id": "b",
+          "text": "session.timeout.ms контролирует частоту heartbeat; max.poll.interval.ms контролирует максимальное время между вызовами poll() — два независимых механизма обнаружения 'мёртвого' consumer"
+        },
+        {
+          "id": "c",
+          "text": "session.timeout.ms только для KIP-848; max.poll.interval.ms только для legacy протокола"
+        },
+        {
+          "id": "d",
+          "text": "session.timeout.ms применяется к producer; max.poll.interval.ms только к consumer"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Два независимых таймаута для разных сценариев: session.timeout.ms — если coordinator не получает heartbeat за это время, consumer считается мёртвым. В legacy протоколе heartbeat отправляется отдельным фоновым потоком. max.poll.interval.ms — если consumer не вызывает poll() за это время (по умолчанию 5 минут), coordinator инициирует ребалансировку. Это защита от 'живого' consumer (heartbeat есть), который завис на долгой обработке и не читает новые данные. Оба таймаута нужно настраивать под конкретную нагрузку.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m03-05-q3",
+      "type": "multiple-choice",
+      "question": "Команда использует static membership в Kubernetes Deployment (не StatefulSet). Pod name генерируется случайно при каждом рестарте (например, 'consumer-abc123' → 'consumer-xyz789'). Как это влияет на static membership?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Никак — group.instance.id генерируется Kafka автоматически, независимо от Pod name"
+        },
+        {
+          "id": "b",
+          "text": "Static membership не работает: если group.instance.id берётся из Pod name — он меняется при рестарте, coordinator видит нового члена группы и инициирует полную ребалансировку"
+        },
+        {
+          "id": "c",
+          "text": "Kubernetes автоматически передаёт стабильный ID в переменную POD_NAME"
+        },
+        {
+          "id": "d",
+          "text": "Static membership работает — coordinator сопоставляет consumer по group.id, а не по instance.id"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Преимущество static membership зависит от стабильности group.instance.id. Если ID берётся из случайно генерируемого Pod name (Deployment), он меняется при каждом рестарте. Coordinator видит, что старый instance.id='consumer-abc123' исчез, и новый instance.id='consumer-xyz789' присоединился — это два разных статических члена. Результат: полная ребалансировка при каждом рестарте. Решение: использовать StatefulSet, который гарантирует стабильные имена (consumer-0, consumer-1, consumer-2) — они не меняются при рестарте Pod.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m03-05-q4",
+      "type": "true-false",
+      "question": "Static membership (group.instance.id) предотвращает ребалансировку при добавлении нового consumer в группу (scale out).",
+      "correctAnswer": "false",
+      "explanation": "Ложь. Static membership предотвращает только ненужные ребалансировки при кратковременных рестартах уже существующих consumer. При добавлении нового consumer (scale out) ребалансировка необходима — нужно распределить партиции среди большего числа участников. Static membership не меняет логику ребалансировки при изменении состава группы, только исключает ребалансировку когда состав группы фактически не меняется (тот же member возвращается с тем же group.instance.id до истечения session.timeout.ms).",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

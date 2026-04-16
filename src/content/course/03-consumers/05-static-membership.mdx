@@ -1,0 +1,296 @@
+---
+title: "Static Membership"
+description: "group.instance.id — избежание лишних ребалансировок при перезапуске consumer"
+order: 5
+difficulty: "intermediate"
+estimatedTime: 15
+topics: ["Static Membership", "group.instance.id", "session.timeout.ms", "max.poll.interval.ms"]
+---
+
+# Static Membership
+
+В стандартной конфигурации каждый перезапуск consumer — даже кратковременный — вызывает ребалансировку. Consumer покидает группу (или таймаутится), ребалансировка перераспределяет его партиции, а после рестарта consumer присоединяется заново — и снова ребалансировка. Два события ребалансировки вместо нуля. Static membership (KIP-345) решает эту проблему.
+
+---
+
+## Проблема: ребалансировка при каждом рестарте
+
+В Kubernetes и других оркестраторах consumer-поды перезапускаются регулярно: rolling updates, OOM kills, health check failures. Без static membership каждый такой рестарт приводит к двум ребалансировкам.
+
+<DiagramContainer title="Без static membership: ребалансировка при рестарте" color="amber">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="process"
+        size="md"
+        tooltip="Шаг 1: Consumer Pod A работает с member_id='consumer-1-abc123' (эфемерный ID). Читает P0 и P1."
+      >
+        1. Pod A работает (P0, P1)
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Шаг 2: Kubernetes перезапускает Pod A (rolling update). Consumer закрывается — отправляет LeaveGroup. Coordinator немедленно инициирует ребалансировку №1."
+      >
+        2. Pod A падает → Rebalance #1
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <Arrow direction="down" label="P0,P1 → другой consumer" />
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="cluster"
+        size="md"
+        tooltip="Шаг 3: Другой consumer группы берёт P0 и P1. Ребалансировка завершена. Но Pod A уже готов к старту."
+      >
+        3. P0,P1 перешли к другому consumer
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="monitoring"
+        size="md"
+        tooltip="Шаг 4: Pod A стартует заново с новым эфемерным member_id='consumer-1-xyz789'. Присоединяется к группе → JoinGroup → Rebalance #2. Снова получает P0 и P1, но с задержкой."
+      >
+        4. Pod A рестартовал → Rebalance #2
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+При частых рестартах (несколько в минуту) constant rebalancing становится серьёзной проблемой: потребление замедляется, лаг растёт, система нестабильна.
+
+---
+
+## Решение: group.instance.id
+
+`group.instance.id` — это стабильный строковой идентификатор, который consumer использует вместо эфемерного `member.id`. При задании этого параметра coordinator «запоминает» consumer и позволяет ему переподключиться без ребалансировки, если он вернётся до истечения `session.timeout.ms`.
+
+<DiagramContainer title="Со static membership: повторное подключение без ребалансировки" color="emerald">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="process"
+        size="md"
+        tooltip="Шаг 1: Pod A работает с group.instance.id='payments-consumer-0' (стабильный ID). Coordinator ассоциирует этот ID с P0 и P1."
+      >
+        1. Pod A (instance.id='payments-consumer-0') → P0, P1
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <Arrow direction="down" label="Pod падает, рестарт менее session.timeout.ms" />
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="cluster"
+        size="lg"
+        tooltip="Coordinator: получает LeaveGroup или теряет heartbeat. Но видит group.instance.id — это статический член. Удерживает назначение P0 и P1, ожидая воссоединения в течение session.timeout.ms. НЕТ ребалансировки."
+      >
+        Coordinator: удерживает P0, P1 (ожидает воссоединения)
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <Arrow direction="down" label="Pod вернулся до таймаута" />
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="monitoring"
+        size="md"
+        tooltip="Шаг 3: Pod A возвращается с тем же group.instance.id='payments-consumer-0'. Coordinator немедленно назначает ему те же P0 и P1. Ребалансировки нет."
+      >
+        3. Pod A вернулся → P0, P1 немедленно (без ребалансировки)
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+```python
+from kafka import KafkaConsumer
+
+# Static membership: стабильный идентификатор consumer
+consumer = KafkaConsumer(
+    bootstrap_servers=['localhost:9092'],
+    group_id='payments-group',
+    # Стабильный ID — не меняется при рестарте
+    group_instance_id='payments-consumer-0',
+    # Даём больше времени на воссоединение после рестарта
+    session_timeout_ms=60000,  # 60 секунд
+    auto_offset_reset='earliest',
+)
+consumer.subscribe(['payments'])
+```
+
+---
+
+## session.timeout.ms: окно для воссоединения
+
+`session.timeout.ms` — это максимальное время, в течение которого coordinator ждёт heartbeat от consumer. Для static membership это также окно, в рамках которого consumer может вернуться без ребалансировки.
+
+<DiagramContainer title="Влияние session.timeout.ms на static membership" color="blue">
+  <div className="space-y-4 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="process"
+        size="lg"
+        tooltip="session.timeout.ms=60000 (60 сек): coordinator ждёт 60 секунд. Если Pod A вернётся за это время — ребалансировки нет. Если рестарт занимает 30 секунд — безопасно."
+      >
+        session.timeout.ms=60000
+      </FlowNode>
+      <FlowNode
+        variant="monitoring"
+        size="lg"
+        tooltip="Рестарт Pod A за 30 секунд: меньше session.timeout.ms → coordinator удерживает назначение → Pod A возвращается с тем же group.instance.id → сразу получает P0 и P1."
+      >
+        Рестарт за 30 сек → НЕТ ребалансировки
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="error"
+        size="lg"
+        tooltip="Рестарт Pod A за 90 секунд: превышает session.timeout.ms=60 сек. Coordinator считает consumer мёртвым, инициирует ребалансировку. При воссоединении Pod A будет ребалансировка, но он снова получит те же партиции (если использует StickyAssignor или KIP-848)."
+      >
+        Рестарт за 90 сек → ребалансировка
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+<Callout type="warning">
+`session.timeout.ms` должен быть выше типичного времени рестарта Pod, но не слишком высоким: если consumer действительно умрёт (не краш Pod, а зависание без heartbeat), его партиции будут заморожены на всё время ожидания. Рекомендуемый диапазон: 30-90 секунд в зависимости от скорости рестарта приложения.
+</Callout>
+
+---
+
+## max.poll.interval.ms: таймаут между вызовами poll()
+
+`max.poll.interval.ms` — отдельный параметр от `session.timeout.ms`. Он определяет максимальное время между последовательными вызовами `poll()` перед тем, как coordinator сочтёт consumer мёртвым.
+
+<DiagramContainer title="session.timeout.ms vs max.poll.interval.ms" color="purple">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="input"
+        size="lg"
+        tooltip="session.timeout.ms: определяется по частоте heartbeat. Если consumer не отправляет heartbeat за это время — coordinator считает его мёртвым. В legacy протоколе heartbeat отправляется отдельным потоком. В KIP-848 интегрирован в ConsumerGroupHeartbeat."
+      >
+        session.timeout.ms
+      </FlowNode>
+      <FlowNode
+        variant="process"
+        size="lg"
+        tooltip="max.poll.interval.ms: определяется по вызовам poll(). Если consumer не вызывает poll() за это время (по умолчанию 5 минут) — coordinator инициирует ребалансировку. Это защита от 'зависшего' consumer, который отправляет heartbeat, но не читает данные."
+      >
+        max.poll.interval.ms
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="monitoring"
+        size="md"
+        tooltip="Пример: consumer зависает на долгой обработке одного батча (ML inference, complex aggregation). Heartbeat thread жив → session timeout не срабатывает. Но poll() не вызывается → max.poll.interval.ms срабатывает → ребалансировка."
+      >
+        Heartbeat: OK, но poll() не вызван за 5 мин → ребалансировка
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+```python
+consumer = KafkaConsumer(
+    bootstrap_servers=['localhost:9092'],
+    group_id='ml-processing-group',
+    group_instance_id='ml-consumer-0',
+    session_timeout_ms=45000,         # 45 сек — стандарт
+    max_poll_interval_ms=900000,      # 15 мин — долгая ML обработка
+    max_poll_records=1,               # по одной записи — ML тяжёлый inference
+    auto_offset_reset='earliest',
+)
+```
+
+---
+
+## Когда static membership НЕ предотвращает ребалансировку
+
+Static membership не является панацеей. Ребалансировка всё равно произойдёт в следующих случаях:
+
+<DiagramContainer title="Случаи, где static membership не помогает" color="amber">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Превышение session.timeout.ms: рестарт занял больше времени, чем session.timeout.ms. Coordinator посчитал consumer мёртвым и инициировал ребалансировку до воссоединения."
+      >
+        Рестарт дольше session.timeout.ms
+      </FlowNode>
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Изменение group.instance.id: если DevOps переименовал Pod или изменилась метка, новый instance ID — это новый consumer для coordinator. Старый ID остаётся висеть до session.timeout."
+      >
+        Изменился group.instance.id
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Изменение подписки: consumer изменил список топиков. Даже со static membership это всегда вызывает ребалансировку — нужно перераспределить партиции."
+      >
+        Изменение subscribed.topics
+      </FlowNode>
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Масштабирование: добавление новых consumer Pod (scale out) всегда вызывает ребалансировку — нужно распределить партиции среди большего числа участников."
+      >
+        Scale out (добавление новых consumer)
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+---
+
+## Паттерн для Kubernetes
+
+Лучшая практика для Kubernetes rolling deployments с Kafka consumers:
+
+```python
+import os
+from kafka import KafkaConsumer
+
+# group.instance.id берётся из переменной окружения Pod
+# Kubernetes StatefulSet гарантирует стабильные имена: pod-0, pod-1, pod-2
+pod_name = os.environ.get('POD_NAME', 'consumer-0')
+
+consumer = KafkaConsumer(
+    bootstrap_servers=os.environ.get('KAFKA_BOOTSTRAP', 'localhost:9092'),
+    group_id='payments-processing',
+    group_instance_id=f'payments-{pod_name}',  # стабильный ID
+    session_timeout_ms=60000,
+    heartbeat_interval_ms=10000,
+    max_poll_interval_ms=300000,
+    enable_auto_commit=False,
+    auto_offset_reset='earliest',
+)
+```
+
+В StatefulSet `POD_NAME` будет `payments-0`, `payments-1`, `payments-2` — стабильные имена, которые не меняются при рестарте. Это гарантирует тот же `group.instance.id` после рестарта.
+
+<Callout type="tip">
+StatefulSet в Kubernetes — предпочтительный выбор для Kafka consumers с static membership. Deployment использует random Pod names — нестабильные идентификаторы, которые меняются при рестарте и сводят на нет преимущества static membership.
+</Callout>
+
+---
+
+## Итог
+
+Static membership (`group.instance.id`) позволяет consumer переподключаться к группе без ребалансировки, если рестарт укладывается в `session.timeout.ms`. Критически важно для Kubernetes rolling deployments и любых сред с частыми перезапусками. Не предотвращает ребалансировку при превышении таймаута, изменении подписки или масштабировании.
+
+<KnowledgeCheck
+  question="Consumer настроен с group.instance.id='worker-0' и session.timeout.ms=30000 (30 сек). Consumer Pod перезапустился и поднялся за 45 секунд. Произойдёт ли ребалансировка?"
+  answer="Да, ребалансировка произойдёт. Рестарт занял 45 секунд, что превышает session.timeout.ms=30 секунд. Coordinator не получал heartbeat 45 секунд и в районе отметки 30 секунд посчитал consumer мёртвым, инициировав ребалансировку и перераспределив его партиции. Когда consumer вернулся с тем же group.instance.id='worker-0' через 45 секунд, coordinator принял его как нового участника — произошла вторая ребалансировка для возврата партиций. Static membership помогает только если время рестарта меньше session.timeout.ms."
+/>

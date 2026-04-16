@@ -1,0 +1,199 @@
+---
+title: "Итоги модуля: Consumers"
+description: "Обзор ключевых концепций — Consumer API, offsets, groups, ребалансировка, static membership"
+order: 6
+difficulty: "intermediate"
+estimatedTime: 10
+topics: ["Summary", "Review"]
+---
+
+# Итоги модуля: Consumers
+
+Этот модуль охватил полный цикл работы с consumer-стороной Kafka: от базового API и управления offset до advanced механизмов ребалансировки и static membership. Ключевой акцент — KIP-848 как современный стандарт протокола ребалансировки в Kafka 4.0.
+
+---
+
+## Что мы изучили
+
+<DiagramContainer title="Карта концепций: Module 03 — Consumers" color="emerald">
+  <div className="space-y-4 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="input"
+        size="md"
+        tooltip="Consumer API (Урок 01): KafkaConsumer(bootstrap_servers, group_id, auto_offset_reset). subscribe(topics) vs assign(partitions). poll() loop — единственный способ получить данные. ConsumerRecord(topic, partition, offset, key, value, timestamp)."
+      >
+        Consumer API
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="process"
+        size="md"
+        tooltip="Offset Management (Урок 02): auto_offset_reset='earliest'/'latest'. enable_auto_commit — удобно, но риск потери. Manual commit (enable_auto_commit=False) + commit() после обработки = at-least-once. seek() для replay."
+      >
+        Управление Offset
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="cluster"
+        size="md"
+        tooltip="Consumer Groups (Урок 03): group.id объединяет consumer. Каждая партиция → ровно один consumer. Group coordinator хранит offsets в __consumer_offsets. Масштабируем до num_partitions. Несколько групп = независимое чтение."
+      >
+        Consumer Groups
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <Arrow direction="down" />
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="service"
+        size="md"
+        tooltip="Ребалансировка (Урок 04): Eager (legacy) — глобальный стоп-мир, JoinGroup/SyncGroup. Cooperative — двухфазный, только затронутые партиции. KIP-848 (стандарт Kafka 4.0) — сервер-driven, ConsumerGroupHeartbeat API, без синхронизационного барьера, до 20x быстрее."
+      >
+        Протоколы ребалансировки
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="monitoring"
+        size="md"
+        tooltip="Static Membership (Урок 05): group.instance.id — стабильный ID вместо эфемерного. Reconnect без ребалансировки при рестарте меньше session.timeout.ms. Идеально для Kubernetes StatefulSet. max.poll.interval.ms — отдельный таймаут для poll()."
+      >
+        Static Membership
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+---
+
+## Дерево решений: выбор стратегии offset
+
+Правильная стратегия управления offset зависит от требований к надёжности и производительности:
+
+<DiagramContainer title="Когда использовать какую стратегию offset" color="blue">
+  <div className="space-y-3 p-2">
+    <FlowColumn>
+      <FlowNode
+        variant="input"
+        size="lg"
+        tooltip="Стартовая точка: новая consumer group, нет закоммиченного offset."
+      >
+        Нет закоммиченного offset — что читать?
+      </FlowNode>
+      <FlowRow>
+        <FlowColumn>
+          <Arrow direction="down" label="нужна история" />
+          <FlowNode
+            variant="process"
+            size="md"
+            tooltip="auto_offset_reset='earliest': обработать всю историю с offset 0. Типичный случай: аналитика, batch обработка, новая версия сервиса."
+          >
+            earliest — читать с начала
+          </FlowNode>
+        </FlowColumn>
+        <FlowColumn>
+          <Arrow direction="down" label="real-time только" />
+          <FlowNode
+            variant="monitoring"
+            size="md"
+            tooltip="auto_offset_reset='latest': пропустить историю, читать только новые сообщения. Типичный случай: метрики, уведомления в реальном времени."
+          >
+            latest — только новые
+          </FlowNode>
+        </FlowColumn>
+      </FlowRow>
+      <Arrow direction="down" label="после старта" />
+      <FlowNode
+        variant="input"
+        size="lg"
+        tooltip="После первого poll() — нужно управлять offset."
+      >
+        Как фиксировать прогресс?
+      </FlowNode>
+      <FlowRow>
+        <FlowColumn>
+          <Arrow direction="down" label="простота важна" />
+          <FlowNode
+            variant="process"
+            size="md"
+            tooltip="enable_auto_commit=True: Kafka автоматически коммитит каждые 5 сек. At-most-once при crash между auto-commit и обработкой. Для некритичных данных: метрики, логи."
+          >
+            Auto-commit (некритичные данные)
+          </FlowNode>
+        </FlowColumn>
+        <FlowColumn>
+          <Arrow direction="down" label="надёжность важна" />
+          <FlowNode
+            variant="cluster"
+            size="md"
+            tooltip="enable_auto_commit=False + commit() после обработки: at-least-once. Для финансовых транзакций, заказов, критичных бизнес-событий."
+          >
+            Manual commit (критичные данные)
+          </FlowNode>
+        </FlowColumn>
+      </FlowRow>
+    </FlowColumn>
+  </div>
+</DiagramContainer>
+
+---
+
+## KIP-848: стандарт для Kafka 4.0
+
+Ключевой вывод модуля: KIP-848 — это не опция и не «расширенная возможность». Это стандартный протокол ребалансировки в Kafka 4.0+, который заменяет устаревший JoinGroup/SyncGroup подход.
+
+<DiagramContainer title="KIP-848: конфигурация по умолчанию" color="purple">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="process"
+        size="md"
+        tooltip="Kafka 4.0: group.protocol=consumer включается явно на стороне consumer. Сервер поддерживает оба протокола (classic + consumer). Рекомендуется для всех новых приложений."
+      >
+        Kafka 4.0: group.protocol=consumer (opt-in)
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="cluster"
+        size="md"
+        tooltip="Kafka 4.2: group.protocol=consumer является дефолтным значением. Устаревший classic protocol доступен через явную настройку group.protocol=classic."
+      >
+        Kafka 4.2: default (без конфигурации)
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+```properties
+# consumer.properties для Kafka 4.0
+group.id=my-application
+group.protocol=consumer
+# Опционально: стабильное членство
+# group.instance.id=consumer-pod-0
+```
+
+---
+
+## Краткая шпаргалка по конфигурациям
+
+| Параметр | По умолчанию | Что изменить |
+|----------|-------------|--------------|
+| `auto_offset_reset` | `latest` | `earliest` для обработки истории |
+| `enable_auto_commit` | `True` | `False` для at-least-once гарантий |
+| `auto_commit_interval_ms` | `5000` | Уменьшить если нужно частый коммит |
+| `session_timeout_ms` | `45000` | Увеличить для стабильной среды |
+| `max_poll_interval_ms` | `300000` | Увеличить для долгой обработки |
+| `group.protocol` | `classic` (4.0) | `consumer` для KIP-848 |
+| `group.instance.id` | _(нет)_ | Установить для static membership |
+
+---
+
+## Следующий шаг
+
+Модуль 04 — «Внутреннее устройство Kafka» — раскрывает, что происходит на диске: файлы лог-сегментов (`.log`, `.index`, `.timeindex`), механика LEO vs High Watermark, log compaction и tiered storage. Понимание internals критически важно для диагностики production-проблем.
+
+<KnowledgeCheck
+  question="Приложение обрабатывает финансовые транзакции из Kafka. Инженер настроил consumer с enable_auto_commit=True. В чём риск этой конфигурации, и как правильно настроить consumer для надёжной обработки транзакций?"
+  answer="Риск: при enable_auto_commit=True Kafka коммитит offset по таймеру (каждые 5 сек), независимо от состояния обработки. Если consumer упадёт после авто-коммита, но до завершения обработки транзакции — транзакция будет потеряна (at-most-once семантика). Для финансовых данных это недопустимо. Правильная настройка: enable_auto_commit=False, обработать каждое сообщение полностью (включая запись в БД и ACK к внешнему сервису), затем consumer.commit() для синхронного подтверждения offset. Это обеспечивает at-least-once: при падении до commit() — транзакция будет повторно обработана (нужна идемпотентность). Дополнительно: group.instance.id для предотвращения лишних ребалансировок при рестарте, group.protocol=consumer для KIP-848."
+/>

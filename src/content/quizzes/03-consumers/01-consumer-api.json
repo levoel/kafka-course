@@ -1,0 +1,123 @@
+{
+  "lessonSlug": "03-consumers/01-consumer-api",
+  "moduleId": "03-consumers",
+  "_meta": {
+    "idPrefix": "kafka-m03-01",
+    "description": "Use IDs: kafka-m03-01-q1, q2, q3 for MC/TF; kafka-m03-01-code-1 for code challenge"
+  },
+  "questions": [
+    {
+      "id": "kafka-m03-01-q1",
+      "type": "multiple-choice",
+      "question": "Consumer вызывает consumer.subscribe(['orders']). Через некоторое время группа перебалансируется и consumer получает Partition 2 и Partition 3. Что произойдёт, если этот же consumer добавит ещё один топик через subscribe(['orders', 'payments'])?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Consumer немедленно получит партиции топика payments, не прерывая чтение orders"
+        },
+        {
+          "id": "b",
+          "text": "subscribe() заменяет текущую подписку, инициируя ребалансировку для перераспределения партиций обоих топиков"
+        },
+        {
+          "id": "c",
+          "text": "subscribe() добавляет топик к текущей подписке без ребалансировки"
+        },
+        {
+          "id": "d",
+          "text": "Consumer получит исключение — нельзя менять подписку во время чтения"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "consumer.subscribe() всегда заменяет текущую подписку полностью. Вызов subscribe(['orders', 'payments']) означает, что текущий список топиков заменяется новым. Это изменение подписки инициирует ребалансировку: group coordinator перераспределяет партиции всех топиков между consumer группы с учётом нового набора топиков.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m03-01-q2",
+      "type": "multiple-choice",
+      "question": "Топик 'events' имеет 4 партиции. Consumer вызывает consumer.assign([TopicPartition('events', 0), TopicPartition('events', 1)]). Ещё один consumer с тем же group_id вызывает consumer.assign([TopicPartition('events', 2), TopicPartition('events', 3)]). Что произойдёт с Partition 0 и Partition 1?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Group coordinator перераспределит партиции поровну между обоими consumer"
+        },
+        {
+          "id": "b",
+          "text": "Оба consumer будут читать Partition 0 и 1 независимо — assign() не использует group coordinator"
+        },
+        {
+          "id": "c",
+          "text": "Consumer, вызвавший assign() позже, получит приоритет и заберёт все 4 партиции"
+        },
+        {
+          "id": "d",
+          "text": "Возникнет исключение — нельзя одновременно назначить одну партицию двум consumer"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "consumer.assign() работает в обход group coordinator. Каждый consumer с assign() независимо определяет свои партиции без координации. Если два consumer с одним group_id используют assign() для разных партиций — они читают независимо. Теоретически возможно назначить одну и ту же партицию двум consumer через assign() — group coordinator не предотвращает это, но оба будут читать одни данные. Именно поэтому assign() используется для специализированных случаев, а не general-purpose consumer groups.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m03-01-q3",
+      "type": "multiple-choice",
+      "question": "Consumer настроен с auto_offset_reset='latest'. Consumer group 'reporting' подписывается на топик 'sales', в котором уже есть 10 000 сообщений. consumer.poll() возвращает пустой dict {}. Через 5 минут producer записывает новое сообщение. poll() возвращает 1 запись. Почему первый poll() вернул пустой результат?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Первый poll() всегда возвращает пустой результат — нужно вызвать его минимум дважды"
+        },
+        {
+          "id": "b",
+          "text": "auto_offset_reset='latest' устанавливает стартовую позицию на конец партиции — consumer пропустил существующие 10 000 сообщений и ждал только новые"
+        },
+        {
+          "id": "c",
+          "text": "Consumer не получил назначение партиций за время timeout_ms — нужно увеличить таймаут"
+        },
+        {
+          "id": "d",
+          "text": "Consumer group 'reporting' не существовала — нужно сначала зарегистрировать группу через AdminClient"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "auto_offset_reset='latest' применяется когда нет закоммиченного offset для данной consumer group. Группа 'reporting' новая — нет записей в __consumer_offsets. Поэтому consumer устанавливает позицию на Log End Offset (конец партиции), пропуская все 10 000 существующих сообщений. Первый poll() возвращает пустой результат, поскольку нет новых сообщений. Когда producer записывает новое сообщение — оно появляется за текущей позицией consumer и poll() его возвращает.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m03-01-q4",
+      "type": "true-false",
+      "question": "consumer.close() необязателен при завершении работы consumer — Kafka автоматически обнаружит его отсутствие через session.timeout.ms и перераспределит партиции.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. Технически партиции будут перераспределены и без close() — через session.timeout.ms (обычно 45 секунд). Но close() делает это немедленно: он отправляет LeaveGroup запрос group coordinator, который сразу инициирует ребалансировку. Без close() другие consumer группы ждут 45 секунд без части партиций — это создаёт лаг. close() также освобождает соединения и ресурсы. В production всегда используйте try/finally: consumer.close() для корректного завершения.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m03-01-code-1",
+      "type": "code-challenge",
+      "question": "Создайте KafkaConsumer с group_id='analytics' и auto_offset_reset='earliest'. Подпишитесь на топик 'events'. Выполните poll с timeout_ms=1000 и max_records=100. Выведите количество сообщений по каждой партиции в формате 'Partition N: M messages'.",
+      "language": "python",
+      "starterCode": "from kafka import KafkaConsumer, TopicPartition\nfrom kafka import seed_topic\n\n# Предзаполняем топик тестовыми данными\nseed_topic('events', [(f'key-{i}', f'value-{i}') for i in range(10)])\n\n# TODO: создайте KafkaConsumer с group_id='analytics', auto_offset_reset='earliest'\n# consumer = KafkaConsumer(...)\n\n# TODO: подпишитесь на топик 'events'\n# consumer.subscribe(...)\n\n# TODO: вызовите poll с timeout_ms=1000 и max_records=100\n# records = consumer.poll(...)\n\n# TODO: для каждой TopicPartition в records выведите:\n# 'Partition N: M messages' (где N - номер партиции, M - кол-во сообщений)\n# for tp, messages in records.items():\n#     print(f'Partition {tp.partition}: {len(messages)} messages')\n\n# TODO: закоммитьте offset\n# consumer.commit()\n",
+      "solutionCode": "from kafka import KafkaConsumer, TopicPartition\nfrom kafka import seed_topic\n\n# Предзаполняем топик тестовыми данными\nseed_topic('events', [(f'key-{i}', f'value-{i}') for i in range(10)])\n\n# Создаём consumer\nconsumer = KafkaConsumer(\n    bootstrap_servers=['localhost:9092'],\n    group_id='analytics',\n    auto_offset_reset='earliest',\n)\n\n# Подписываемся на топик\nconsumer.subscribe(['events'])\n\n# Читаем сообщения\nrecords = consumer.poll(timeout_ms=1000, max_records=100)\n\n# Выводим статистику по партициям\nfor tp, messages in records.items():\n    print(f'Partition {tp.partition}: {len(messages)} messages')\n\n# Коммитим offset\nconsumer.commit()\n",
+      "testCases": [
+        {
+          "id": "tc1",
+          "description": "Вывод содержит 'Partition'",
+          "expectedOutput": "Partition",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc2",
+          "description": "Вывод содержит 'messages'",
+          "expectedOutput": "messages",
+          "matchMode": "contains",
+          "hidden": true
+        }
+      ],
+      "explanation": "KafkaConsumer.poll(timeout_ms, max_records) возвращает dict типа {TopicPartition: [ConsumerRecord]}. Итерация по .items() даёт пары (TopicPartition, список записей). tp.partition — номер партиции, len(messages) — количество записей. auto_offset_reset='earliest' читает с начала партиции при отсутствии закоммиченного offset. commit() фиксирует прогресс в __consumer_offsets.",
+      "bloomLevel": "applied",
+      "useKafkaHelpers": true
+    }
+  ]
+}

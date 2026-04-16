@@ -1,0 +1,336 @@
+{
+  "lessonSlug": "03-consumers/_exam",
+  "moduleId": "03-consumers",
+  "examTitle": "Экзамен: Consumers в Apache Kafka",
+  "passThreshold": 70,
+  "_meta": {
+    "idPrefix": "kafka-m03-exam",
+    "description": "12 analytical/applied questions covering Consumer API, offsets, groups, rebalancing, static membership"
+  },
+  "questions": [
+    {
+      "id": "kafka-m03-exam-q1",
+      "type": "multiple-choice",
+      "question": "Consumer group состоит из 3 consumer (C0, C1, C2) с 6 партициями (P0-P5). Consumer C1 неожиданно падает (kill -9). Группа использует KIP-848 протокол (group.protocol=consumer). Что произойдёт с партициями P2 и P3, назначенными C1?",
+      "options": [
+        {
+          "id": "a",
+          "text": "P2 и P3 остаются без обработки до ручного вмешательства администратора"
+        },
+        {
+          "id": "b",
+          "text": "C0 и C2 немедленно берут P2 и P3 без остановки своей текущей обработки"
+        },
+        {
+          "id": "c",
+          "text": "Coordinator перестаёт получать heartbeat от C1. После session.timeout.ms сервер вычисляет новое назначение: P2 и P3 перераспределяются между C0 и C2 без остановки всей группы"
+        },
+        {
+          "id": "d",
+          "text": "Все 3 consumer останавливают обработку, синхронизируются через JoinGroup, затем C0 и C2 получают P2 и P3"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "В KIP-848 протоколе coordinator обнаруживает отсутствие heartbeat от C1 по истечении session.timeout.ms. Затем сервер асинхронно вычисляет новое назначение: P2 и P3 распределяются между C0 и C2 (скорее всего по одной партиции каждому). Ключевое: C0 и C2 не останавливают обработку своих текущих партиций — они получают новое назначение через следующий heartbeat response и инкрементально добавляют P2/P3. Нет глобального JoinGroup/SyncGroup барьера — это и есть главное преимущество KIP-848.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 04: KIP-848 — consumer продолжают работу пока сервер асинхронно вычисляет новое назначение"
+    },
+    {
+      "id": "kafka-m03-exam-q2",
+      "type": "multiple-choice",
+      "question": "Consumer настроен: enable_auto_commit=True, auto_commit_interval_ms=5000. Consumer получил батч из 200 сообщений через poll(), обработал первые 50, затем auto-commit сработал (прошло 5 сек), затем consumer упал. После рестарта с какого offset начнётся чтение?",
+      "options": [
+        {
+          "id": "a",
+          "text": "С offset первого из 200 сообщений батча — auto-commit не работает при частичной обработке"
+        },
+        {
+          "id": "b",
+          "text": "С offset 51-го сообщения — только обработанные 50 были закоммичены"
+        },
+        {
+          "id": "c",
+          "text": "С offset после 200-го сообщения — auto-commit коммитит весь батч сразу"
+        },
+        {
+          "id": "d",
+          "text": "С offset сразу после auto-commit позиции — то есть после 200-го, так как poll() обновил позицию на весь батч"
+        }
+      ],
+      "correctAnswer": "d",
+      "explanation": "Auto-commit коммитит текущую позицию consumer (position), которая обновляется при каждом poll() на все прочитанные записи. После poll() с 200 записями позиция установлена на offset после 200-го сообщения. Auto-commit коммитит эту позицию — не важно, сколько из 200 записей обработано. После рестарта consumer читает с закоммиченной позиции — то есть пропускает оставшиеся 150 необработанных записей. Это at-most-once поведение авто-коммита при долгой обработке.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 02: auto-commit коммитит position из poll(), а не реально обработанный offset"
+    },
+    {
+      "id": "kafka-m03-exam-q3",
+      "type": "multiple-choice",
+      "question": "Consumer группа 'inventory' использует static membership: group.instance.id='inv-0', session.timeout.ms=30000. Consumer Pod перезапустился и поднялся за 45 секунд. Сколько ребалансировок произошло?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0 — static membership предотвращает все ребалансировки"
+        },
+        {
+          "id": "b",
+          "text": "1 — ребалансировка произошла при падении; при возврате с тем же instance.id ребалансировки нет"
+        },
+        {
+          "id": "c",
+          "text": "2 — ребалансировка при падении (через 30 сек session timeout) и ребалансировка при возврате"
+        },
+        {
+          "id": "d",
+          "text": "Ребалансировок нет — coordinator просто ждал 45 секунд без перераспределения"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Рестарт за 45 секунд превысил session.timeout.ms=30 секунд. Последовательность: (1) Consumer падает. Coordinator не получает heartbeat. Через 30 секунд (session.timeout.ms) — coordinator считает 'inv-0' мёртвым, инициирует ребалансировку #1. Партиции переходят к другим consumer. (2) Через 45 секунд consumer возвращается с group.instance.id='inv-0'. Coordinator принимает его как нового участника (хотя и с тем же static ID) — инициирует ребалансировку #2 для возврата партиций. Итого 2 ребалансировки. Static membership помогает только если рестарт укладывается в session.timeout.ms.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 05: static membership помогает только при рестарте быстрее session.timeout.ms"
+    },
+    {
+      "id": "kafka-m03-exam-q4",
+      "type": "multiple-choice",
+      "question": "Три consumer group (A, B, C) читают топик 'logs' с 4 партициями. Group A на offset 10000, Group B на offset 8000, Group C только что создана с auto_offset_reset='earliest'. Producer записывает новое сообщение (offset 10500). Что получит Group C при первом poll()?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Только сообщение с offset 10500 — новейшее сообщение в топике"
+        },
+        {
+          "id": "b",
+          "text": "Все сообщения с offset 0 до 10500 включительно (в пределах retention)"
+        },
+        {
+          "id": "c",
+          "text": "Ошибку — нельзя создать новую группу для топика с существующими данными"
+        },
+        {
+          "id": "d",
+          "text": "Ничего — новая группа начинает читать только после явного commit от другой группы"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Group C новая — нет записей в __consumer_offsets для этой группы. auto_offset_reset='earliest' устанавливает стартовую позицию на начало партиции (offset 0 или первый доступный если часть данных удалена retention). При первом poll() Group C прочитает всю доступную историю топика — от offset 0 до 10500. Другие группы (A, B) не влияют на Group C: каждая группа ведёт независимый offset. Это и есть ключевое преимущество Kafka — несколько независимых consumer groups читают одни данные в своём темпе.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 03: независимые consumer groups; урок 02: auto_offset_reset='earliest'"
+    },
+    {
+      "id": "kafka-m03-exam-q5",
+      "type": "multiple-choice",
+      "question": "Consumer group 'payments' читает топик с 10 партициями. В группе 8 consumer. Инженер хочет добавить ещё 5 consumer для увеличения throughput. Как изменится ситуация?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Все 13 consumer получат партиции, throughput увеличится на 62%"
+        },
+        {
+          "id": "b",
+          "text": "10 consumer получат по 1 партиции, 3 consumer будут idle (без партиций). Чистый выигрыш: 2 consumer переходят от 2-партиционной к 1-партиционной нагрузке"
+        },
+        {
+          "id": "c",
+          "text": "Kafka автоматически создаст 3 новые партиции для дополнительных consumer"
+        },
+        {
+          "id": "d",
+          "text": "Ребалансировка провалится — нельзя иметь больше consumer чем партиций"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Максимальное число активных consumer = число партиций (10). При 13 consumer: 10 получат по 1 партиции, 3 будут idle. До добавления: 8 consumer на 10 партиций — некоторые consumer имели по 2 партиции. После: каждый из 10 активных consumer получает ровно 1 партицию. Реальный выигрыш: 2 consumer, имевших по 2 партиции, теперь работают с 1 — их нагрузка вдвое снижается. Но 3 новых consumer зря потребляют ресурсы. Для использования всех 13 нужно увеличить партиции топика до 13.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 03: максимальный параллелизм = число партиций"
+    },
+    {
+      "id": "kafka-m03-exam-q6",
+      "type": "multiple-choice",
+      "question": "Разработчик написал consumer с циклом: poll() → 10-минутная ML обработка → commit(). Consumer настроен с max.poll.interval.ms=300000 (5 минут). Что произойдёт?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Всё работает нормально — commit() защищает от ребалансировки"
+        },
+        {
+          "id": "b",
+          "text": "Coordinator инициирует ребалансировку через 5 минут после poll() — до завершения обработки"
+        },
+        {
+          "id": "c",
+          "text": "Consumer автоматически продлевает max.poll.interval.ms при долгой обработке"
+        },
+        {
+          "id": "d",
+          "text": "Broker сам ждёт commit() без таймаута"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "max.poll.interval.ms=300000 (5 мин) определяет максимальное время между вызовами poll(). Обработка занимает 10 минут — это больше 5 минут. Через 5 минут без нового poll() coordinator считает consumer мёртвым и инициирует ребалансировку. Consumer продолжает 10-минутную обработку, не зная о ребалансировке. В итоге: двойная ребалансировка (при 'смерти' и при 'возврате'). Решение: увеличить max.poll.interval.ms до 15+ минут ИЛИ уменьшить max_poll_records=1 для меньших батчей ИЛИ вынести ML в отдельный поток и быстро вызывать poll() из основного.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 05: max.poll.interval.ms — независимый таймаут от heartbeat"
+    },
+    {
+      "id": "kafka-m03-exam-q7",
+      "type": "multiple-choice",
+      "question": "Какое значение auto_offset_reset установлено по умолчанию в KafkaConsumer?",
+      "options": [
+        {
+          "id": "a",
+          "text": "earliest — читает с начала топика"
+        },
+        {
+          "id": "b",
+          "text": "latest — читает только новые сообщения"
+        },
+        {
+          "id": "c",
+          "text": "none — выбрасывает исключение если нет committed offset"
+        },
+        {
+          "id": "d",
+          "text": "beginning — синоним earliest"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "По умолчанию auto_offset_reset='latest'. Это означает, что новая consumer group (без committed offset в __consumer_offsets) начнёт читать только сообщения, записанные ПОСЛЕ её старта. Вся предыдущая история топика пропускается. Это поведение часто удивляет разработчиков: consumer подписывается на топик, poll() возвращает пустой результат — потому что нет новых сообщений. Для обработки исторических данных нужно явно установить auto_offset_reset='earliest'.",
+      "bloomLevel": "conceptual",
+      "studyHint": "Урок 02: auto_offset_reset='latest' по умолчанию"
+    },
+    {
+      "id": "kafka-m03-exam-q8",
+      "type": "multiple-choice",
+      "question": "Consumer group 'etl' читает топик 'events' (6 партиций). Инженер использует consumer.assign([TopicPartition('events', 0), TopicPartition('events', 1)]) вместо subscribe(). В чём ключевое отличие с точки зрения fault tolerance?",
+      "options": [
+        {
+          "id": "a",
+          "text": "assign() более надёжен — нет ребалансировки, которая может прервать обработку"
+        },
+        {
+          "id": "b",
+          "text": "assign() не участвует в group coordinator протоколе: при падении consumer его партиции P0 и P1 НЕ будут автоматически переназначены другому consumer"
+        },
+        {
+          "id": "c",
+          "text": "Разницы нет — оба метода обеспечивают одинаковый fault tolerance"
+        },
+        {
+          "id": "d",
+          "text": "assign() автоматически перемещает партиции к backup consumer при падении"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "assign() работает в обход group coordinator — consumer самостоятельно определяет свои партиции без регистрации в group. При падении consumer, использующего assign(), его партиции никуда не переходят — нет другого consumer в группе, который получил бы 'наследство'. P0 и P1 остаются без обработки до ручного восстановления. subscribe() с group coordinator обеспечивает автоматический failover: партиции упавшего consumer перераспределяются между оставшимися. Для production fault-tolerant систем почти всегда нужен subscribe().",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 01: subscribe() vs assign() — fault tolerance"
+    },
+    {
+      "id": "kafka-m03-exam-q9",
+      "type": "multiple-choice",
+      "question": "Разработчик хочет реализовать exactly-once обработку (каждое сообщение обрабатывается ровно один раз) только на стороне consumer (без транзакций Kafka). Это возможно?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Да — достаточно использовать enable_auto_commit=False и commit() перед обработкой"
+        },
+        {
+          "id": "b",
+          "text": "Нет — чисто на стороне consumer without Kafka transactions реализовать exactly-once невозможно. Можно добиться effective exactly-once через at-least-once + идемпотентную обработку"
+        },
+        {
+          "id": "c",
+          "text": "Да — group.protocol=consumer (KIP-848) автоматически обеспечивает exactly-once"
+        },
+        {
+          "id": "d",
+          "text": "Да — достаточно commit() после каждого сообщения (не батча)"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Чистый exactly-once на стороне consumer невозможен без транзакций. При at-least-once: (1) обработка → (2) commit() — возможен crash между шагами = повторная обработка. При at-most-once: (1) commit() → (2) обработка — возможна потеря при crash. Нет commit-стратегии, дающей ровно-один-раз без внешней координации. Practical exactly-once достигается через: at-least-once + идемпотентная запись в downstream (БД upsert по message key, deduplication table). Kafka Streams обеспечивает exactly-once через транзакционный consume-transform-produce паттерн.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 02: at-least-once vs at-most-once семантика"
+    },
+    {
+      "id": "kafka-m03-exam-q10",
+      "type": "multiple-choice",
+      "question": "Consumer group 'reporting' потребляет топик 'sales'. Инженер запускает kafka-consumer-groups.sh --describe и видит: LAG=50000 по всем партициям, CURRENT-OFFSET растёт медленно, LOG-END-OFFSET растёт быстро. Что это означает и как исправить?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Норма — лаг 50000 допустим для batch обработки"
+        },
+        {
+          "id": "b",
+          "text": "Producer пишет быстрее чем consumer обрабатывает. Лаг растёт. Решение: добавить consumer до числа партиций ИЛИ оптимизировать обработку"
+        },
+        {
+          "id": "c",
+          "text": "Consumer group застряла — нужно сбросить offset через --reset-offsets"
+        },
+        {
+          "id": "d",
+          "text": "Broker перегружен — проблема на стороне инфраструктуры, не consumer"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Растущий лаг (CURRENT-OFFSET медленный, LOG-END-OFFSET быстрый) — классический признак того, что producer пишет быстрее, чем consumer группа обрабатывает. 50000 сообщений необработанного backlog. Решения: (1) Добавить consumer в группу — до числа партиций топика (горизонтальное масштабирование); (2) Увеличить max_poll_records для чтения больших батчей; (3) Оптимизировать бизнес-логику обработки; (4) Увеличить число партиций (и consumer). Мониторинг lag через kafka-consumer-groups.sh или метрики kafka_consumer_group_lag_sum — обязательная практика для production consumer.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 03: consumer lag — ключевая метрика health группы"
+    },
+    {
+      "id": "kafka-m03-exam-q11",
+      "type": "multiple-choice",
+      "question": "Consumer использует seek() для повторной обработки событий. consumer.seek(TopicPartition('orders', 0), 1000) вызван ПОСЛЕ subscribe() но ДО первого poll(). Что произойдёт при первом poll()?",
+      "options": [
+        {
+          "id": "a",
+          "text": "poll() немедленно вернёт записи начиная с offset 1000"
+        },
+        {
+          "id": "b",
+          "text": "Ошибка — seek() нельзя вызывать до первого poll()"
+        },
+        {
+          "id": "c",
+          "text": "Первый poll() выполнит JoinGroup/назначение партиций, затем seek() потеряет эффект — позиция сбросится на committed offset или auto_offset_reset"
+        },
+        {
+          "id": "d",
+          "text": "seek() вступит в силу только после явного commit()"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "С subscribe() назначение партиций происходит при первом poll(). Seek() вызванный ДО первого poll() может не иметь эффекта: (1) Первый poll() инициирует JoinGroup/назначение — в этот момент позиция сбрасывается на committed offset (или auto_offset_reset при отсутствии committed). Seek() вызванный до получения назначения теряется. Правильный подход: использовать on_assign callback (при subscribe) или вызывать seek() ПОСЛЕ первого poll() (который устанавливает назначение), или использовать assign() вместо subscribe() — тогда seek() работает сразу.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 01 и 02: seek() и порядок вызовов с subscribe()"
+    },
+    {
+      "id": "kafka-m03-exam-q12",
+      "type": "multiple-choice",
+      "question": "Почему рекомендуется использовать Kubernetes StatefulSet вместо Deployment для Kafka consumer с static membership?",
+      "options": [
+        {
+          "id": "a",
+          "text": "StatefulSet быстрее разворачивается — меньше latency при старте"
+        },
+        {
+          "id": "b",
+          "text": "StatefulSet гарантирует стабильные предсказуемые имена Pod (consumer-0, consumer-1) — они не меняются при рестарте, что обеспечивает стабильный group.instance.id"
+        },
+        {
+          "id": "c",
+          "text": "Deployment не поддерживает переменные окружения — нельзя передать group.instance.id"
+        },
+        {
+          "id": "d",
+          "text": "StatefulSet автоматически настраивает group.protocol=consumer"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "StatefulSet в Kubernetes гарантирует стабильные имена Pod: consumer-0, consumer-1, consumer-2. При рестарте Pod consumer-0 снова получает имя consumer-0. Это ключевое требование для static membership: group.instance.id должен быть одинаковым до и после рестарта. Deployment использует случайно генерируемые суффиксы (consumer-abc123 → consumer-xyz789 после рестарта) — group.instance.id меняется при каждом рестарте, сводя на нет преимущества static membership. StatefulSet + group.instance.id из POD_NAME — рекомендуемый паттерн для production Kafka consumers.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 05: static membership + Kubernetes StatefulSet паттерн"
+    }
+  ]
+}

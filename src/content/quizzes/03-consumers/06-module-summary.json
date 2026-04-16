@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "03-consumers/06-module-summary",
+  "moduleId": "03-consumers",
+  "_meta": {
+    "idPrefix": "kafka-m03-06",
+    "description": "Use IDs: kafka-m03-06-q1, q2, q3, q4 for MC/TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m03-06-q1",
+      "type": "multiple-choice",
+      "question": "Команда разрабатывает consumer для обработки медицинских данных (критичные записи — потеря недопустима, дубликаты допустимы при наличии идемпотентной обработки). Consumer должен работать в Kubernetes. Какая комбинация настроек наиболее подходит?",
+      "options": [
+        {
+          "id": "a",
+          "text": "enable_auto_commit=True, auto_offset_reset='latest', без group.instance.id"
+        },
+        {
+          "id": "b",
+          "text": "enable_auto_commit=False, auto_offset_reset='earliest', group.instance.id='medical-consumer-{pod_ordinal}', session_timeout_ms=60000, group.protocol=consumer"
+        },
+        {
+          "id": "c",
+          "text": "enable_auto_commit=True, auto_offset_reset='earliest', group.protocol=classic"
+        },
+        {
+          "id": "d",
+          "text": "enable_auto_commit=False, auto_offset_reset='latest', assign() вместо subscribe()"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Для критичных данных с запретом на потерю: enable_auto_commit=False (ручной commit после обработки = at-least-once, дубликаты допустимы). auto_offset_reset='earliest' (не пропускать исторические записи при старте новой группы). group.instance.id (stable Pod name из StatefulSet предотвращает ненужные ребалансировки при рестарте). session_timeout_ms=60000 (даём время на рестарт Pod в Kubernetes). group.protocol=consumer (KIP-848 — меньше простоя при ребалансировке, быстрее восстановление после сбоя).",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m03-06-q2",
+      "type": "multiple-choice",
+      "question": "Consumer группа 'analytics' читает топик с 8 партициями. Текущий состав: 4 consumer. Архитектор предлагает добавить ещё 6 consumer (итого 10) для увеличения throughput. Что произойдёт?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Throughput увеличится в 2,5 раза — 10 consumer обработают данные быстрее"
+        },
+        {
+          "id": "b",
+          "text": "Throughput увеличится незначительно: только 8 consumer получат партиции (по одной), 2 consumer будут простаивать без назначения"
+        },
+        {
+          "id": "c",
+          "text": "Kafka автоматически разобьёт партиции на подпартиции для каждого нового consumer"
+        },
+        {
+          "id": "d",
+          "text": "При числе consumer больше числа партиций Kafka выбрасывает исключение"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Максимальный параллелизм consumer group = число партиций топика. При 8 партициях добавление более 8 consumer бесполезно: лишние consumer присоединяются к группе, но не получают ни одной партиции (их просто нет). С 10 consumer: 8 активных + 2 idle (без партиций, простаивают). Throughput может незначительно вырасти если текущие 4 consumer не справлялись (каждый с 2 партициями → каждый с 1 партицией). Для использования всех 10 consumer нужно увеличить число партиций топика до минимум 10.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m03-06-q3",
+      "type": "multiple-choice",
+      "question": "Новая consumer group 'ml-pipeline' создаётся для топика 'events', который существует уже год и содержит 1 терабайт данных. Инженер хочет, чтобы ML-модель обучалась только на данных за последние 7 дней. Какую конфигурацию offset выбрать?",
+      "options": [
+        {
+          "id": "a",
+          "text": "auto_offset_reset='latest' — пропустит всю историю и начнёт с текущего момента"
+        },
+        {
+          "id": "b",
+          "text": "auto_offset_reset='earliest', затем в коде фильтровать записи по timestamp < now - 7 days"
+        },
+        {
+          "id": "c",
+          "text": "consumer.seek() к нужному timestamp через offsetsForTimes() API, чтобы точно начать с 7 дней назад"
+        },
+        {
+          "id": "d",
+          "text": "auto_offset_reset='none' — вручную установить начальный offset через AdminClient"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Для точного старта с определённого момента времени используется seek() в комбинации с offsetsForTimes() (или beginning_offsets/end_offsets для границ). Это позволяет установить позицию consumer ровно на offset, соответствующий 7 дням назад. auto_offset_reset='latest' пропустит всё — в том числе нужные 7 дней. auto_offset_reset='earliest' + фильтрация по timestamp работает, но consumer сначала прочитает 1 ТБ данных за год, что неэффективно. offsetsForTimes() позволяет найти первый offset для нужного timestamp и seek() к нему — оптимальный подход.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m03-06-q4",
+      "type": "true-false",
+      "question": "В Kafka 4.0, если не указать group.protocol явно, consumer использует KIP-848 (ConsumerGroupHeartbeat) по умолчанию.",
+      "correctAnswer": "false",
+      "explanation": "Ложь — это верно для Kafka 4.2, но не для Kafka 4.0. В Kafka 4.0 KIP-848 (group.protocol=consumer) поддерживается сервером, но consumer должен явно opt-in через конфигурацию group.protocol=consumer. Если не указать — используется classic protocol (JoinGroup/SyncGroup). В Kafka 4.2 поведение изменилось: group.protocol=consumer стал значением по умолчанию. Это важное различие: при миграции с Kafka 3.x на 4.0 legacy protocol используется автоматически для обратной совместимости.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

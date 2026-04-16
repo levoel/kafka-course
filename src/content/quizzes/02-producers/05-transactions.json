@@ -1,0 +1,123 @@
+{
+  "lessonSlug": "02-producers/05-transactions",
+  "moduleId": "02-producers",
+  "_meta": {
+    "idPrefix": "kafka-m02-05",
+    "description": "Use IDs: kafka-m02-05-q1, q2, q3 for MC; kafka-m02-05-q4 for TF; kafka-m02-05-code-1 for code challenge"
+  },
+  "questions": [
+    {
+      "id": "kafka-m02-05-q1",
+      "type": "multiple-choice",
+      "question": "Транзакционный продюсер вызвал begin_transaction(), отправил 10 записей в 3 партиции, затем вызвал commit_transaction(). Консьюмер с isolation.level=read_uncommitted читает эти партиции во время commit (до завершения двухфазного коммита). Что он видит?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Ничего — консьюмер с read_uncommitted тоже ждёт завершения транзакции"
+        },
+        {
+          "id": "b",
+          "text": "Все 10 записей плюс промежуточный PREPARE_COMMIT маркер"
+        },
+        {
+          "id": "c",
+          "text": "Все 10 записей — read_uncommitted видит все записи включая незафиксированные (in-flight)"
+        },
+        {
+          "id": "d",
+          "text": "Только записи в первой партиции — COMMIT маркеры пишутся в партиции последовательно"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "isolation.level=read_uncommitted (значение по умолчанию) видит ВСЕ записи сразу после их физического добавления в partition log, независимо от статуса транзакции. Транзакционные записи физически присутствуют в log с момента send() — они помечены как часть транзакции, но read_uncommitted не проверяет этот флаг. Консьюмер увидит все 10 записей сразу. После commit придут COMMIT-маркеры (специальные записи). read_committed же буферизует записи до получения COMMIT или ABORT маркера, поэтому он не видит промежуточных состояний.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m02-05-q2",
+      "type": "multiple-choice",
+      "question": "Два сервиса используют один transactional.id='payment-svc'. Сервис A в данный момент в середине транзакции. Что произойдёт, когда сервис B запустится и вызовет init_transactions()?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Сервис B ожидает завершения транзакции сервиса A перед инициализацией"
+        },
+        {
+          "id": "b",
+          "text": "Transaction Coordinator фехтует сервис A (новая эпоха), откатывает незавершённую транзакцию A, инициализирует сервис B с новой эпохой"
+        },
+        {
+          "id": "c",
+          "text": "Оба сервиса могут работать параллельно с одним transactional.id — это нормальный паттерн масштабирования"
+        },
+        {
+          "id": "d",
+          "text": "Брокер отклоняет init_transactions() от B с ошибкой ProducerAlreadyExistsException"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Transaction Coordinator обрабатывает конфликт transactional.id немедленно. При init_transactions() от сервиса B: (1) координатор инкрементирует эпоху (epoch A+1 → эпоха B), (2) незавершённая транзакция сервиса A откатывается: coordinator рассылает WriteTxnMarkersRequest с ABORT на все зарегистрированные партиции транзакции A, (3) сервис B получает новый PID/epoch и может начинать транзакции. Сервис A продолжит работу с устаревшей эпохой до следующего запроса к broker — тогда получит ProducerFencedException. Поэтому transactional.id должен быть уникальным на каждый активный экземпляр продюсера.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m02-05-q3",
+      "type": "multiple-choice",
+      "question": "Микросервис использует паттерн read-process-write: читает из топика A, обрабатывает, пишет в топик B. Какую конфигурацию нужно добавить для exactly-once semantics?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Только enable.idempotence=True на продюсере — идемпотентность обеспечивает exactly-once"
+        },
+        {
+          "id": "b",
+          "text": "Транзакции (transactional.id) на продюсере + isolation.level=read_committed на консьюмере + атомарный commit offset внутри транзакции (sendOffsetsToTransaction)"
+        },
+        {
+          "id": "c",
+          "text": "enable.auto.commit=false на консьюмере — ручной commit гарантирует exactly-once"
+        },
+        {
+          "id": "d",
+          "text": "acks=all на продюсере + manual commit на консьюмере — достаточно для exactly-once"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Exactly-once в паттерне read-process-write требует атомарности между записью в топик B и коммитом offset из топика A. Идемпотентность решает only дубликаты при retry продюсера, но не согласованность offset/output. Правильная схема: (1) transactional.id на продюсере, (2) sendOffsetsToTransaction() — включает commit offset консьюмера в транзакцию продюсера, (3) begin_transaction(), process(), send() в B, sendOffsetsToTransaction(), commit_transaction() — всё атомарно. (4) isolation.level=read_committed на downstream консьюмерах. Именно это реализует Kafka Streams под капотом с processing.guarantee=exactly_once_v2.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m02-05-q4",
+      "type": "true-false",
+      "question": "Вызов begin_transaction() отправляет сообщение Transaction Coordinator и регистрирует начало транзакции в __transaction_state.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. begin_transaction() — это чисто локальная операция на стороне продюсера. Она только устанавливает внутренний флаг: 'следующие send() являются частью транзакции'. Никаких сетевых запросов не происходит. Transaction Coordinator узнаёт о начале транзакции только при первом вызове send() после begin_transaction() — в этот момент продюсер отправляет AddPartitionsToTxnRequest с информацией о партициях. Coordinator записывает начало транзакции в __transaction_state только тогда. Это оптимизация: если транзакция начата, но нет ни одного send(), координатор вообще не знает об этой 'пустой' транзакции.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m02-05-code-1",
+      "type": "code-challenge",
+      "question": "Создайте транзакционный продюсер (transactional_id='tx-orders'). В рамках одной транзакции отправьте два сообщения: 'order-A' в топик 'orders' и 'payment-A' в топик 'payments'. Зафиксируйте транзакцию и выведите offsets обоих сообщений в формате 'orders offset: {число}' и 'payments offset: {число}'.",
+      "language": "python",
+      "starterCode": "from kafka import KafkaProducer\n\n# TODO: Создайте транзакционный продюсер\nproducer = KafkaProducer(\n    bootstrap_servers=['localhost:9092'],\n    transactional_id='tx-orders',\n)\n\n# TODO: Инициализируйте транзакционную поддержку (один раз)\n\n# TODO: Начните транзакцию\n\n# TODO: Отправьте 'order-A' в топик 'orders'\norders_future = None  # замените\n\n# TODO: Отправьте 'payment-A' в топик 'payments'\npayments_future = None  # замените\n\n# TODO: Зафиксируйте транзакцию\n\n# TODO: Получите metadata и выведите offsets\n# Формат: 'orders offset: {число}' и 'payments offset: {число}'\n\nproducer.close()",
+      "solutionCode": "from kafka import KafkaProducer\n\nproducer = KafkaProducer(\n    bootstrap_servers=['localhost:9092'],\n    transactional_id='tx-orders',\n)\n\nproducer.init_transactions()\n\nproducer.begin_transaction()\n\norders_future = producer.send('orders', value=b'order-A')\npayments_future = producer.send('payments', value=b'payment-A')\n\nproducer.commit_transaction()\n\norders_meta = orders_future.get()\npayments_meta = payments_future.get()\n\nprint(f'orders offset: {orders_meta.offset}')\nprint(f'payments offset: {payments_meta.offset}')\n\nproducer.close()",
+      "testCases": [
+        {
+          "id": "tc1",
+          "description": "Вывод содержит 'orders' — сообщение записано в топик orders",
+          "expectedOutput": "orders",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc2",
+          "description": "Вывод содержит оба offset-значения для orders и payments",
+          "expectedOutput": "payments offset:",
+          "matchMode": "contains",
+          "hidden": true
+        }
+      ],
+      "explanation": "Транзакционный продюсер требует четыре шага: init_transactions() (один раз при старте), begin_transaction(), send() × N, commit_transaction(). begin_transaction() — локальная операция, не отправляет запросов брокеру. Запросы к Transaction Coordinator отправляются при первом send() (AddPartitionsToTxnRequest) и commit_transaction() (EndTxnRequest + WriteTxnMarkersRequest). В kafka_sim.py транзакционные методы реализованы как no-op (нет реального координатора), поэтому записи становятся видимы сразу — в production с isolation.level=read_committed они были бы видимы только после commit.",
+      "bloomLevel": "applied",
+      "useKafkaHelpers": true
+    }
+  ]
+}

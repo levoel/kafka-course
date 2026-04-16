@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "02-producers/06-module-summary",
+  "moduleId": "02-producers",
+  "_meta": {
+    "idPrefix": "kafka-m02-06",
+    "description": "Use IDs: kafka-m02-06-q1, q2, q3 for MC; kafka-m02-06-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m02-06-q1",
+      "type": "multiple-choice",
+      "question": "Payment-сервис требует: (1) атомарная запись в topics 'debits' и 'credits', (2) никакой потери данных при отказе брокера, (3) корректный перезапуск при сбое. Минимально необходимая конфигурация продюсера?",
+      "options": [
+        {
+          "id": "a",
+          "text": "acks=all + enable.idempotence=True — идемпотентность обеспечивает exactly-once и защищает от потери"
+        },
+        {
+          "id": "b",
+          "text": "transactional.id (уникальный) + acks=all (автоматически) + min.insync.replicas=2 на топиках"
+        },
+        {
+          "id": "c",
+          "text": "acks=all + retries=MAX_INT — максимальные retry гарантируют доставку без потерь"
+        },
+        {
+          "id": "d",
+          "text": "acks=1 + enable.idempotence=True — достаточно для большинства payment-сценариев"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Для атомарной записи в несколько топиков нужны транзакции (transactional.id). Это автоматически включает idempotence и устанавливает acks=all. Для защиты от потери данных при отказе брокера нужны min.insync.replicas=2 + replication.factor=3 на топиках. transactional.id обеспечивает корректный перезапуск: новый экземпляр автоматически откатывает незавершённые транзакции предыдущего. Идемпотентность без транзакций не решает атомарность между двумя топиками — она работает только внутри одной партиции.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m02-06-q2",
+      "type": "multiple-choice",
+      "question": "IoT-платформа генерирует 1 млн событий в секунду, каждое событие 200 байт. Потеря до 0.1% событий приемлема. Приоритет — максимальный throughput. Оптимальная конфигурация?",
+      "options": [
+        {
+          "id": "a",
+          "text": "acks=all, linger.ms=0, compression.type=none — надёжность важна для IoT данных"
+        },
+        {
+          "id": "b",
+          "text": "acks=0, linger.ms=50, batch.size=131072, compression.type=lz4 — максимальный throughput, допустимые потери"
+        },
+        {
+          "id": "c",
+          "text": "acks=1, linger.ms=100, batch.size=65536, compression.type=gzip — баланс надёжности и throughput"
+        },
+        {
+          "id": "d",
+          "text": "acks=1, linger.ms=0, compression.type=none — быстро и просто"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Для максимального throughput при допустимых потерях: acks=0 — нет ожидания ACK от broker, максимальная скорость отправки. linger.ms=50 — батч накапливается 50 мс: при 200 байт/событие * 1M событий/сек = 200 MB/сек, за 50 мс = 10 MB — заполняется несколько batch.size=131072 батчей. compression.type=lz4 — быстрое сжатие не является узким местом CPU продюсера, снижает сетевой трафик на 4-8x для типичных IoT JSON/binary данных. acks=all неуместен при допустимых потерях — добавляет latency без пользы. gzip медленнее lz4 — для 1M событий/сек CPU будет узким местом.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m02-06-q3",
+      "type": "multiple-choice",
+      "question": "Продюсер настроен: acks=all, enable.idempotence=True, retries=MAX. Broker leader партиции 0 падает после записи, но до отправки ACK. Что произойдёт?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Данные потеряны — acks=all требует ответа от упавшего leader, новый leader не знает о записи"
+        },
+        {
+          "id": "b",
+          "text": "Продюсер сделает retry, new leader (бывший follower) имеет запись (replicated до падения), вернёт ACK. Запись не дублируется благодаря idempotence."
+        },
+        {
+          "id": "c",
+          "text": "Продюсер немедленно получит ошибку LeaderNotAvailableException без retry"
+        },
+        {
+          "id": "d",
+          "text": "Данные записаны дважды — retry добавляет дубликат, idempotence не защищает при смене leader"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "С acks=all запись была реплицирована на все ISR-реплики ДО того, как leader отправил ACK (это требование acks=all). При падении leader новый leader (из ISR) уже имеет эту запись. Продюсер получает LeaderNotAvailableException (retriable) и делает retry. Новый leader получает запись с тем же PID+sequence. Поскольку запись уже есть (sequence <= last_seq), идемпотентность отбрасывает дубликат и возвращает ACK. Итог: запись одна, доставка подтверждена. Это именно та гарантия, которую обеспечивает комбинация acks=all + idempotence.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m02-06-q4",
+      "type": "true-false",
+      "question": "Транзакционный продюсер автоматически откатывает незавершённые транзакции предыдущего экземпляра при вызове init_transactions() с тем же transactional.id.",
+      "correctAnswer": "true",
+      "explanation": "Верно. init_transactions() делает именно это: Transaction Coordinator находит незавершённые транзакции для данного transactional.id (статус ONGOING или PREPARE_COMMIT/PREPARE_ABORT), автоматически откатывает их (рассылает ABORT markers в соответствующие партиции), затем инкрементирует эпоху и инициализирует новый продюсер. Это гарантирует, что незафиксированные данные предыдущего экземпляра не станут видимы консьюмерам с read_committed. Именно поэтому transactional.id должен быть стабильным между перезапусками — чтобы механизм восстановления работал корректно.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

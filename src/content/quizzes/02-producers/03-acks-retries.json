@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "02-producers/03-acks-retries",
+  "moduleId": "02-producers",
+  "_meta": {
+    "idPrefix": "kafka-m02-03",
+    "description": "Use IDs: kafka-m02-03-q1, q2, q3 for MC; kafka-m02-03-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m02-03-q1",
+      "type": "multiple-choice",
+      "question": "Топик настроен: replication.factor=3, min.insync.replicas=2. Продюсер: acks=all. Один follower отстаёт и выпадает из ISR (ISR теперь содержит leader + 1 follower = 2 реплики). Что произойдёт при следующей записи продюсера?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Запись будет отклонена с NotEnoughReplicasException — ISR меньше min.insync.replicas"
+        },
+        {
+          "id": "b",
+          "text": "Запись будет принята — ISR=2 удовлетворяет min.insync.replicas=2"
+        },
+        {
+          "id": "c",
+          "text": "Запись будет принята без подтверждения follower'а — Kafka автоматически понижает acks до 1"
+        },
+        {
+          "id": "d",
+          "text": "Kafka ждёт возврата отставшего follower'а в ISR перед принятием записи"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "ISR=2 (leader + 1 follower in-sync) удовлетворяет min.insync.replicas=2. Запись будет принята и подтверждена обеими репликами в ISR. Параметр min.insync.replicas — это МИНИМУМ, не точное количество. Если бы второй follower тоже выпал из ISR (ISR=1), тогда запись была бы отклонена с NotEnoughReplicasException, потому что 1 < min.insync.replicas=2. Топик с RF=3 и min.isr=2 может продолжать принимать записи при отказе одного из трёх брокеров.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m02-03-q2",
+      "type": "multiple-choice",
+      "question": "Архитектор настроил продюсер: acks=all, min.insync.replicas=1, replication.factor=3. Насколько это конфигурация лучше acks=1 по надёжности?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Значительно лучше — acks=all требует подтверждения всех трёх реплик, не только leader"
+        },
+        {
+          "id": "b",
+          "text": "Нет никакой разницы — при ISR=1 Kafka ждёт подтверждения только от одной реплики (leader), что идентично acks=1"
+        },
+        {
+          "id": "c",
+          "text": "Немного лучше — acks=all всегда ждёт хотя бы двух реплик, даже при min.insync.replicas=1"
+        },
+        {
+          "id": "d",
+          "text": "Хуже — acks=all увеличивает latency без улучшения надёжности при такой конфигурации"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "acks=all с min.insync.replicas=1 эквивалентно acks=1 по надёжности. При acks=all Kafka ждёт подтверждения от ВСЕХ реплик в ISR. Если ISR содержит только leader (size=1), то acks=all ждёт только от leader — идентично acks=1. Гарантия надёжности acks=all — 'все in-sync реплики подтвердили'. Если ISR=1, это означает 'одна реплика (leader) подтвердила'. При падении leader до репликации данные теряются так же, как и при acks=1. Правильный рецепт: acks=all + min.insync.replicas=2 + replication.factor=3.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m02-03-q3",
+      "type": "multiple-choice",
+      "question": "Продюсер настроен: retries=5, max.in.flight.requests.per.connection=5, enable.idempotence=False. Батч 1 отправлен и потерян в сети. Батч 2 успешно доставлен. Батч 1 retry — также успешно. В каком порядке записи появятся в партиции?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Батч 1, Батч 2 — retry всегда ждёт пока предыдущие батчи не завершатся"
+        },
+        {
+          "id": "b",
+          "text": "Батч 2, Батч 1 — порядок нарушен: батч 2 доставлен раньше retry батча 1"
+        },
+        {
+          "id": "c",
+          "text": "Оба батча в случайном порядке — Kafka не гарантирует порядок при нескольких in-flight запросах"
+        },
+        {
+          "id": "d",
+          "text": "Только Батч 2 — Батч 1 отброшен как дубликат после retry"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "При max.in.flight.requests.per.connection > 1 несколько запросов могут быть 'в полёте' одновременно. Когда батч 1 теряется, батч 2 продолжает своё движение независимо и успешно доставляется первым. При retry батч 1 записывается после батча 2 — порядок нарушен. Решения: (1) max.in.flight.requests.per.connection=1 — только один запрос в полёте, строгий порядок, но ниже throughput. (2) enable.idempotence=True — broker сам восстанавливает порядок через sequence numbers, допуская до 5 in-flight запросов. Идемпотентность — рекомендуемое решение.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m02-03-q4",
+      "type": "true-false",
+      "question": "Ошибка INVALID_TOPIC_EXCEPTION является retriable — продюсер автоматически повторит отправку в несуществующий топик.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. INVALID_TOPIC_EXCEPTION — это non-retriable ошибка. Retry не имеет смысла: если топик не существует и auto.create.topics.enable=false на брокере, повторная отправка в тот же топик всегда будет давать ту же ошибку. Retriable ошибки — те, которые могут быть исправлены автоматически со временем: LEADER_NOT_AVAILABLE (leader переизбирается), NOT_ENOUGH_REPLICAS (реплики возвращаются в ISR), REQUEST_TIMED_OUT (временная сетевая проблема). Приложение должно обрабатывать non-retriable ошибки через add_errback() и принимать решение (алерт, dead-letter queue, остановка).",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

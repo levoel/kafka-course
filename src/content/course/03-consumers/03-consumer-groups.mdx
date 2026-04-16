@@ -1,0 +1,344 @@
+---
+title: "Consumer Groups"
+description: "group.id, partition assignment, group coordinator — параллельная обработка данных"
+order: 3
+difficulty: "intermediate"
+estimatedTime: 25
+topics: ["Consumer Groups", "group.id", "Partition Assignment", "Group Coordinator"]
+---
+
+# Consumer Groups
+
+Consumer groups — это механизм горизонтального масштабирования потребления данных из Kafka. Идея проста: несколько consumer объединяются в группу с общим `group.id` и совместно читают партиции топика — каждая партиция назначается ровно одному consumer в группе. Добавляете consumer — нагрузка распределяется. Убираете consumer — его партиции переходят к остальным.
+
+---
+
+## group.id: логическое имя группы
+
+`group.id` — это строковой идентификатор, объединяющий consumer в одну группу. Все consumer с одним `group.id` кооперируют друг с другом через **group coordinator** — специальный брокер, ответственный за управление группой.
+
+<DiagramContainer title="Роль group.id" color="amber">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="input"
+        size="md"
+        tooltip="Consumer 1: group_id='analytics'. Один из трёх экземпляров группы. Получит назначение на некоторые партиции топика 'events'."
+      >
+        Consumer 1 (group_id='analytics')
+      </FlowNode>
+      <FlowNode
+        variant="input"
+        size="md"
+        tooltip="Consumer 2: тот же group_id='analytics'. Является частью той же группы. Breker назначит ему непересекающийся набор партиций."
+      >
+        Consumer 2 (group_id='analytics')
+      </FlowNode>
+      <FlowNode
+        variant="input"
+        size="md"
+        tooltip="Consumer 3: тот же group_id='analytics'. Третий участник группы. Все три consumer вместе покрывают весь топик."
+      >
+        Consumer 3 (group_id='analytics')
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <Arrow direction="down" label="координация" />
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="service"
+        size="lg"
+        tooltip="Group Coordinator: брокер, ответственный за управление этой consumer group. Определяется по формуле: hash(group.id) % num_partitions(__consumer_offsets). Хранит committed offsets группы в __consumer_offsets."
+      >
+        Group Coordinator (broker)
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <Arrow direction="down" label="назначение партиций" />
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="queue"
+        size="sm"
+        tooltip="Partition 0 → Consumer 1. Только Consumer 1 читает эту партицию в данной группе."
+      >
+        P0 → C1
+      </FlowNode>
+      <FlowNode
+        variant="queue"
+        size="sm"
+        tooltip="Partition 1 → Consumer 1. Consumer 1 получил две партиции (топик 6 партиций, 3 consumer → по 2 каждому)."
+      >
+        P1 → C1
+      </FlowNode>
+      <FlowNode
+        variant="queue"
+        size="sm"
+        tooltip="Partition 2 → Consumer 2. Consumer 2 читает свои две партиции независимо от C1 и C3."
+      >
+        P2 → C2
+      </FlowNode>
+      <FlowNode
+        variant="queue"
+        size="sm"
+        tooltip="Partition 3 → Consumer 2. Назначение равномерное: 6 партиций / 3 consumer = 2 на каждого."
+      >
+        P3 → C2
+      </FlowNode>
+      <FlowNode
+        variant="queue"
+        size="sm"
+        tooltip="Partition 4 → Consumer 3. Consumer 3 обрабатывает свои два потока данных независимо."
+      >
+        P4 → C3
+      </FlowNode>
+      <FlowNode
+        variant="queue"
+        size="sm"
+        tooltip="Partition 5 → Consumer 3. Полное покрытие топика: все 6 партиций читаются параллельно тремя consumer."
+      >
+        P5 → C3
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+---
+
+## Назначение партиций
+
+Назначение партиций происходит через алгоритм **partition assignment strategy**. Kafka поддерживает несколько стратегий:
+
+- **RangeAssignor** (по умолчанию в legacy protocol): последовательные партиции назначаются consumer по диапазонам
+- **RoundRobinAssignor**: партиции распределяются по очереди, более равномерно при нескольких топиках
+- **StickyAssignor**: минимизирует перемещение партиций при ребалансировке
+- **CooperativeStickyAssignor**: cooperative incremental ребалансировка с минимальным прерыванием
+- **Server-side assignment (KIP-848)**: брокер сам управляет назначением — consumer только сообщают о желаемых топиках
+
+<Callout type="note">
+В KIP-848 (Kafka 4.0 с `group.protocol=consumer`) назначение партиций полностью перешло на сторону сервера. Consumer больше не участвует в синхронизации — брокер управляет assignment асинхронно через ConsumerGroupHeartbeat API. Подробнее в уроке 04 этого модуля.
+</Callout>
+
+---
+
+## ConsumerGroupDiagram: визуализация группы
+
+<ConsumerGroupDiagram />
+
+Диаграмма выше показывает типичное распределение для группы из 2 consumer и 4 партиций: Consumer 0 получает P0 и P1, Consumer 1 получает P2 и P3. Group Coordinator хранит offsets в `__consumer_offsets`.
+
+---
+
+## Group Coordinator: выбор и роль
+
+**Group Coordinator** — это брокер, ответственный за жизненный цикл конкретной consumer group. Он определяется детерминированно:
+
+```
+coordinator_partition = hash(group.id) % num_partitions(__consumer_offsets)
+coordinator_broker = leader(partition coordinator_partition of __consumer_offsets)
+```
+
+По умолчанию `__consumer_offsets` имеет 50 партиций. Для `group.id='analytics'`: если `hash('analytics') % 50 = 12`, то coordinator — это брокер, который является лидером партиции 12 топика `__consumer_offsets`.
+
+**Обязанности Group Coordinator:**
+
+<DiagramContainer title="Group Coordinator — функции" color="blue">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="service"
+        size="md"
+        tooltip="Хранение offsets: coordinator хранит текущие закоммиченные offsets всех consumer group в топике __consumer_offsets. При рестарте consumer получает последний закоммиченный offset именно от coordinator."
+      >
+        Хранение committed offsets
+      </FlowNode>
+      <FlowNode
+        variant="cluster"
+        size="md"
+        tooltip="Управление membership: coordinator отслеживает, какие consumer активны в группе. При потере heartbeat от consumer — инициирует ребалансировку."
+      >
+        Управление составом группы
+      </FlowNode>
+      <FlowNode
+        variant="process"
+        size="md"
+        tooltip="Координация ребалансировки: при изменении состава группы coordinator организует протокол JoinGroup/SyncGroup (legacy) или управляет сервер-driven assignment (KIP-848)."
+      >
+        Координация ребалансировки
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="monitoring"
+        size="md"
+        tooltip="Heartbeat обработка: consumer регулярно отправляют HeartbeatRequest (legacy) или ConsumerGroupHeartbeat (KIP-848). Coordinator следит за session timeout для каждого члена."
+      >
+        Обработка heartbeat
+      </FlowNode>
+      <FlowNode
+        variant="storage"
+        size="md"
+        tooltip="Commit offsets: координирует получение OffsetCommitRequest от consumer и запись в __consumer_offsets. Синхронный commit блокирует consumer до получения ack."
+      >
+        Приём commit offset запросов
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+---
+
+## Масштабирование: consumer vs партиции
+
+Максимальный параллелизм consumer group ограничен числом партиций топика. Это фундаментальное ограничение архитектуры.
+
+<DiagramContainer title="Consumer vs Партиции: правило масштабирования" color="emerald">
+  <div className="space-y-4 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="process"
+        size="md"
+        tooltip="Оптимальный случай: 4 партиции, 4 consumer. Каждый consumer получает ровно 1 партицию. Максимальный параллелизм при полном использовании ресурсов."
+      >
+        4 партиции = 4 consumer (оптимально)
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="cluster"
+        size="md"
+        tooltip="Недостаток consumer: 4 партиции, 2 consumer. Каждый consumer получает 2 партиции. Throughput ниже, но корректно. Добавление 2 consumer восстановит параллелизм."
+      >
+        4 партиции, 2 consumer — нормально
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Избыток consumer: 4 партиции, 6 consumer. Только 4 consumer получат партиции. 2 consumer будут простаивать — партиций на всех не хватает. Это не ошибка, но 2 слота простаивают зря."
+      >
+        4 партиции, 6 consumer — 2 idle (пустые)
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+```python
+# Правило: добавляем consumer до num_partitions — дальше бессмысленно
+# Увеличить параллелизм можно только увеличив число партиций топика
+
+from kafka import KafkaConsumer
+
+# Consumer 1 — в группе 'payments-group'
+consumer1 = KafkaConsumer(
+    bootstrap_servers=['localhost:9092'],
+    group_id='payments-group',
+    auto_offset_reset='earliest',
+)
+consumer1.subscribe(['payments'])
+
+# Consumer 2 — в той же группе 'payments-group'
+consumer2 = KafkaConsumer(
+    bootstrap_servers=['localhost:9092'],
+    group_id='payments-group',
+    auto_offset_reset='earliest',
+)
+consumer2.subscribe(['payments'])
+# consumer1 и consumer2 поделят партиции топика 'payments' между собой
+```
+
+---
+
+## Несколько consumer groups: независимое чтение
+
+Различные consumer groups читают один топик **полностью независимо**. Каждая группа ведёт свои offsets. Это ключевое отличие Kafka от традиционных message broker.
+
+<DiagramContainer title="Несколько consumer groups — независимое чтение" color="purple">
+  <div className="space-y-4 p-2">
+    <FlowRow>
+      <DataBox
+        label="Topic: orders (3 партиции)"
+        tooltip="Топик 'orders' содержит все заказы. Каждая из трёх consumer groups читает его независимо, ведя свои offsets."
+      >
+        P0 | P1 | P2
+      </DataBox>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="process"
+        size="md"
+        tooltip="group_id='billing': читает все заказы для выставления счетов. Offset этой группы — 5000. Другие группы не влияют на этот offset."
+      >
+        billing-group (offset=5000)
+      </FlowNode>
+      <FlowNode
+        variant="process"
+        size="md"
+        tooltip="group_id='analytics': читает те же заказы для аналитики. Может быть на offset=3000 — отстаёт, но это не проблема."
+      >
+        analytics-group (offset=3000)
+      </FlowNode>
+      <FlowNode
+        variant="process"
+        size="md"
+        tooltip="group_id='notifications': читает заказы для отправки уведомлений. Offset=4500. Три независимых потока обработки одних данных."
+      >
+        notifications-group (offset=4500)
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+```python
+# Три разные группы — три независимых потребителя одного топика
+billing_consumer = KafkaConsumer(
+    bootstrap_servers=['localhost:9092'],
+    group_id='billing-group',   # отдельный offset
+)
+analytics_consumer = KafkaConsumer(
+    bootstrap_servers=['localhost:9092'],
+    group_id='analytics-group', # свой независимый offset
+)
+# Обе группы читают топик 'orders' — полностью независимо
+billing_consumer.subscribe(['orders'])
+analytics_consumer.subscribe(['orders'])
+```
+
+<Callout type="tip">
+Это именно то, что отличает Kafka от RabbitMQ: в RabbitMQ сообщение удаляется после первого получателя. В Kafka три consumer group получают одинаковые данные без дублирования в топике — каждая ведёт свой offset. Новая group, созданная с `auto_offset_reset='earliest'`, прочитает всю историю с начала, не мешая другим группам.
+</Callout>
+
+---
+
+## Мониторинг consumer group lag
+
+**Consumer lag** — это разница между последним записанным offset (Log End Offset, LEO) и последним закоммиченным offset группы. Лаг показывает, насколько группа отстаёт от продюсеров.
+
+```bash
+# CLI: мониторинг лага consumer group (Kafka 4.0)
+kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 \
+  --describe \
+  --group analytics-group
+
+# Пример вывода:
+# GROUP           TOPIC   PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
+# analytics-group orders  0          5000            5200            200
+# analytics-group orders  1          4800            5100            300
+# analytics-group orders  2          5100            5100            0
+```
+
+Суммарный лаг `200 + 300 + 0 = 500` означает, что группа не обработала 500 сообщений. Если лаг растёт — producer пишет быстрее, чем consumer обрабатывает. Решение: добавить consumer (до числа партиций) или увеличить число партиций.
+
+---
+
+## Итог
+
+Consumer groups — фундаментальный механизм масштабирования потребления в Kafka. `group.id` объединяет consumer. Group coordinator управляет назначением партиций и offsets. Максимальный параллелизм = число партиций. Несколько groups читают независимо. Лаг — ключевая метрика здоровья группы.
+
+<KnowledgeCheck
+  question="Топик 'events' имеет 4 партиции. В consumer group 'analytics' работают 6 consumer. Что произойдёт?"
+  answer="Только 4 consumer получат назначение по одной партиции каждый. Оставшиеся 2 consumer будут простаивать — они присоединены к группе, но не получили ни одной партиции, поскольку партиций меньше, чем consumer. Это не ошибка, но 2 consumer расходуют ресурсы впустую. Для использования всех 6 consumer нужно увеличить число партиций топика до 6 (или кратного 6)."
+/>

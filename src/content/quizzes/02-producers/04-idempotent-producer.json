@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "02-producers/04-idempotent-producer",
+  "moduleId": "02-producers",
+  "_meta": {
+    "idPrefix": "kafka-m02-04",
+    "description": "Use IDs: kafka-m02-04-q1, q2, q3 for MC; kafka-m02-04-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m02-04-q1",
+      "type": "multiple-choice",
+      "question": "Идемпотентный продюсер (PID=100) отправляет батч с sequence=5 в partition 0. ACK теряется в сети. Продюсер делает retry, отправляя тот же батч с sequence=5. Как реагирует брокер?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Брокер записывает батч повторно (offset 6) и возвращает новый ACK с обновлённым offset"
+        },
+        {
+          "id": "b",
+          "text": "Брокер обнаруживает дубликат (last_seq=5, retry_seq=5 <= last_seq), не записывает батч повторно, но возвращает ACK — продюсер считает операцию успешной"
+        },
+        {
+          "id": "c",
+          "text": "Брокер возвращает DuplicateSequenceException — продюсер должен вручную обработать дубликат"
+        },
+        {
+          "id": "d",
+          "text": "Брокер игнорирует retry без ответа — продюсер повторит ещё раз по таймауту"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Механизм идемпотентности: брокер хранит last_sequence(PID, partition). При получении батча с seq <= last_seq — это дубликат (повторная отправка). Брокер НЕ записывает батч в log (не создаёт дубликат), но возвращает успешный ACK с тем же offset, что был при первой записи. Продюсер считает доставку успешной. Таким образом, retry при потере ACK не создаёт дубликатов — exactly-once семантика на уровне партиции.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m02-04-q2",
+      "type": "multiple-choice",
+      "question": "Продюсер v1 с transactional.id='orders-svc' и epoch=2 пишет в partition 0. Из-за GC pause продюсер v1 завис на 30 секунд. Стартует продюсер v2 с тем же transactional.id='orders-svc'. Что происходит с продюсером v1 при следующей попытке записи?",
+      "options": [
+        {
+          "id": "a",
+          "text": "v1 продолжает запись — брокер разрешает одновременную работу двух экземпляров с одним transactional.id"
+        },
+        {
+          "id": "b",
+          "text": "v1 получает ProducerFencedException — его epoch=2 устарела, broker присвоил epoch=3 продюсеру v2"
+        },
+        {
+          "id": "c",
+          "text": "v2 получает ошибку — transactional.id занят активным продюсером v1"
+        },
+        {
+          "id": "d",
+          "text": "Оба получают новый PID и продолжают работу независимо"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Это механизм epoch fencing. Когда v2 вызывает init_transactions() с тем же transactional.id, брокер инкрементирует эпоху: v2 получает epoch=3. Когда v1 (с устаревшей epoch=2) пытается написать, broker сравнивает эпохи: 2 < 3 — v1 'зафехтован'. Брокер отклоняет запросы v1 с ProducerFencedException. v1 должен поймать это исключение и завершиться (не продолжать запись). Это предотвращает 'зомби-продюсер' сценарий: два экземпляра пишут несогласованные данные в одни и те же партиции.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m02-04-q3",
+      "type": "multiple-choice",
+      "question": "Идемпотентный продюсер (enable.idempotence=True) отправляет запись в topic 'payments'/partition=0 (seq=10) и в topic 'notifications'/partition=0 (seq=10). Что гарантирует идемпотентность в этом сценарии?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Атомарность: либо обе записи в обоих топиках присутствуют, либо ни одна — гарантия кросс-партиционной атомарности"
+        },
+        {
+          "id": "b",
+          "text": "Exactly-once для каждой партиции независимо: повторная отправка не создаст дубликат в payments/0 И не создаст дубликат в notifications/0, но они могут быть несогласованы (одна запись есть, другой нет)"
+        },
+        {
+          "id": "c",
+          "text": "Порядок между топиками: payments/0 всегда записывается раньше notifications/0"
+        },
+        {
+          "id": "d",
+          "text": "Ничего — идемпотентность не работает для нескольких топиков одновременно"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Идемпотентность работает на уровне отдельной (PID, TopicPartition) пары. Брокер payments хранит last_seq(PID=42, payments/0)=10 и брокер notifications хранит last_seq(PID=42, notifications/0)=10 независимо. Повторная отправка не создаст дубликатов в каждой из партиций. НО атомарности между топиками нет: если отправка в payments прошла, а в notifications завершилась с ошибкой — одна запись есть, другой нет. Для кросс-партиционной атомарности нужны транзакции (следующий урок).",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m02-04-q4",
+      "type": "true-false",
+      "question": "В Kafka 3.0+ параметр enable.idempotence имеет значение true по умолчанию, и для его активации не требуется явная настройка продюсера.",
+      "correctAnswer": "true",
+      "explanation": "Верно. Начиная с Kafka 3.0, enable.idempotence=true является значением по умолчанию. При этом автоматически устанавливаются: acks=all, retries=Integer.MAX_VALUE, max.in.flight.requests.per.connection=5. Продюсер без явной настройки в Kafka 3.0+ автоматически является идемпотентным. Для отключения идемпотентности нужно явно указать enable.idempotence=false и также явно установить acks (иначе конфигурационный конфликт). До Kafka 3.0 значение по умолчанию было false — идемпотентность нужно было включать явно.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}
