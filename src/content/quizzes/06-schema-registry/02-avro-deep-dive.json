@@ -67,22 +67,25 @@
       "solutionCode": "{\n  \"type\": \"record\",\n  \"name\": \"Payment\",\n  \"namespace\": \"com.example.kafka\",\n  \"fields\": [\n    {\"name\": \"id\", \"type\": \"int\"},\n    {\"name\": \"amount\", \"type\": \"double\"},\n    {\"name\": \"currency\", \"type\": \"string\", \"default\": \"USD\"},\n    {\"name\": \"description\", \"type\": [\"null\", \"string\"], \"default\": null}\n  ]\n}",
       "testCases": [
         {
+          "id": "tc1",
           "description": "Схема содержит имя типа Payment",
-          "check": "contains",
-          "value": "Payment",
-          "visible": true
+          "expectedOutput": "Payment",
+          "matchMode": "contains",
+          "hidden": false
         },
         {
+          "id": "tc2",
           "description": "Поле currency присутствует в схеме",
-          "check": "contains",
-          "value": "currency",
-          "visible": true
+          "expectedOutput": "currency",
+          "matchMode": "contains",
+          "hidden": false
         },
         {
+          "id": "tc3",
           "description": "Опциональные поля имеют default-значение",
-          "check": "contains",
-          "value": "default",
-          "visible": false
+          "expectedOutput": "default",
+          "matchMode": "contains",
+          "hidden": true
         }
       ],
       "explanation": "BACKWARD-совместимая схема требует, чтобы все поля либо были обязательными (присутствуют в старых данных), либо имели default-значение (для подстановки при чтении старых данных). Поле currency с default 'USD' — корректный паттерн: старые данные без этого поля получат значение USD при чтении новым reader. Поле description через union [null, string] с default null — стандартный паттерн опционального поля в Avro. При добавлении нового опционального поля в будущем — тот же паттерн гарантирует BACKWARD-совместимость.",
