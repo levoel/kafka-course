@@ -1,0 +1,398 @@
+---
+title: "RPO/RTO и процедуры Failover"
+description: "Recovery Point Objective и Recovery Time Objective в контексте MM2: метрики, оптимизация, пошаговые процедуры failover и failback, мониторинг через JMX и Prometheus"
+order: 4
+free: false
+estimatedTime: 30
+topics: ["RPO", "RTO", "Failover", "Failback", "MM2 Monitoring", "JMX", "Disaster Recovery"]
+---
+
+# RPO/RTO и процедуры Failover
+
+Понимание MM2 архитектуры и offset трансляции — необходимые, но недостаточные знания для эксплуатации Multi-DC Kafka. Вам нужно уметь отвечать на вопросы: "Сколько данных мы потеряем при сбое?" и "Сколько времени займёт восстановление?". Это RPO и RTO. И вам нужен работающий runbook — последовательность конкретных шагов, которую можно выполнить под давлением инцидента в 3 часа ночи.
+
+---
+
+## RPO: Recovery Point Objective
+
+**RPO** — максимальный допустимый объём потерянных данных, выражённый во времени. Если RPO = 30 секунд, это значит: при сбое первичного кластера допустима потеря не более 30 секунд данных.
+
+В контексте MM2, RPO определяется задержкой репликации в момент сбоя:
+
+```
+RPO = replication_lag_at_time_of_failure
+```
+
+Если MM2 в момент сбоя DC-1 имел задержку репликации 5 секунд, то 5 секунд данных, уже записанных на DC-1, ещё не попали на DC-2. Эти данные будут потеряны (или обработаны повторно, если producer использовал идемпотентность и данные можно восстановить).
+
+### Ключевая JMX-метрика для RPO
+
+```
+kafka.mirror:type=MirrorSourceConnector,target=dc2
+  - replication-latency-ms-avg: средняя задержка репликации за последние N секунд
+  - replication-latency-ms-max: максимальная задержка за окно
+```
+
+Формула максимального RPO за окно наблюдения:
+
+```
+RPO_max = max(replication-latency-ms-max) / 1000  (в секундах)
+```
+
+### Факторы, влияющие на RPO
+
+**Сетевая задержка между DC.** Физическое расстояние между дата-центрами определяет нижний предел задержки репликации. Два DC в одном городе: 1-5ms. DC в разных странах: 50-100ms. DC на разных континентах: 100-300ms.
+
+**tasks.max MirrorSourceConnector.** Каждый task реплицирует несколько партиций. Увеличение tasks.max увеличивает параллелизм репликации и снижает lag при высокой нагрузке.
+
+**emit.checkpoints.interval.seconds.** Непосредственно влияет на RPO в смысле повторной обработки (подробно в уроке 03). Это checkpoint RPO, не data RPO.
+
+**Пропускная способность сети.** Если суммарный объём данных больше bandwidth канала между DC, репликация не успевает за записью. Контролируйте `byte-rate` метрику.
+
+### Типичные значения RPO
+
+| Конфигурация | Типичный RPO |
+|--------------|-------------|
+| DC в одном здании (cross-site), 10Gbps | 100ms - 1 секунда |
+| DC в одном городе, 1Gbps | 1-5 секунд |
+| DC в разных странах | 10-60 секунд |
+| DC на разных континентах | 1-5 минут |
+
+---
+
+## RTO: Recovery Time Objective
+
+**RTO** — максимальное допустимое время от момента обнаружения сбоя до полного восстановления сервиса.
+
+RTO складывается из нескольких последовательных фаз:
+
+<DiagramContainer title="RTO: компоненты времени восстановления" color="red">
+  <div className="space-y-4 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">Каждый блок — независимая фаза восстановления. Сумма = RTO.</div>
+    <FlowRow gap={3} justify="center" align="stretch">
+      <DataBox
+        label="Обнаружение сбоя"
+        tooltip="1-5 минут. Мониторинг heartbeat-топика: alert если heartbeat_age > 30 секунд. Prometheus alert: kafka_mirror_heartbeat_age_seconds > 30 срабатывает через max(1 мин) с учётом scrape interval. Время от реального сбоя до алерта = alerting_pipeline_latency."
+      >
+        1-5 мин
+      </DataBox>
+      <Arrow direction="right" tooltip="После срабатывания алерта -- ручное или автоматическое подтверждение что DC-1 действительно недоступен (не false positive). Проверка: telnet dc1-broker1 9092, ping, curl health endpoint." />
+      <DataBox
+        label="DNS / Load Balancer"
+        tooltip="1-10 минут. DNS TTL определяет скорость распространения изменения. При TTL=300 (5 мин): клиенты продолжают обращаться к DC-1 ещё 5 минут. Снижение TTL до 60 секунд: сокращает эту фазу до 1 минуты. Route53 / Cloudflare: propagation обычно < 60 секунд при низком TTL."
+      >
+        1-10 мин
+      </DataBox>
+      <Arrow direction="right" tooltip="Параллельно с DNS: трансляция offset'ов consumer groups. При sync.group.offsets.enabled=true: уже выполнено автоматически. Иначе: failover-скрипт с RemoteClusterUtils.translateOffsets()." />
+      <DataBox
+        label="Трансляция offset'ов"
+        tooltip="0-2 минуты. При sync.group.offsets.enabled=true: offset'ы уже переведены автоматически на DC-2. Этот шаг занимает 0 минут. Без автоматической синхронизации: выполнение failover-скрипта занимает 1-2 минуты в зависимости от числа consumer groups."
+      >
+        0-2 мин
+      </DataBox>
+      <Arrow direction="right" tooltip="После DNS переключения клиенты начинают подключаться к DC-2. Приложения нужно перезапустить (или они автоматически переподключатся при потере соединения с DC-1)." />
+      <DataBox
+        label="Перезапуск приложений"
+        tooltip="1-5 минут. Kubernetes: rolling update с новым KAFKA_BOOTSTRAP_SERVERS. Или: отдельный ConfigMap с bootstrap.servers, приложение читает при старте. Если DNS TTL настроен правильно, приложения сами подключатся к DC-2 при следующем bootstrap."
+      >
+        1-5 мин
+      </DataBox>
+      <Arrow direction="right" tooltip="Финальная верификация: consumer lag снижается, producer throughput восстановлен, мониторинг показывает нормальные значения на DC-2." />
+      <DataBox
+        label="Верификация"
+        tooltip="1-3 минуты. Проверка: records-lag-max для всех consumer groups снижается (не растёт), BytesInPerSec на DC-2 соответствует ожидаемой нагрузке, нет UnderReplicatedPartitions на DC-2, error rate в приложениях вернулась к норме."
+      >
+        1-3 мин
+      </DataBox>
+    </FlowRow>
+    <div className="text-center text-sm text-slate-400 mt-2 font-medium">Итого RTO: 5-25 минут | При автоматизации: 3-10 минут</div>
+  </div>
+</DiagramContainer>
+
+### Снижение RTO
+
+**Низкий DNS TTL.** Установите TTL = 30-60 секунд для DNS-записей Kafka bootstrap servers. Это сокращает фазу DNS propagation с 5 минут до 1 минуты. Риск: незначительное увеличение DNS query rate.
+
+**sync.group.offsets.enabled=true.** Устраняет фазу ручной трансляции offset'ов. Экономия: 1-2 минуты.
+
+**Pre-warm consumers на DR.** Держите consumer group на DC-2 в активном состоянии с минимальным poll rate, не обрабатывая реально. Offset'ы уже committed, приложение запустится мгновенно. Потребление ресурсов DC-2: минимальное.
+
+**Автоматизированные failover скрипты.** Runbook в виде кода (Ansible, Bash, Python). При ручном выполнении операции занимают вдвое больше времени из-за стресса.
+
+---
+
+## Пошаговая процедура Failover
+
+Это runbook для Active-Passive топологии. Каждый шаг должен быть задокументирован в вашем внутреннем wiki и протестирован на staging.
+
+### Шаг 1: Обнаружение сбоя (автоматически)
+
+```bash
+# Prometheus alert (срабатывает автоматически):
+# kafka_mirror_heartbeat_age_seconds{source="dc1"} > 30
+
+# Ручная верификация:
+kafka-consumer-groups.sh \
+  --bootstrap-server dc2-broker1:9092 \
+  --describe \
+  --group mm2-heartbeat-monitor
+
+# Проверить доступность DC-1:
+kafka-broker-api-versions.sh \
+  --bootstrap-server dc1-broker1:9092 \
+  --command-config client-ssl.properties
+# Если таймаут -- DC-1 недоступен
+```
+
+### Шаг 2: Остановка продюсеров на DC-1
+
+Это предотвращает запись данных в DC-1, которые не успеют реплицироваться:
+
+```bash
+# В Kubernetes: уменьшить replicas продюсер-сервисов до 0
+kubectl scale deployment order-service --replicas=0 -n production
+kubectl scale deployment payment-service --replicas=0 -n production
+
+# Подождать завершения in-flight records:
+# producer.flush() вызывается автоматически при graceful shutdown
+sleep 10
+```
+
+### Шаг 3: Ожидание дренирования MM2
+
+Если DC-1 ещё частично доступен (сеть живая, но брокеры перегружены), ждём завершения репликации:
+
+```bash
+# Проверить replication lag
+kafka-consumer-groups.sh \
+  --bootstrap-server dc2-broker1:9092 \
+  --describe \
+  --group mm2-source-dc1-to-dc2
+
+# Ждём пока LAG = 0
+# Таймаут: 5 минут. Если за 5 минут не 0 -- принимаем текущий lag как RPO
+```
+
+### Шаг 4: Трансляция offset'ов consumer groups
+
+```bash
+# Вариант A: sync.group.offsets.enabled=true (автоматически)
+# Ничего делать не нужно. Offset'ы уже synchronized на DC-2.
+
+# Вариант B: Ручная трансляция скриптом
+java -jar failover-tools.jar translate-offsets \
+  --source-cluster dc1 \
+  --target-bootstrap dc2-broker1:9092 \
+  --groups orders-processor,payments-consumer,analytics-reader
+
+# Верификация: проверить committed offset'ы на DC-2
+kafka-consumer-groups.sh \
+  --bootstrap-server dc2-broker1:9092 \
+  --describe \
+  --group orders-processor
+```
+
+### Шаг 5: Переключение DNS/Load Balancer
+
+```bash
+# AWS Route53 (Terraform):
+resource "aws_route53_record" "kafka_bootstrap" {
+  name    = "kafka.company.com"
+  type    = "CNAME"
+  records = ["dc2-broker1.internal"]
+  ttl     = 60  # Заранее установлен низкий TTL
+}
+
+# Или через AWS CLI:
+aws route53 change-resource-record-sets \
+  --hosted-zone-id Z1234 \
+  --change-batch '{"Changes":[{"Action":"UPSERT","ResourceRecordSet":{"Name":"kafka.company.com","Type":"CNAME","TTL":60,"ResourceRecords":[{"Value":"dc2-broker1.internal"}]}}]}'
+```
+
+### Шаг 6-7: Запуск consumer'ов и продюсеров на DC-2
+
+```bash
+# В Kubernetes: обновить ConfigMap с новым bootstrap.servers
+kubectl patch configmap kafka-config \
+  --patch '{"data":{"bootstrap.servers":"dc2-broker1:9092,dc2-broker2:9092"}}'
+
+# Запустить приложения
+kubectl scale deployment order-service --replicas=3 -n production
+kubectl scale deployment payment-service --replicas=3 -n production
+kubectl scale deployment orders-processor --replicas=6 -n production
+```
+
+### Шаг 8: Верификация
+
+```bash
+# Проверить consumer lag (должен снижаться):
+watch -n 5 kafka-consumer-groups.sh \
+  --bootstrap-server dc2-broker1:9092 \
+  --describe \
+  --group orders-processor
+
+# Проверить producer throughput:
+# kafka.producer:type=producer-metrics,client-id=order-service,name=record-send-rate
+# Должен соответствовать pre-failover значению
+
+# UnderReplicatedPartitions на DC-2:
+kafka-topics.sh \
+  --bootstrap-server dc2-broker1:9092 \
+  --describe \
+  --under-replicated-partitions
+# Должно быть пусто
+```
+
+<Callout type="warning">
+Failover в стандартном Kafka — это ручное (или скриптованное) решение. Kafka не имеет встроенного автоматического failover на уровне Multi-DC. Это принципиальное отличие от решений вроде Oracle Data Guard или AWS RDS Multi-AZ. Ваши automation scripts ДОЛЖНЫ быть протестированы регулярно (game day, chaos engineering) — script, запущенный впервые во время реального инцидента, почти наверняка не сработает корректно.
+</Callout>
+
+---
+
+## Процедура Failback
+
+После восстановления DC-1 нужно вернуть трафик обратно. Это ещё более деликатная операция: DC-2 накопил новые данные, которые нужно реплицировать обратно в DC-1.
+
+```
+Failback = Reverse MM2 direction + replicate DC-2->DC-1 + translate offsets + redirect traffic
+```
+
+**Шаг 1: Добавить обратное направление MM2 (dc2->dc1).**
+
+```properties
+# Добавить в mm2.properties:
+dc2->dc1.enabled = true
+dc2->dc1.topics = .*
+dc2->dc1.topics.exclude = .*\.internal, heartbeats
+dc2->dc1.emit.checkpoints.enabled = true
+dc2->dc1.sync.group.offsets.enabled = true
+```
+
+```bash
+# Применить изменения (rolling update MM2 Connect cluster):
+# или через REST API:
+curl -X PUT http://mm2-connect:8083/connectors/mm2-source-dc2-to-dc1/config \
+  -H "Content-Type: application/json" \
+  -d '{"connector.class": "org.apache.kafka.connect.mirror.MirrorSourceConnector", ...}'
+```
+
+**Шаг 2: Дождаться завершения репликации DC-2->DC-1.**
+
+Проверить что LAG mm2-source-dc2-to-dc1 = 0 перед переключением трафика.
+
+**Шаг 3: Транслировать offset'ы из DC-2 в DC-1 и переключить трафик.**
+
+Те же шаги что и при failover, но в обратном направлении.
+
+---
+
+## Мониторинг MM2: JMX и Prometheus
+
+### JMX MBeans для MM2
+
+```
+# MirrorSourceConnector метрики
+kafka.mirror:type=MirrorSourceConnector,target=dc2
+  - replication-latency-ms-avg    # Средняя задержка репликации (RPO индикатор)
+  - replication-latency-ms-max    # Максимальная задержка
+  - byte-rate                      # Bytes/s реплицируется
+  - record-count                   # Всего записей реплицировано
+
+# Connect task метрики (per-task)
+kafka.connect:type=connector-task-metrics,connector=MirrorSourceConnector,task=0
+  - batch-size-avg                 # Среднее число записей в poll-batch
+  - offset-commit-avg-time-ms      # Задержка записи checkpoint
+
+# Connector status (RUNNING | PAUSED | FAILED)
+kafka.connect:type=connector-metrics,connector=MirrorSourceConnector
+  - status
+```
+
+### Prometheus JMX Exporter конфигурация для MM2
+
+```yaml
+# Добавить в jmx-exporter config для MM2 Connect worker:
+rules:
+  - pattern: 'kafka\.mirror<type=MirrorSourceConnector, target=(.+)><>replication-latency-ms-avg'
+    name: kafka_mirror_replication_latency_ms_avg
+    labels:
+      target: "$1"
+    type: GAUGE
+
+  - pattern: 'kafka\.mirror<type=MirrorSourceConnector, target=(.+)><>byte-rate'
+    name: kafka_mirror_byte_rate_bytes_per_second
+    labels:
+      target: "$1"
+    type: GAUGE
+
+  - pattern: 'kafka\.mirror<type=MirrorSourceConnector, target=(.+)><>record-count'
+    name: kafka_mirror_record_count_total
+    labels:
+      target: "$1"
+    type: COUNTER
+
+  - pattern: 'kafka\.connect<type=connector-task-metrics,connector=(.+),task=(.+)><>offset-commit-avg-time-ms'
+    name: kafka_connect_connector_task_offset_commit_avg_time_ms
+    labels:
+      connector: "$1"
+      task: "$2"
+    type: GAUGE
+```
+
+### Grafana Prometheus Alerts
+
+```yaml
+groups:
+  - name: kafka_mm2_alerts
+    rules:
+      # RPO превышен
+      - alert: KafkaMM2HighReplicationLatency
+        expr: kafka_mirror_replication_latency_ms_avg > 5000
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MM2 replication latency > 5 seconds. RPO SLA may be breached."
+
+      # Репликация остановлена
+      - alert: KafkaMM2ReplicationStalled
+        expr: kafka_mirror_replication_latency_ms_avg > 30000
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MM2 replication stalled (latency > 30s). Failover risk."
+
+      # Heartbeat недоступен
+      - alert: KafkaMM2HeartbeatMissing
+        expr: time() - kafka_mirror_heartbeat_timestamp > 60
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "MM2 heartbeat missing. Source cluster may be unavailable."
+
+      # Connector упал
+      - alert: KafkaMM2ConnectorFailed
+        expr: kafka_connect_connector_status{connector=~"MirrorSourceConnector|MirrorCheckpointConnector"} == 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "MM2 connector {{ $labels.connector }} is not RUNNING."
+```
+
+---
+
+## Ключевые выводы
+
+1. **RPO = replication lag в момент сбоя.** Контролируется через `replication-latency-ms-avg` JMX метрику. Снижается через: увеличение `tasks.max`, оптимизацию сети, выделенный Connect кластер для MM2.
+2. **RTO = сумма фаз восстановления.** Типично 5-25 минут. Снижается через: `sync.group.offsets.enabled=true`, низкий DNS TTL, автоматизированные скрипты, pre-warm consumers на DR.
+3. **Failover — это ручное решение** в стандартной Kafka. Automation scripts должны регулярно тестироваться в рамках game day процедур.
+4. **Failback** сложнее failover: DC-2 накопил новые данные, которые нужно реплицировать обратно. Добавьте обратное направление MM2 (dc2->dc1) перед переключением.
+5. **Мониторинг**: `replication-latency-ms-avg`, `heartbeat age`, `connector status` — минимальный набор метрик для MM2.
+
+<KnowledgeCheck
+  question="Production сценарий: E-commerce платформа, Active-Passive MM2. SLA: RPO <= 10 секунд, RTO <= 15 минут. Мониторинг показывает: replication-latency-ms-avg = 18000 (18 секунд). DNS TTL = 300 секунд. sync.group.offsets.enabled=false, ручная трансляция занимает 3 минуты. Три consumer groups. (1) Соответствует ли текущая конфигурация SLA? (2) Какие изменения обеспечат выполнение обоих SLA?"
+  answer="(1) RPO SLA (10 сек): нарушен. replication-latency-ms-avg=18000 означает RPO=18 секунд > 10 секунд SLA. RTO SLA (15 мин): на грани. Обнаружение (1-5 мин) + DNS propagation (5 мин, TTL=300) + трансляция offset'ов (3 мин) + перезапуск (2 мин) = 11-15 мин. Укладывается, но без запаса. (2) Исправления: Для RPO: (а) Увеличить tasks.max MirrorSourceConnector до числа партиций (параллельная репликация снизит lag). (б) Выделить dedicated Connect кластер только для MM2 (снизить contention). (в) Проверить network bandwidth между DC (bottleneck?). (г) Снизить emit.checkpoints.interval.seconds=10 (checkpoint RPO). Для RTO: (а) Снизить DNS TTL до 60 секунд (сократит DNS фазу с 5 до 1 мин). (б) Включить sync.group.offsets.enabled=true (устранит 3 мин ручной трансляции). Итого RTO после: 1-5 мин + 1 мин + 0 мин + 2 мин = 4-8 минут. Укладывается в 15 мин с запасом."
+/>

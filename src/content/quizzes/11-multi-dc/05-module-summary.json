@@ -1,0 +1,88 @@
+{
+  "lessonSlug": "11-multi-dc/05-module-summary",
+  "moduleId": "11-multi-dc",
+  "_meta": {
+    "idPrefix": "kafka-11-05",
+    "description": "Quiz for Module 11 Summary lesson. IDs: kafka-11-05-q1 through kafka-11-05-q3"
+  },
+  "questions": [
+    {
+      "id": "kafka-11-05-q1",
+      "type": "multiple-choice",
+      "question": "Сопоставьте каждый коннектор MM2 с его основной функцией: (A) MirrorSourceConnector, (B) MirrorCheckpointConnector, (C) MirrorHeartbeatConnector",
+      "options": [
+        {
+          "id": "a",
+          "text": "A = мониторинг здоровья через heartbeat записи, B = репликация данных топиков, C = трансляция offset'ов"
+        },
+        {
+          "id": "b",
+          "text": "A = репликация данных топиков из source в target, B = запись маппинга offset'ов consumer groups для корректного failover, C = эмиссия heartbeat записей для измерения replication latency"
+        },
+        {
+          "id": "c",
+          "text": "A = репликация данных, B = мониторинг heartbeat, C = трансляция offset'ов"
+        },
+        {
+          "id": "d",
+          "text": "Все три коннектора выполняют одну функцию — репликацию данных, только разными методами"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "MirrorSourceConnector (A): главный коннектор. Читает записи из топиков source-кластера, воспроизводит в target-кластер. Конфиг: dc1->dc2.enabled=true, dc1->dc2.topics=.*. Параллелизм через tasks.max. MirrorCheckpointConnector (B): коннектор трансляции offset'ов. Каждые emit.checkpoints.interval.seconds записывает маппинг (consumer-group, source-partition, source-offset) -> target-offset в {source}.checkpoints.internal. Критичен для корректного failover consumer groups. При sync.group.offsets.enabled=true автоматически commit'ит переведённые offset'ы на target. MirrorHeartbeatConnector (C): коннектор мониторинга. Записывает heartbeat в heartbeats топик. Задержка heartbeat = прокси replication latency. Alert: heartbeat_age > 30 секунд.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-11-05-q2",
+      "type": "multiple-choice",
+      "question": "Стартап разрабатывает сервис доставки с требованиями: 5 регионов (EU, US-East, US-West, Asia, Australia), каждый регион обслуживает своих локальных пользователей с задержкой < 30ms, данные о заказах должны быть видны во всех регионах в течение 10 секунд, разрешение конфликтов не нужно (каждый заказ принадлежит конкретному региону). Какая топология MM2 оптимальна?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Active-Passive между каждой парой: 5 Primary + 5 DR кластеров"
+        },
+        {
+          "id": "b",
+          "text": "Active-Active между всеми 5 регионами с IdentityReplicationPolicy. Каждый регион обслуживает своих пользователей (< 30ms). MM2 реплицирует данные между всеми парами. Partition affinity по региону исключает конфликты: заказы EU всегда создаются в EU кластере."
+        },
+        {
+          "id": "c",
+          "text": "Fan-Out: один центральный кластер -> 5 региональных"
+        },
+        {
+          "id": "d",
+          "text": "Hub-and-Spoke: 5 региональных кластеров -> центральный Hub"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Active-Active (в данном случае multi-active для 5 регионов) с IdentityReplicationPolicy. Обоснование: (1) < 30ms: каждый регион обслуживает своих пользователей локально — нет cross-DC hop. (2) Видимость в 10 секунд: MM2 реплицирует данные между всеми регионами с latency < 10s при нормальных сетевых условиях. (3) Нет конфликтов: partition affinity по region ID. Заказ EU всегда создаётся в EU-кластере. MM2 реплицирует его в US, Asia, Australia. Никакой другой регион не создаёт EU-заказы. Fan-Out не подходит: продюсеры пишут в регионы, не в Hub. Hub-and-Spoke: аналитика, не для рабочих нагрузок. Active-Passive: только один регион активен, остальные idle — не соответствует требованию локальных < 30ms для всех регионов.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-11-05-q3",
+      "type": "multiple-choice",
+      "question": "Какова роль топика heartbeats в мониторинге MM2?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Heartbeats хранит committed offset'ы consumer groups для синхронизации между кластерами"
+        },
+        {
+          "id": "b",
+          "text": "MirrorHeartbeatConnector записывает в heartbeats топик на source-кластере. MM2 реплицирует их на target-кластер. Consumer на target-кластере, читающий heartbeats, вычисляет replication latency: разница между timestamp heartbeat и текущим временем = время, за которое запись прошла от source до target"
+        },
+        {
+          "id": "c",
+          "text": "Heartbeats — это Keep-Alive пакеты TCP-соединения между брокерами DC-1 и DC-2"
+        },
+        {
+          "id": "d",
+          "text": "Топик heartbeats хранит статистику о числе реплицированных топиков и партиций"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Topик heartbeats решает специфическую проблему мониторинга: как измерить end-to-end replication latency без зависимости от бизнес-данных? MirrorHeartbeatConnector записывает heartbeat-записи каждые heartbeats.interval.seconds (default: 1s) в топик heartbeats на source-кластере. Каждая запись содержит timestamp. MM2 реплицирует эти записи на target-кластер. Мониторинговый consumer на target-кластере читает heartbeats и вычисляет: current_time - heartbeat_timestamp = replication latency. Это сквозная (end-to-end) задержка: от записи на source до доступности на target. Prometheus alert: если heartbeat_age > 30 секунд, репликация остановлена или сильно задерживается. Это независимый от бизнес-данных канал мониторинга.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

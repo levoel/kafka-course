@@ -1,0 +1,114 @@
+{
+  "lessonSlug": "11-multi-dc/01-mirrormaker2-architecture",
+  "moduleId": "11-multi-dc",
+  "_meta": {
+    "idPrefix": "kafka-11-01",
+    "description": "Quiz for MM2 architecture lesson. IDs: kafka-11-01-q1 through kafka-11-01-q4"
+  },
+  "questions": [
+    {
+      "id": "kafka-11-01-q1",
+      "type": "multiple-choice",
+      "question": "Из каких трёх коннекторов состоит MirrorMaker 2 и какова роль каждого?",
+      "options": [
+        {
+          "id": "a",
+          "text": "MirrorProducerConnector (запись), MirrorConsumerConnector (чтение), MirrorAdminConnector (управление)"
+        },
+        {
+          "id": "b",
+          "text": "MirrorSourceConnector (репликация данных топиков), MirrorCheckpointConnector (трансляция offset'ов consumer groups), MirrorHeartbeatConnector (мониторинг здоровья репликации)"
+        },
+        {
+          "id": "c",
+          "text": "MirrorReplicatorConnector (данные), MirrorOffsetConnector (offset'ы), MirrorMonitorConnector (метрики)"
+        },
+        {
+          "id": "d",
+          "text": "MirrorSourceConnector (данные), MirrorSinkConnector (запись), MirrorCheckpointConnector (статус)"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "MM2 состоит ровно из трёх коннекторов с чёткими ролями: MirrorSourceConnector — основной коннектор, реплицирует записи из топиков source-кластера в target-кластер через механизм Kafka Connect Source Connector. MirrorCheckpointConnector — периодически записывает маппинг offset'ов consumer groups (source-offset -> target-offset) в топик {source}.checkpoints.internal, что обеспечивает корректный failover consumer groups. MirrorHeartbeatConnector — записывает heartbeat-записи для измерения задержки репликации; consumer lag на топике heartbeats = replication latency proxy.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-11-01-q2",
+      "type": "multiple-choice",
+      "question": "MM2 настроен с dc1->dc2.topics=orders|payments и tasks.max=4. Топик orders имеет 12 партиций, payments — 6 партиций. Сколько партиций будет реплицировать каждый task?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Каждый task реплицирует ровно одну партицию. tasks.max=4 значит только 4 из 18 партиций будут реплицироваться"
+        },
+        {
+          "id": "b",
+          "text": "Все 18 партиций (12+6) распределятся между 4 tasks. Каждый task получит примерно 4-5 партиций. tasks.max ограничивает параллелизм, но все партиции будут реплицироваться"
+        },
+        {
+          "id": "c",
+          "text": "tasks.max=4 означает что реплицируется 4 топика, независимо от числа партиций"
+        },
+        {
+          "id": "d",
+          "text": "tasks.max не влияет на MM2 Source Connector, только на MM2 Checkpoint Connector"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "tasks.max определяет максимальное число параллельных задач репликации, но все партиции реплицируются независимо от значения tasks.max. 18 партиций (12+6) распределяются между 4 tasks: каждый task получает 4-5 партиций. Рекомендация: устанавливать tasks.max равным числу партиций реплицируемых топиков (18 в данном случае) для максимальной параллельности и минимальной задержки. При tasks.max=4 каждый task отвечает за несколько партиций, что увеличивает lag при высокой нагрузке.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-11-01-q3",
+      "type": "multiple-choice",
+      "question": "Команда настраивает Active-Active MM2 между dc1 и dc2. После нескольких часов работы они обнаруживают: на dc1 появились топики dc2.orders и dc2.payments в дополнение к оригинальным orders и payments. Consumer'ы на dc1 должны читать orders, но реплицированные данные из dc2 находятся в dc2.orders. Какой параметр нужно изменить для исправления?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Уменьшить tasks.max для снижения нагрузки на коннектор"
+        },
+        {
+          "id": "b",
+          "text": "Добавить topics.exclude=dc2.* для исключения уже реплицированных топиков"
+        },
+        {
+          "id": "c",
+          "text": "Изменить replication.policy.class с DefaultReplicationPolicy на IdentityReplicationPolicy: тогда orders из dc2 будет реплицироваться как orders (то же имя), а не dc2.orders"
+        },
+        {
+          "id": "d",
+          "text": "Включить emit.checkpoints.enabled=false для остановки MirrorCheckpointConnector"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "DefaultReplicationPolicy (стандартная) добавляет псевдоним source-кластера как префикс к именам топиков: orders из dc2 становится dc2.orders на dc1. Для Active-Active это разрушительно: consumer'ы на dc1, читающие 'orders', не видят реплицированные данные из dc2 (они в dc2.orders). Решение: IdentityReplicationPolicy сохраняет оригинальное имя топика. orders из dc2 реплицируется как orders на dc1. Consumer'ы используют одинаковую конфигурацию на обоих кластерах. Конфиг: replication.policy.class=org.apache.kafka.connect.mirror.IdentityReplicationPolicy.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-11-01-q4",
+      "type": "multiple-choice",
+      "question": "После запуска MM2 для репликации dc1->dc2 администратор проверяет топики на dc2. Какие внутренние топики MM2 он должен увидеть?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Только реплицированные бизнес-топики. MM2 не создаёт внутренних топиков."
+        },
+        {
+          "id": "b",
+          "text": "mm2-configs.dc1.internal, mm2-offsets.dc1.internal, mm2-status.dc1.internal (Connect internal topics), dc1.checkpoints.internal (offset маппинги), heartbeats (latency мониторинг)"
+        },
+        {
+          "id": "c",
+          "text": "__mm2_offsets, __mm2_checkpoints, __mm2_heartbeats (все с двойным подчёркиванием, аналогично __consumer_offsets)"
+        },
+        {
+          "id": "d",
+          "text": "mirror-maker-offsets, mirror-maker-status, mirror-maker-checkpoints"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "MM2 создаёт пять внутренних топиков: (1) mm2-configs.{cluster-alias}.internal — хранит конфигурацию Connect коннекторов; (2) mm2-offsets.{cluster-alias}.internal — внутренние offset'ы Connect фреймворка (не consumer group offset'ы); (3) mm2-status.{cluster-alias}.internal — статусы коннекторов и задач; (4) {source-cluster}.checkpoints.internal — маппинг offset'ов consumer groups, записывается MirrorCheckpointConnector; (5) heartbeats — heartbeat-записи от MirrorHeartbeatConnector для измерения задержки репликации. Эти топики нельзя удалять вручную — MM2 использует их для корректной работы.",
+      "bloomLevel": "applied"
+    }
+  ]
+}

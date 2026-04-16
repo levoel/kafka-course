@@ -1,0 +1,88 @@
+{
+  "lessonSlug": "11-multi-dc/02-active-active-passive",
+  "moduleId": "11-multi-dc",
+  "_meta": {
+    "idPrefix": "kafka-11-02",
+    "description": "Quiz for Active-Active and Active-Passive topologies lesson. IDs: kafka-11-02-q1 through kafka-11-02-q3"
+  },
+  "questions": [
+    {
+      "id": "kafka-11-02-q1",
+      "type": "multiple-choice",
+      "question": "В чём принципиальное архитектурное различие между Active-Passive и Active-Active топологиями MM2?",
+      "options": [
+        {
+          "id": "a",
+          "text": "В Active-Passive MM2 реплицирует данные быстрее, чем в Active-Active, потому что трафик однонаправленный"
+        },
+        {
+          "id": "b",
+          "text": "В Active-Passive один кластер (Primary) обслуживает весь трафик, второй (DR) получает реплицированные данные но не обслуживает продюсеров/consumer'ов. В Active-Active оба кластера одновременно обслуживают трафик с двунаправленной репликацией между ними"
+        },
+        {
+          "id": "c",
+          "text": "Active-Passive требует два MM2 кластера, Active-Active работает с одним MM2"
+        },
+        {
+          "id": "d",
+          "text": "Разница только в направлении репликации. В Active-Passive: dc1->dc2. В Active-Active: dc2->dc1."
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Ключевое различие — в том, кто обслуживает трафик. Active-Passive: только Primary DC (dc1) принимает запросы продюсеров и consumer'ов. DR кластер (dc2) получает реплицированные данные через MM2, но в нормальном режиме простаивает (ресурсы DC2 не используются для бизнес-логики). Failover: ручной или скриптованный переключатель на DC2. Active-Active: оба кластера одновременно обслуживают своих локальных продюсеров и consumer'ов. Двунаправленная репликация (dc1->dc2 и dc2->dc1). При сбое одного DC второй продолжает работу без failover процедуры (RTO~0). Компромисс: сложность управления конфликтами записи.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-11-02-q2",
+      "type": "multiple-choice",
+      "question": "Active-Active MM2 между dc1 и dc2 настроен с IdentityReplicationPolicy. Продюсер на dc1 записывает событие с key='order-123' в топик orders. Как MM2 предотвращает бесконечную репликацию этой записи между dc1 и dc2?",
+      "options": [
+        {
+          "id": "a",
+          "text": "MM2 хранит список уже реплицированных offset'ов и пропускает записи, которые уже были скопированы"
+        },
+        {
+          "id": "b",
+          "text": "topics.exclude=heartbeats предотвращает репликацию orders топика обратно"
+        },
+        {
+          "id": "c",
+          "text": "MM2 добавляет заголовок __mm2.record.header.source.cluster.alias=dc1 к реплицированной записи. Когда MirrorSourceConnector на dc2 читает эту запись при репликации dc2->dc1, видит заголовок source=dc1 (совпадает с target), и не реплицирует снова"
+        },
+        {
+          "id": "d",
+          "text": "IdentityReplicationPolicy автоматически предотвращает дублирование: при одинаковых именах топиков MM2 не создаёт дубликатов"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Механизм защиты от циклов работает через заголовки Kafka записей. Когда MirrorSourceConnector dc1->dc2 реплицирует запись с dc1 на dc2, он добавляет заголовок __mm2.record.header.source.cluster.alias=dc1. Когда MirrorSourceConnector dc2->dc1 (обратное направление) читает эту запись из orders на dc2, он проверяет заголовок: source=dc1 совпадает с текущим target (dc1). Это значит запись уже пришла из dc1 — реплицировать обратно не нужно, коннектор её пропускает. Дополнительная защита: topics.exclude=.*\\.internal,heartbeats исключает служебные топики из двунаправленной репликации.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-11-02-q3",
+      "type": "multiple-choice",
+      "question": "Компания IoT-платформы имеет 50 regional edge-кластеров, каждый собирает sensor-данные своего региона. Нужно агрегировать все данные в центральный analytics-кластер для global ML pipeline. Какая топология MM2 оптимальна?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Active-Active между каждой парой edge-кластеров: полная mesh репликация"
+        },
+        {
+          "id": "b",
+          "text": "Hub-and-Spoke: 50 edge-кластеров -> Central Hub. Однонаправленная репликация из каждого edge в Hub. Hub агрегирует данные всех регионов для analytics."
+        },
+        {
+          "id": "c",
+          "text": "Fan-Out: Central Hub -> 50 edge-кластеров. Hub распределяет данные во все регионы."
+        },
+        {
+          "id": "d",
+          "text": "Active-Passive: один primary edge-кластер и 50 DR кластеров"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Hub-and-Spoke — правильный выбор для агрегации из множества источников. Каждый из 50 edge-кластеров настраивает однонаправленную репликацию в Central Hub: edge1->hub, edge2->hub, ..., edge50->hub. Hub получает все regional данные с DefaultReplicationPolicy (топики сохраняют региональный префикс: eu-region.sensor-data, asia-region.sensor-data). ML pipeline на Hub подписывается на все региональные топики. Fan-Out — противоположная топология: Hub распределяет данные в регионы (например, глобальный каталог -> региональные кластеры). Active-Active/Passive не применимы: они для двух кластеров, не для 50. Active-Active mesh 50x50 = 2450 MM2 направлений — практически нереализуемо.",
+      "bloomLevel": "applied"
+    }
+  ]
+}

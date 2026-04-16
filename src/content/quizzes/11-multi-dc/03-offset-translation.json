@@ -1,0 +1,88 @@
+{
+  "lessonSlug": "11-multi-dc/03-offset-translation",
+  "moduleId": "11-multi-dc",
+  "_meta": {
+    "idPrefix": "kafka-11-03",
+    "description": "Quiz for Offset Translation and Consumer Group Sync lesson. IDs: kafka-11-03-q1 through kafka-11-03-q3"
+  },
+  "questions": [
+    {
+      "id": "kafka-11-03-q1",
+      "type": "multiple-choice",
+      "question": "Что именно хранит MirrorCheckpointConnector в топике {source-cluster}.checkpoints.internal?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Копию __consumer_offsets топика из source-кластера с теми же offset-значениями"
+        },
+        {
+          "id": "b",
+          "text": "Маппинг: (consumer-group-id, source-topic, source-partition) -> (upstream-offset, downstream-offset). Для каждой consumer group и каждой партиции хранится пара: committed offset на source-кластере и соответствующий offset на target-кластере"
+        },
+        {
+          "id": "c",
+          "text": "Список consumer groups, которые нужно мигрировать при failover"
+        },
+        {
+          "id": "d",
+          "text": "Статистику репликации: количество реплицированных записей, байт/с, задержку"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Checkpoint топик хранит маппинг между offset-пространствами двух кластеров. Структура записи: Ключ = (consumer-group-id, source-topic, source-partition) — идентифицирует конкретную партицию конкретной consumer group. Значение = (upstream-offset, downstream-offset, metadata) — upstream-offset это committed offset на source-кластере, downstream-offset это соответствующий offset в реплицированном топике на target-кластере. Например: group='orders-processor', topic='orders', partition=0, upstream=50000, downstream=51423. Этот маппинг записывается каждые emit.checkpoints.interval.seconds (default 60). При failover RemoteClusterUtils.translateOffsets() читает этот топик и вычисляет, с какого offset'а consumer должен читать на DR-кластере.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-11-03-q2",
+      "type": "multiple-choice",
+      "question": "DC-1 вышел из строя. Consumer group 'payments-consumer' имела committed offset 5000 на partition payments-0 в топике payments на DC-1. Checkpoint в dc1.checkpoints.internal на DC-2 показывает маппинг: (payments-consumer, payments, 0) -> (upstream=4950, downstream=5082). С какого offset'а должен начать читать payments-consumer на DC-2 из топика dc1.payments-partition-0?",
+      "options": [
+        {
+          "id": "a",
+          "text": "С offset 5000 — тот же offset что и на DC-1"
+        },
+        {
+          "id": "b",
+          "text": "С offset 0 — всегда начинать с начала при failover"
+        },
+        {
+          "id": "c",
+          "text": "С offset 5082. Checkpoint показывает: upstream offset 4950 (последний зафиксированный checkpoint на DC-1) соответствует downstream offset 5082 на DC-2. Consumer возобновит чтение с 5082, что означает повторную обработку примерно 50 записей (с 4950 до 5000 на DC-1)"
+        },
+        {
+          "id": "d",
+          "text": "С offset 4950 — upstream offset из checkpoint записи"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "RemoteClusterUtils.translateOffsets() использует checkpoint маппинг. Последний checkpoint был записан для upstream offset 4950 (не 5000, потому что checkpoint записывался до коммита offset'а 5000). Downstream offset для 4950 = 5082 на DC-2. Consumer начнёт читать dc1.payments-partition-0 с offset 5082. Это означает повторную обработку записей с DC-1 offset 4950 по 5000 (примерно 50 записей). Это at-least-once семантика: записи не потеряны, но будут обработаны дважды. Приложение должно быть идемпотентным. Это не баг: checkpoint lag = гарантия at-least-once, но не exactly-once при failover.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-11-03-q3",
+      "type": "multiple-choice",
+      "question": "Почему нельзя просто скопировать committed offset'ы consumer group напрямую из __consumer_offsets на DC-1 в __consumer_offsets на DC-2 без трансляции?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Это технически невозможно: __consumer_offsets является внутренним топиком Kafka и не доступен для чтения внешними инструментами"
+        },
+        {
+          "id": "b",
+          "text": "Offset'ы являются локальными идентификаторами партиций конкретного кластера. Offset X на DC-1 и offset X на DC-2 — это разные физические записи. MirrorSourceConnector создаёт новые записи на DC-2 начиная с offset 0, и эти записи не совпадают один к одному с DC-1 из-за возможных пробелов, фильтрации, разного начала репликации"
+        },
+        {
+          "id": "c",
+          "text": "Kafka не позволяет записывать в __consumer_offsets напрямую, только через consumer group commit API"
+        },
+        {
+          "id": "d",
+          "text": "Из-за разного числа партиций в __consumer_offsets топике на DC-1 и DC-2"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Offset — это порядковый номер записи в пределах конкретной партиции конкретного кластера. Два кластера хранят одни и те же данные, но с разными offset'ами по нескольким причинам: (1) MM2 создаёт новые записи на DC-2 начиная с offset 0, независимо от offset'ов на DC-1. (2) Если репликация началась не с самого начала лога DC-1 (например, часть истории удалена retention), offset 0 на DC-2 соответствует не offset 0 на DC-1. (3) Фильтрация через SMT или topics pattern может создавать пробелы: запись DC-1 offset 42 пропущена, offset 43 становится offset 41 на DC-2. MirrorCheckpointConnector отслеживает точное соответствие через внутренние метаданные и записывает трансляцию в checkpoints.internal.",
+      "bloomLevel": "analytical"
+    }
+  ]
+}

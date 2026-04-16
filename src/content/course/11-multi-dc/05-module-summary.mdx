@@ -1,0 +1,171 @@
+---
+title: "Итоги модуля 11: Multi-DC и Disaster Recovery"
+description: "Сводная таблица ключевых концепций MM2, конфигурационных параметров и типичных значений. Подготовка к Модулю 12."
+order: 5
+free: false
+estimatedTime: 10
+topics: ["MirrorMaker 2", "Multi-DC", "Disaster Recovery", "Summary"]
+---
+
+# Итоги модуля 11: Multi-DC и Disaster Recovery
+
+Модуль 11 закрывает тему межкластерной репликации в Kafka 4.0. Вы прошли путь от архитектуры MirrorMaker 2 до конкретных runbook'ов failover. Здесь — сводная таблица всего, что должно быть в голове при проектировании и эксплуатации Multi-DC Kafka.
+
+---
+
+## Ключевые концепции: сводная таблица
+
+<DiagramContainer title="Module 11 Reference: MM2 конфигурация и типичные значения" color="slate">
+  <div className="overflow-x-auto p-2">
+    <div className="text-sm text-slate-400 text-center mb-3">Концепция — Ключевой конфиг — Типичное значение / Примечание</div>
+    <FlowColumn gap={2}>
+      <FlowRow gap={2}>
+        <DataBox
+          label="MirrorSourceConnector"
+          tooltip="Основной коннектор репликации. Читает из source, пишет в target. Один task = одна или несколько партиций. Конфиг: dc1->dc2.enabled=true, dc1->dc2.topics=.* (регулярное выражение). Параллелизм: tasks.max."
+        >
+          Репликация данных топиков
+        </DataBox>
+        <DataBox
+          label="tasks.max"
+          tooltip="Максимальное число параллельных задач репликации. Рекомендация: равно числу партиций реплицируемых топиков. Влияет на RPO: больше tasks.max = меньше lag = ниже RPO."
+        >
+          = число партиций
+        </DataBox>
+        <DataBox
+          label="dc1->dc2.topics = .*"
+          tooltip="Регулярное выражение для фильтрации топиков. .* = все топики. orders|payments = только два топика. Используйте topics.exclude для исключения внутренних топиков MM2."
+        >
+          Регулярное выражение
+        </DataBox>
+      </FlowRow>
+
+      <FlowRow gap={2}>
+        <DataBox
+          label="MirrorCheckpointConnector"
+          tooltip="Коннектор трансляции offset'ов. Периодически записывает маппинг (source-offset -> target-offset) в {source}.checkpoints.internal. Основа для корректного failover consumer groups."
+        >
+          Трансляция offset'ов consumer groups
+        </DataBox>
+        <DataBox
+          label="emit.checkpoints.interval.seconds"
+          tooltip="Интервал записи checkpoint'ов. Default: 60 секунд. Checkpoint RPO = этот интервал. Для строгих SLA: снизить до 10-15 секунд. Нижний рекомендуемый предел: 10 секунд."
+        >
+          60 сек (снижать до 10-15 при строгих SLA)
+        </DataBox>
+        <DataBox
+          label="sync.group.offsets.enabled=true"
+          tooltip="Автоматически commit'ит переведённые offset'ы на target-кластере. При включённом параметре failover не требует ручной трансляции через RemoteClusterUtils. Рекомендуется для продакшна."
+        >
+          Автоматический sync (рекомендуется)
+        </DataBox>
+      </FlowRow>
+
+      <FlowRow gap={2}>
+        <DataBox
+          label="MirrorHeartbeatConnector"
+          tooltip="Мониторинг здоровья репликации. Записывает heartbeat записи каждые heartbeats.interval.seconds (default 1s). Replication latency = разница timestamp heartbeat и текущего времени на target-кластере."
+        >
+          Мониторинг replication health
+        </DataBox>
+        <DataBox
+          label="heartbeats.interval.seconds"
+          tooltip="Интервал heartbeat записей. Default: 1 секунда. Достаточно для обнаружения проблем с репликацией за 1-5 секунд. Не снижать ниже 1 секунды."
+        >
+          1 сек (default достаточен)
+        </DataBox>
+        <DataBox
+          label="heartbeat_age alert threshold"
+          tooltip="Алерт срабатывает если age последнего heartbeat превышает порог. Рекомендация: 30 секунд для warning, 60 секунд для critical. При heartbeat_age > 60s репликация остановлена."
+        >
+          30 сек warning / 60 сек critical
+        </DataBox>
+      </FlowRow>
+
+      <FlowRow gap={2}>
+        <DataBox
+          label="DefaultReplicationPolicy"
+          tooltip="Политика именования по умолчанию. Добавляет псевдоним source-кластера как префикс: orders -> dc1.orders. Безопасна для active-passive. Проста в эксплуатации."
+        >
+          Active-Passive топология
+        </DataBox>
+        <DataBox
+          label="IdentityReplicationPolicy"
+          tooltip="Топики сохраняют оригинальное имя: orders -> orders. Обязательна для active-active. Без неё потребители на target-кластере видят dc1.orders вместо orders."
+        >
+          Active-Active топология (обязательно)
+        </DataBox>
+        <DataBox
+          label="topics.exclude = .*\\.internal,heartbeats"
+          tooltip="Исключение внутренних топиков MM2 из репликации. Критично для active-active: без этого исключения внутренние топики будут реплицироваться бесконечно. Обязательный параметр."
+        >
+          Предотвращение циклов (active-active)
+        </DataBox>
+      </FlowRow>
+
+      <FlowRow gap={2}>
+        <DataBox
+          label="RPO"
+          tooltip="Recovery Point Objective = допустимая потеря данных в секундах. В контексте MM2: RPO = replication-latency-ms-avg в момент сбоя. Типично: 1-60 секунд. Снижается через: tasks.max, сетевую оптимизацию, выделенный Connect кластер."
+        >
+          = replication lag в момент сбоя
+        </DataBox>
+        <DataBox
+          label="RTO"
+          tooltip="Recovery Time Objective = время восстановления сервиса. Компоненты: обнаружение (1-5 мин) + DNS (1-10 мин) + трансляция offset'ов (0-2 мин) + перезапуск (1-5 мин). Типично: 5-20 минут."
+        >
+          5-20 минут (Active-Passive)
+        </DataBox>
+        <DataBox
+          label="Active-Active RTO"
+          tooltip="В Active-Active топологии RTO практически равен нулю: при сбое одного DC второй уже обслуживает трафик. Нет фазы failover. Ценой: operational сложность и необходимость стратегии конфликтов."
+        >
+          ~ 0 (Active-Active)
+        </DataBox>
+      </FlowRow>
+    </FlowColumn>
+  </div>
+</DiagramContainer>
+
+---
+
+## Ключевые JMX метрики MM2
+
+| Метрика | MBean | Alert порог |
+|---------|-------|-------------|
+| Задержка репликации | `kafka.mirror:type=MirrorSourceConnector,target=dc2` -> `replication-latency-ms-avg` | > 5000ms (warning), > 30000ms (critical) |
+| Heartbeat age | Потребитель heartbeats топика, разница timestamp | > 30 сек (warning), > 60 сек (critical) |
+| Checkpoint lag | `kafka.connect:type=connector-task-metrics,connector=MirrorCheckpointConnector` -> `offset-commit-avg-time-ms` | > 5000ms |
+| Connector status | `kafka.connect:type=connector-metrics,connector=MirrorSourceConnector` -> `status` | != RUNNING |
+| Byte rate | `kafka.mirror:...` -> `byte-rate` | < ожидаемого (падение = остановка репликации) |
+
+---
+
+## Связь с предыдущими и последующими модулями
+
+Модуль 11 строится на знаниях из всего курса и является обязательной предпосылкой для финального Модуля 13:
+
+| Тема | Связанный модуль | Применение в Multi-DC |
+|------|-----------------|----------------------|
+| Репликация партиций, ISR | Модуль 01 | DR-кластер должен иметь свой собственный ISR, независимый от primary |
+| Kafka Connect фреймворк | Модуль 05 | MM2 построен на Connect: REST API, задачи, мониторинг |
+| Security: SASL/SSL | Модуль 09 | Cross-cluster аутентификация: MM2 нужны credentials для обоих кластеров |
+| JMX мониторинг | Модуль 10 | MM2-специфичные MBeans дополняют broker и Connect мониторинг |
+| Capstone architecture | Модуль 13 | MM2 DC-1->DC-2 репликация является частью финального дизайна |
+
+---
+
+## Подготовка к Модулю 12
+
+Модуль 12 переходит от операционных к архитектурным паттернам. Если Модуль 11 отвечал на вопрос "как сделать Kafka отказоустойчивой на уровне инфраструктуры", Модуль 12 отвечает на вопрос "как проектировать приложения, которые используют Kafka правильно".
+
+Четыре паттерна Модуля 12 строятся на концепциях Kafka, которые вы уже изучили:
+- **Event Sourcing**: append-only лог из Модуля 01 как event store
+- **CQRS**: KTable и KStream из Модуля 07 как read-side read models
+- **Transactional Outbox**: Kafka Connect из Модуля 05 как транспорт CDC-событий
+- **Saga Pattern**: транзакции продюсера из Модуля 02 для атомарного управления сагой
+
+<KnowledgeCheck
+  question="Собеседование вопрос: Команда планирует развернуть Kafka в двух дата-центрах для e-commerce платформы. Требования: (1) оба DC обслуживают локальных пользователей без cross-DC hop, (2) при падении одного DC второй продолжает работу без ручного вмешательства, (3) данные должны быть одинаковы на обоих DC в течение не более 5 секунд. Опишите полную конфигурацию MM2 (топология, ключевые параметры) и объясните как предотвращается циклическая репликация."
+  answer="Топология: Active-Active. Обоснование: (1) локальные пользователи = оба DC активны. (2) при падении одного DC второй уже обслуживает трафик = RTO~0. (3) 5 секунд RPO = задержка репликации, достижимо при нормальных сетевых условиях. Конфигурация mm2.properties: clusters=dc1,dc2. Bootstraps для обоих. dc1->dc2.enabled=true, dc2->dc1.enabled=true (двунаправленная). replication.policy.class=IdentityReplicationPolicy (обязательно для Active-Active, сохраняет имена топиков). dc1->dc2.topics.exclude=.*\\.internal,heartbeats -- dc2->dc1 аналогично. emit.checkpoints.interval.seconds=10 для checkpoint RPO<10 сек. sync.group.offsets.enabled=true для обоих направлений. Для 5-секундного data RPO: tasks.max = числу партиций (максимальный параллелизм). Предотвращение цикла: два механизма. (1) MM2 добавляет заголовок __mm2.record.header.source.cluster.alias=dc1 к каждой реплицированной записи. Когда MirrorSourceConnector на dc2 читает эту запись при репликации dc2->dc1, он видит заголовок source.cluster=dc1 (= current target), и НЕ реплицирует. (2) topics.exclude исключает *.internal и heartbeats топики из двусторонней репликации. Конфликты записи: partition affinity -- EU-пользователи пишут только в dc1, US-пользователи только в dc2 по диапазону ключей. Никаких конфликтов."
+/>

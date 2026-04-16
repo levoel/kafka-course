@@ -1,0 +1,114 @@
+{
+  "lessonSlug": "11-multi-dc/04-rpo-rto-failover",
+  "moduleId": "11-multi-dc",
+  "_meta": {
+    "idPrefix": "kafka-11-04",
+    "description": "Quiz for RPO/RTO and Failover lesson. IDs: kafka-11-04-q1 through kafka-11-04-q4"
+  },
+  "questions": [
+    {
+      "id": "kafka-11-04-q1",
+      "type": "multiple-choice",
+      "question": "В чём принципиальное различие между RPO и RTO в контексте Multi-DC Kafka?",
+      "options": [
+        {
+          "id": "a",
+          "text": "RPO = время работы кластера до сбоя, RTO = время восстановления после сбоя"
+        },
+        {
+          "id": "b",
+          "text": "RPO (Recovery Point Objective) — максимально допустимый объём потерянных данных, выражённый во времени (сколько данных можно потерять). В MM2 определяется задержкой репликации. RTO (Recovery Time Objective) — максимально допустимое время от момента сбоя до восстановления сервиса (сколько времени можно простаивать)"
+        },
+        {
+          "id": "c",
+          "text": "RPO и RTO — синонимы, оба обозначают время восстановления"
+        },
+        {
+          "id": "d",
+          "text": "RPO = число потерянных записей, RTO = число записей которые нужно обработать повторно"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "RPO и RTO — две независимые метрики SLA. RPO отвечает на вопрос 'сколько данных мы готовы потерять?'. В MM2: RPO = replication-latency-ms-avg в момент сбоя. Если лаг репликации составлял 5 секунд, то данные за последние 5 секунд на DC-1 не попали на DC-2. RPO снижается через: увеличение tasks.max, снижение network latency, выделенный Connect кластер. RTO отвечает на вопрос 'как быстро мы восстановимся?'. Складывается из: время обнаружения сбоя + DNS TTL + трансляция offset'ов + перезапуск приложений. Типичное RTO для Active-Passive: 5-20 минут.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-11-04-q2",
+      "type": "multiple-choice",
+      "question": "MM2 производительность: replication-latency-ms-avg = 45 секунд, emit.checkpoints.interval.seconds=60. Необходимо снизить data RPO до 5 секунд. Какие два параметра MM2 нужно изменить в первую очередь?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Снизить batch.size и linger.ms для продюсеров приложения"
+        },
+        {
+          "id": "b",
+          "text": "Увеличить tasks.max MirrorSourceConnector (для параллелизма репликации) и снизить emit.checkpoints.interval.seconds до 10 (для checkpoint RPO). Параллельно: диагностировать network bandwidth между DC"
+        },
+        {
+          "id": "c",
+          "text": "Увеличить replication.factor на DR-кластере с 3 до 5"
+        },
+        {
+          "id": "d",
+          "text": "Снизить retention.ms на source-кластере для уменьшения объёма реплицируемых данных"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Задержка репликации 45 секунд — это data RPO в 45 секунд, что критически превышает цель 5 секунд. Действия: (1) tasks.max — если сейчас tasks.max=1, он последовательно реплицирует партиции. При 12 партициях topics.max=12 позволит реплицировать все партиции параллельно, что резко снизит lag. (2) emit.checkpoints.interval.seconds=10 снизит checkpoint RPO: consumer group после failover повторно обработает максимум 10 секунд данных, а не 60. (3) Если bandwidth между DC является bottleneck (проверить byte-rate JMX метрику), то увеличение tasks.max не поможет — нужно решать сетевую проблему. Снижение retention.ms не влияет на задержку репликации активных данных.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-11-04-q3",
+      "type": "multiple-choice",
+      "question": "Active-Passive MM2. DC-1 вышел из строя в 14:00. Перечислите шаги failover в правильном порядке.",
+      "options": [
+        {
+          "id": "a",
+          "text": "1. Перезапустить consumer'ы на DC-2 → 2. Обновить DNS → 3. Транслировать offset'ы → 4. Остановить продюсеры на DC-1 → 5. Верифицировать"
+        },
+        {
+          "id": "b",
+          "text": "1. Обнаружить сбой (heartbeat alert) → 2. Остановить продюсеры на DC-1 → 3. Дождаться дренирования MM2 лага → 4. Транслировать offset'ы consumer groups → 5. Переключить DNS/LB на DC-2 → 6. Запустить consumer'ы и продюсеры на DC-2 → 7. Верифицировать"
+        },
+        {
+          "id": "c",
+          "text": "1. Обнаружить сбой → 2. Немедленно переключить DNS → 3. Запустить всё на DC-2 → 4. Транслировать offset'ы постфактум"
+        },
+        {
+          "id": "d",
+          "text": "1. Обнаружить сбой → 2. Транслировать offset'ы → 3. Переключить DNS → 4. Остановить продюсеры → 5. Запустить consumer'ы → 6. Запустить продюсеры"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Порядок шагов критичен для минимизации RPO и корректного failover: Шаг 1 (Обнаружение): heartbeat alert срабатывает при heartbeat_age > 30s. Шаг 2 (Остановить продюсеры): предотвращает запись данных в DC-1, которые не успеют реплицироваться — прямое влияние на RPO. Шаг 3 (Дренировать MM2): ждём пока MM2 реплицирует оставшиеся записи (если DC-1 частично доступен). Шаг 4 (Транслировать offset'ы): при sync.group.offsets.enabled=true — автоматически, иначе RemoteClusterUtils скрипт. Шаг 5 (DNS): после трансляции offset'ов, иначе consumer'ы подключатся к DC-2 без корректных offset'ов. Шаги 6-7 (запуск + верификация). Вариант C опасен: немедленное переключение DNS до трансляции offset'ов вызовет повторную обработку данных начиная с последнего checkpoint.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-11-04-q4",
+      "type": "multiple-choice",
+      "question": "Финансовая компания: SLA RPO = 2 секунды. MM2 replication-latency-ms-avg = 15 секунд (стабильно). Это вызвано: 1 Gbps inter-DC link, tasks.max=2, 24 партиции в orders топике. Какова правильная последовательность действий?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Принять что RPO=15 секунд и пересмотреть SLA с бизнесом"
+        },
+        {
+          "id": "b",
+          "text": "Сначала увеличить tasks.max=24 (параллелизм = числу партиций). Если lag не снизился до 2 секунд — диагностировать network bandwidth: при 24 tasks и высоком throughput 1 Gbps может быть bottleneck. Если bandwidth = bottleneck: выделить 10 Gbps inter-DC link или перейти на Active-Active (нет cross-DC lag для локальных записей)"
+        },
+        {
+          "id": "c",
+          "text": "Снизить retention.ms для orders топика с 7 дней до 1 часа"
+        },
+        {
+          "id": "d",
+          "text": "Увеличить replication.factor на DC-2 с 3 до 5 для надёжности"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "15 секунд lag при tasks.max=2 и 24 партициях: каждый task реплицирует 12 партиций последовательно в одном poll loop. Увеличение tasks.max=24: каждый task реплицирует 1 партицию параллельно. Это потенциально снизит lag в 12 раз (с 15s до 1-2s) если bottleneck = параллелизм, а не bandwidth. Следующий шаг: проверить byte-rate JMX метрику. Если суммарный byte-rate близок к 1 Gbps / 2 (учитывая overhead), то bandwidth = bottleneck. При RPO=2s и inter-DC расстоянии, требующем low-latency, рассмотреть Active-Active: продюсеры пишут локально, нет cross-DC lag для локальных записей = RPO практически 0 для локальных данных. replication.factor и retention.ms не влияют на replication lag.",
+      "bloomLevel": "analytical"
+    }
+  ]
+}

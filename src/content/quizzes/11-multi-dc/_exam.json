@@ -1,0 +1,336 @@
+{
+  "lessonSlug": "11-multi-dc/_exam",
+  "moduleId": "11-multi-dc",
+  "examTitle": "Экзамен: Multi-DC и Disaster Recovery",
+  "passThreshold": 70,
+  "_meta": {
+    "idPrefix": "kafka-11-exam",
+    "description": "12 scenario-based questions covering all 5 lessons of Module 11. Bloom distribution: 3 conceptual (25%), 4 applied (33%), 5 analytical (42%). All scenarios reference realistic production situations."
+  },
+  "questions": [
+    {
+      "id": "kafka-11-exam-q1",
+      "type": "multiple-choice",
+      "question": "E-commerce платформа развёртывает Kafka 4.0 в двух DC. Архитектор предлагает использовать MirrorMaker 1 для межкластерной репликации, ссылаясь на его простоту. Что ответить?",
+      "options": [
+        {
+          "id": "a",
+          "text": "MirrorMaker 1 действительно проще, его использование оправдано для простых active-passive сценариев"
+        },
+        {
+          "id": "b",
+          "text": "MirrorMaker 1 удалён из Kafka 4.0. Единственный поддерживаемый инструмент межкластерной репликации — MirrorMaker 2 (MM2), построенный на Kafka Connect. MM2 решает все известные проблемы MirrorMaker 1: трансляция offset'ов, мониторинг через heartbeat, предотвращение циклической репликации"
+        },
+        {
+          "id": "c",
+          "text": "MirrorMaker 1 доступен в Kafka 4.0 как legacy опция, но только для однонаправленной репликации"
+        },
+        {
+          "id": "d",
+          "text": "MirrorMaker 1 и MirrorMaker 2 функционально идентичны, разница только в имплементации"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "В Kafka 4.0 старый MirrorMaker 1 (класс MirrorMaker — простой consumer-producer мост из эпохи Kafka 1.x) полностью удалён. MM2 является обязательной заменой. Ключевые преимущества MM2 над MM1: (1) Трансляция offset'ов: MM1 не имел механизма трансляции consumer group offset'ов, что делало корректный failover невозможным без ручного вмешательства. (2) Мониторинг: MM2 MirrorHeartbeatConnector обеспечивает end-to-end latency monitoring. (3) Циклическая репликация: MM2 автоматически предотвращает через заголовки. (4) Управление: MM2 через Kafka Connect REST API. Использование MirrorMaker 1 в Kafka 4.0 невозможно технически.",
+      "bloomLevel": "conceptual",
+      "studyHint": "Урок 01: Архитектура MirrorMaker 2 — секция 'Kafka 4.0 и KRaft'"
+    },
+    {
+      "id": "kafka-11-exam-q2",
+      "type": "multiple-choice",
+      "question": "MM2 настроен для репликации 3 топиков с суммарно 36 партициями. tasks.max=3. Метрика replication-latency-ms-avg стабильно держится на 25 секундах при целевом RPO=5 секунд. Network bandwidth между DC достаточен (byte-rate = 30% от capacity). Что является основным bottleneck и как его исправить?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Insufficient network bandwidth. Нужно увеличить inter-DC link."
+        },
+        {
+          "id": "b",
+          "text": "tasks.max=3 при 36 партициях: каждый task реплицирует 12 партиций последовательно. Bottleneck — недостаточный параллелизм. Исправление: tasks.max=36 (каждый task = 1 партиция, максимальный параллелизм). Ожидаемое снижение lag: с 25s примерно до 2s"
+        },
+        {
+          "id": "c",
+          "text": "Слишком высокий replication.factor на target-кластере замедляет запись"
+        },
+        {
+          "id": "d",
+          "text": "emit.checkpoints.interval.seconds слишком низкий, создаёт overhead на checkpoint операции"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "При tasks.max=3 и 36 партициях каждый из 3 tasks обслуживает 12 партиций. В рамках одного task партиции обрабатываются последовательно в poll loop. При высоком throughput lag каждой партиции накапливается. Network bandwidth = 30% capacity, значит bandwidth не bottleneck. Решение: tasks.max=36 (maximum parallelism). Это создаёт 36 параллельных задач, каждая реплицирует 1 партицию. Снижение lag в ~12 раз (с 25s до 2s) при том же bandwidth. Это наиболее распространённый misconfiguration в MM2 production deployments. emit.checkpoints.interval.seconds влияет на checkpoint RPO, не на data replication lag.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 01: Архитектура MirrorMaker 2 — секция 'MirrorSourceConnector: ядро репликации'"
+    },
+    {
+      "id": "kafka-11-exam-q3",
+      "type": "multiple-choice",
+      "question": "Active-Active MM2 между двумя кластерами финансовой компании. Команда замечает: топик transactions-events на DC-2 содержит записи с key='TXN-001', которые пришли из DC-1 и из DC-2 одновременно. Какой конкретный механизм MM2 гарантирует, что эти записи не будут реплицироваться бесконечно?",
+      "options": [
+        {
+          "id": "a",
+          "text": "MM2 проверяет offset записей перед репликацией и пропускает дубликаты по offset"
+        },
+        {
+          "id": "b",
+          "text": "topics.exclude=transactions-events.replica исключает уже реплицированные топики"
+        },
+        {
+          "id": "c",
+          "text": "При репликации записи из DC-1 на DC-2 MM2 добавляет заголовок __mm2.record.header.source.cluster.alias=dc1. Когда MirrorSourceConnector (dc2->dc1 направление) читает эту запись, проверяет: source.cluster.alias=dc1 == current target (dc1). Условие выполнено — запись не реплицируется обратно. Каждая запись реплицируется ровно один раз."
+        },
+        {
+          "id": "d",
+          "text": "IdentityReplicationPolicy автоматически дедуплицирует записи с одинаковыми ключами"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Механизм защиты от бесконечной репликации в MM2: инъекция заголовка source cluster alias. При каждой репликации MM2 добавляет к записи заголовок __mm2.record.header.source.cluster.alias с псевдонимом кластера-источника. Когда реплицированная запись попадает на target-кластер и MirrorSourceConnector в обратном направлении (dc2->dc1) её читает, он проверяет этот заголовок: если source cluster alias совпадает с текущим target кластером (dc1), запись уже пришла из этого кластера и её не нужно реплицировать обратно. Это предотвращает бесконечный цикл. Дополнительная защита: topics.exclude=.*\\.internal,heartbeats исключает служебные топики MM2 из двунаправленной репликации.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 02: Active-Active и Active-Passive топологии — секция 'Предотвращение циклической репликации'"
+    },
+    {
+      "id": "kafka-11-exam-q4",
+      "type": "multiple-choice",
+      "question": "Маркетплейс настраивает DR систему. Требования: (1) при сбое Primary DC новый DC должен принять трафик за < 15 минут, (2) допустимая потеря данных — до 30 секунд, (3) оба DC находятся в разных городах (100ms inter-DC latency), (4) в нормальном режиме DR кластер не должен обслуживать трафик. Какая топология и конфигурация MM2 соответствуют всем требованиям?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Active-Active с IdentityReplicationPolicy: оба DC активны, RTO ~ 0"
+        },
+        {
+          "id": "b",
+          "text": "Active-Passive с DefaultReplicationPolicy. sync.group.offsets.enabled=true (устраняет ручную трансляцию offset'ов). emit.checkpoints.interval.seconds=30 (checkpoint RPO=30s). DNS TTL=60s. tasks.max = числу партиций. При 100ms latency data RPO = задержка репликации, типично 1-5 секунд при корректной конфигурации."
+        },
+        {
+          "id": "c",
+          "text": "Hub-and-Spoke: Primary = Hub, DR = Spoke"
+        },
+        {
+          "id": "d",
+          "text": "Active-Passive, но DR кластер должен обслуживать read-only трафик для снижения нагрузки"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Требования прямо указывают на Active-Passive: (3) DR не обслуживает трафик в нормальном режиме. Active-Active не подходит. Конфигурация для выполнения всех SLA: (1) RTO < 15 минут: DNS TTL=60s (снижает DNS фазу до 1 мин), sync.group.offsets.enabled=true (устраняет шаг ручной трансляции). Итого RTO: 1-5 мин (обнаружение) + 1 мин (DNS) + 0 мин (offset sync) + 2-5 мин (перезапуск) = 4-11 минут. Выполняется. (2) RPO 30 секунд: emit.checkpoints.interval.seconds=30 для checkpoint RPO=30s. tasks.max = числу партиций для минимального data replication lag. При 100ms inter-DC latency data RPO будет 1-5 секунд, значительно меньше 30s. (4) DefaultReplicationPolicy: topology = Active-Passive, topic prefix 'dc1.' предотвращает коллизии.",
+      "bloomLevel": "applied",
+      "studyHint": "Уроки 02 и 04: Топологии и RPO/RTO"
+    },
+    {
+      "id": "kafka-11-exam-q5",
+      "type": "multiple-choice",
+      "question": "После успешного failover на DC-2 consumer group 'inventory-sync' начала работать. Через 2 часа команда обнаруживает: 150 заказов в базе данных задвоились (обработаны дважды). В журналах consumer'а видны дублирующиеся event ID. Что стало причиной и как предотвратить в будущем?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Ошибка конфигурации: auto.offset.reset=earliest на consumer'е после failover сбросил чтение на начало топика"
+        },
+        {
+          "id": "b",
+          "text": "Checkpoint lag. MirrorCheckpointConnector с emit.checkpoints.interval.seconds=60 записал последний checkpoint за 55 секунд до failover. Consumer возобновил чтение с переведённого offset'а, соответствующего checkpoint, что привело к повторной обработке 55 секунд событий. Предотвращение: (1) снизить emit.checkpoints.interval.seconds до 10-15с, (2) реализовать idempotent обработку в inventory-sync (проверять event ID перед вставкой в БД)"
+        },
+        {
+          "id": "c",
+          "text": "MM2 создал дублирующиеся записи в dc1.orders из-за ошибки репликации"
+        },
+        {
+          "id": "d",
+          "text": "consumer group 'inventory-sync' была настроена с двумя instances, оба обрабатывали одни и те же партиции"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Это классический пример checkpoint lag + non-idempotent consumer. При emit.checkpoints.interval.seconds=60: MirrorCheckpointConnector записывает маппинг каждые 60 секунд. Если failover произошёл через 55 секунд после последнего checkpoint, consumer group возобновляет чтение с offset'а соответствующего позиции 55 секунд назад. Все события за эти 55 секунд обрабатываются повторно. Исправления: (1) Снизить emit.checkpoints.interval.seconds=10 — сокращает окно повторной обработки до 10 секунд. (2) Idempotent consumer: перед вставкой заказа в БД проверять: INSERT INTO orders ... ON CONFLICT (event_id) DO NOTHING. Event ID (из Kafka record key или payload) используется как idempotency key. At-least-once семантика при failover неизбежна — idempotency это correct способ работы с этим.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 03: Offset Translation — секция 'Checkpoint lag и RPO'"
+    },
+    {
+      "id": "kafka-11-exam-q6",
+      "type": "multiple-choice",
+      "question": "Команда выполняет ручной failover. Шаг 4 в их runbook: 'Применить translated offsets к consumer groups на DC-2'. Они вызывают RemoteClusterUtils.translateOffsets() с targetAdminClient для DC-2 и source cluster alias='dc1', но метод возвращает пустой Map. Какова наиболее вероятная причина?",
+      "options": [
+        {
+          "id": "a",
+          "text": "targetAdminClient указывает на DC-1 вместо DC-2 — нужно поменять bootstrap.servers"
+        },
+        {
+          "id": "b",
+          "text": "MirrorCheckpointConnector не был включён в конфигурации MM2 (emit.checkpoints.enabled=false или коннектор не настроен). Топик dc1.checkpoints.internal пуст или не существует на DC-2. Без checkpoint данных translateOffsets() не может найти маппинг и возвращает пустой результат"
+        },
+        {
+          "id": "c",
+          "text": "RemoteClusterUtils.translateOffsets() поддерживает только Kafka 3.0, в Kafka 4.0 API изменилось"
+        },
+        {
+          "id": "d",
+          "text": "Consumer group не имела committed offset'ов на DC-1 — группа никогда не коммитила"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "RemoteClusterUtils.translateOffsets() читает маппинг из топика {source-cluster}.checkpoints.internal на target-кластере (dc1.checkpoints.internal на DC-2). Если MirrorCheckpointConnector не был настроен или не запущен, этот топик либо отсутствует, либо пуст. Метод не находит маппинга для указанной consumer group и возвращает пустой Map. Диагностика: kafka-topics.sh --list --bootstrap-server dc2-broker1:9092 | grep checkpoints. Если топик отсутствует — MirrorCheckpointConnector не работал. Исправление: включить emit.checkpoints.enabled=true в mm2.properties и подождать emit.checkpoints.interval.seconds до появления первых checkpoint записей. Для немедленного failover: использовать auto.offset.reset=earliest как fallback (с потерей RPO гарантий).",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 03: Offset Translation — секция 'RemoteClusterUtils API'"
+    },
+    {
+      "id": "kafka-11-exam-q7",
+      "type": "multiple-choice",
+      "question": "Prometheus alert KafkaMM2ReplicationStalled: kafka_mirror_replication_latency_ms_avg > 30000 (>30 секунд). Kafka Connect показывает: MirrorSourceConnector status = RUNNING, все 12 tasks = RUNNING. Что является наиболее вероятной причиной и каковы первые три шага диагностики?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Причина: MirrorSourceConnector упал. Шаги: (1) перезапустить коннектор, (2) проверить Connect logs, (3) увеличить tasks.max"
+        },
+        {
+          "id": "b",
+          "text": "Причина: network bottleneck или backpressure. Коннектор работает (RUNNING), но не успевает реплицировать. Шаги: (1) проверить byte-rate JMX метрику (если near-capacity — bandwidth bottleneck), (2) проверить disk I/O на target-кластере (slow disk = slow produce = накопление lag), (3) проверить producer metrics MM2 на target: если record-error-rate > 0 — errors на target cluster"
+        },
+        {
+          "id": "c",
+          "text": "Причина: source-кластер полностью недоступен. Шаги: (1) ping dc1-broker1, (2) перезапустить DC-1, (3) обновить DNS"
+        },
+        {
+          "id": "d",
+          "text": "Причина: emit.checkpoints.interval.seconds слишком высокий. Шаги: снизить до 5 секунд"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Если connector status=RUNNING и все tasks=RUNNING, но replication lag > 30 секунд: коннектор работает, но не справляется с объёмом. Возможные причины: (1) Network bottleneck: byte-rate JMX метрика (kafka.mirror:...byte-rate) близка к 100% link capacity. MM2 читает быстрее чем может отправить на target. Решение: больший bandwidth или сжатие. (2) Slow target disk: MM2 producer ждёт ack от DC-2 брокеров. Если DC-2 имеет медленный диск, ack задерживается, MM2 накапливает backlog. (3) Target cluster overloaded: если DC-2 также обслуживает нагрузку (active-active), его брокеры могут быть перегружены. (4) Large backlog: если MM2 запущен впервые на топиках с большой историей, он будет догонять долгое время. emit.checkpoints.interval.seconds не влияет на data replication lag.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 04: RPO/RTO и мониторинг MM2 — секция 'JMX MBeans для MM2'"
+    },
+    {
+      "id": "kafka-11-exam-q8",
+      "type": "multiple-choice",
+      "question": "После настройки Active-Active MM2 с IdentityReplicationPolicy между dc1 и dc2, команда проверяет топики на dc1. Они обнаруживают: помимо orders, существуют топики orders.replica и dc2.orders. Что пошло не так?",
+      "options": [
+        {
+          "id": "a",
+          "text": "IdentityReplicationPolicy работает некорректно в Kafka 4.0 — известный баг"
+        },
+        {
+          "id": "b",
+          "text": "topics.exclude настроен неправильно: не исключает уже реплицированные топики и/или внутренние топики MM2. dc2.orders появляется если dc2->dc1 направление использует DefaultReplicationPolicy вместо IdentityReplicationPolicy. orders.replica появляется если topic naming pattern добавляет суффикс"
+        },
+        {
+          "id": "c",
+          "text": "Нужно увеличить replication.factor для orders топика"
+        },
+        {
+          "id": "d",
+          "text": "MM2 создаёт .replica и prefix-топики всегда при Active-Active — это нормальное поведение"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "dc2.orders на dc1 — симптом использования DefaultReplicationPolicy вместо IdentityReplicationPolicy. Конфигурация replication.policy.class должна быть одинаковой для обоих направлений MM2. Если dc1->dc2 использует IdentityReplicationPolicy, а dc2->dc1 использует DefaultReplicationPolicy (по умолчанию), то dc2->dc1 добавит префикс dc2 к топикам из DC-2: dc2.orders появляется на DC-1. orders.replica может указывать на проблему с topics.exclude: если внутренние топики MM2 (mm2-configs.*.internal) реплицируются обратно, это создаёт дополнительные топики. Решение: (1) проверить что replication.policy.class=IdentityReplicationPolicy для обоих направлений, (2) добавить dc2->dc1.topics.exclude=.*\\.internal,heartbeats,.*\\.replica.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 02: Active-Active топология — секция 'IdentityReplicationPolicy: обязательное требование'"
+    },
+    {
+      "id": "kafka-11-exam-q9",
+      "type": "multiple-choice",
+      "question": "Финансовая компания требует: при любом сбое данные не должны теряться (RPO=0). Возможно ли достичь RPO=0 с MM2? Если нет — почему? Если да — как?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Да, RPO=0 достигается через sync.group.offsets.enabled=true и emit.checkpoints.interval.seconds=0"
+        },
+        {
+          "id": "b",
+          "text": "RPO=0 недостижимо с asynchronous репликацией (MM2). Asynchronous replication всегда имеет ненулевой lag. Для RPO=0 нужна synchronous репликация: каждый produce request ждёт подтверждения от обоих кластеров. Kafka не поддерживает synchronous multi-DC репликацию нативно. Альтернатива: продюсеры пишут в оба кластера одновременно (dual-write с координацией) или использование специализированных решений"
+        },
+        {
+          "id": "c",
+          "text": "RPO=0 достигается с tasks.max равным числу партиций и выделенным Connect кластером для MM2"
+        },
+        {
+          "id": "d",
+          "text": "RPO=0 достижимо только в Active-Active топологии при нулевой network latency между DC"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "MM2 использует asynchronous репликацию: producer на DC-1 получает ack от DC-1 брокеров (согласно acks настройке) и завершает работу. MM2 реплицирует данные в DC-2 асинхронно. В любой момент времени существует ненулевой lag между DC-1 и DC-2. Если DC-1 выходит из строя прямо после записи в DC-1 (до репликации в DC-2), эти данные потеряны. RPO > 0 неизбежно при asynchronous репликации. Для RPO=0 нужна synchronous запись в оба DC: продюсер ждёт ack от обоих кластеров одновременно. Это значительно увеличивает latency записи (минимум inter-DC RTT = 2x network latency). В Kafka нет нативного механизма для этого. Практический подход: Банки часто принимают RPO=5-10 секунд + idempotency как достаточное для compliance.",
+      "bloomLevel": "conceptual",
+      "studyHint": "Урок 04: RPO/RTO — секция 'RPO: Recovery Point Objective'"
+    },
+    {
+      "id": "kafka-11-exam-q10",
+      "type": "multiple-choice",
+      "question": "Команда завершила failover на DC-2. Через неделю DC-1 восстановлен. Как безопасно выполнить failback (вернуть трафик на DC-1)?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Немедленно переключить DNS обратно на DC-1. DC-1 получит свежие данные через MM2 dc2->dc1 которое настраивать не нужно"
+        },
+        {
+          "id": "b",
+          "text": "Шаг 1: включить MM2 dc2->dc1 (dc2->dc1.enabled=true) для репликации данных накопленных на DC-2 за неделю. Шаг 2: дождаться пока lag dc2->dc1 упадёт до 0 (dc1 синхронизирован с dc2). Шаг 3: транслировать offset'ы consumer groups из DC-2 в DC-1. Шаг 4: переключить трафик (DNS) обратно на DC-1. Шаг 5: отключить dc2->dc1 репликацию после стабилизации"
+        },
+        {
+          "id": "c",
+          "text": "Восстановить DC-1 из snapshot DC-2 и немедленно переключить трафик"
+        },
+        {
+          "id": "d",
+          "text": "Оставить трафик на DC-2 навсегда. Failback рискованнее failover."
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Failback сложнее failover: DC-2 накопил неделю данных, которые не существуют на DC-1. Прямое переключение на DC-1 приведёт к потере всех данных за неделю (consumer'ы получат старые offset'ы, новые записи из DC-2 на DC-1 отсутствуют). Правильная процедура: (1) Запустить MM2 dc2->dc1: replicates все топики накопленные на DC-2 обратно в DC-1. (2) Ждать синхронизации: проверять lag mm2-source-dc2-to-dc1 через kafka-consumer-groups.sh. LAG=0 означает DC-1 полностью синхронизирован с DC-2. (3) Транслировать offset'ы: RemoteClusterUtils.translateOffsets() или sync.group.offsets.enabled=true. (4) Переключить трафик. (5) После стабилизации: отключить dc2->dc1 и оставить только dc1->dc2 для будущего DR.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 04: RPO/RTO — секция 'Процедура Failback'"
+    },
+    {
+      "id": "kafka-11-exam-q11",
+      "type": "multiple-choice",
+      "question": "Monitoring alert: kafka_connect_connector_status для MirrorCheckpointConnector = FAILED (0). MirrorSourceConnector = RUNNING. Как это влияет на работу системы прямо сейчас и при будущем failover?",
+      "options": [
+        {
+          "id": "a",
+          "text": "MirrorCheckpointConnector failure не влияет ни на что: данные продолжают реплицироваться через MirrorSourceConnector"
+        },
+        {
+          "id": "b",
+          "text": "Прямо сейчас: репликация данных топиков продолжается нормально (MirrorSourceConnector RUNNING). Checkpoint маппинг не обновляется: dc1.checkpoints.internal перестал получать свежие записи. При failover: RemoteClusterUtils.translateOffsets() вернёт устаревший маппинг (последний успешный checkpoint). Consumer группы возобновят чтение с позиции устаревшего checkpoint, что увеличивает RPO (объём повторной обработки) пропорционально времени простоя MirrorCheckpointConnector"
+        },
+        {
+          "id": "c",
+          "text": "Вся репликация останавливается при сбое любого из трёх MM2 коннекторов"
+        },
+        {
+          "id": "d",
+          "text": "sync.group.offsets.enabled=true компенсирует сбой MirrorCheckpointConnector автоматически"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Три MM2 коннектора независимы. Сбой одного не останавливает другие. Влияние сбоя MirrorCheckpointConnector: (1) Немедленно: данные продолжают реплицироваться через MirrorSourceConnector. Consumer'ы на DC-1 работают нормально. (2) Проблема при failover: checkpoint топик dc1.checkpoints.internal не обновлялся всё время простоя коннектора. Если коннектор был FAILED 2 часа, последний маппинг в checkpoint топике — двухчасовой давности. При failover consumer'ы получат offset'ы, соответствующие позиции 2 часа назад. RPO = 2 часа (в смысле повторной обработки). Исправление: немедленно restart MirrorCheckpointConnector через Connect REST API. Мониторить: kafka_connect_connector_status для всех MM2 коннекторов.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 01: Архитектура MM2 — секция 'Три коннектора'"
+    },
+    {
+      "id": "kafka-11-exam-q12",
+      "type": "multiple-choice",
+      "question": "Синтезирующий вопрос. E-commerce компания: DC-1 (основной, Москва), DC-2 (DR, Амстердам). 50ms inter-DC latency. 8 топиков, суммарно 96 партиций. Требования SLA: RPO <= 10 секунд, RTO <= 10 минут. Команда просит вас выбрать топологию и написать ключевые параметры mm2.properties. Что вы предложите?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Active-Active с IdentityReplicationPolicy. Двунаправленная репликация. Оба DC обслуживают трафик."
+        },
+        {
+          "id": "b",
+          "text": "Active-Passive. Параметры: dc1->dc2.enabled=true, dc1->dc2.topics=.*, tasks.max=96 (max parallelism для 96 партиций), emit.checkpoints.interval.seconds=10 (checkpoint RPO=10s), sync.group.offsets.enabled=true (устраняет шаг ручной трансляции, RTO снижается на 2-3 мин), DNS TTL=60s, DefaultReplicationPolicy. При 50ms latency data RPO будет 1-5 секунд. RTO: 1-3 мин (alert) + 1 мин (DNS 60s TTL) + 0 мин (auto offset sync) + 2-3 мин (перезапуск) = 4-7 минут."
+        },
+        {
+          "id": "c",
+          "text": "Hub-and-Spoke: DC-1 = Hub, DC-2 = Spoke"
+        },
+        {
+          "id": "d",
+          "text": "Active-Passive, но с tasks.max=1 для экономии ресурсов"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Анализ требований: (1) DR только при сбое ('основной DC' = primary) => Active-Passive. Active-Active избыточно если нет требования к RTO~0 и у DC-2 нет своих пользователей. (2) RPO <= 10 секунд: при 50ms inter-DC latency и tasks.max=96 data RPO будет 1-5 секунд — выполняется. emit.checkpoints.interval.seconds=10 обеспечивает checkpoint RPO=10s — на границе, но выполняется. (3) RTO <= 10 минут: с DNS TTL=60s + sync.group.offsets.enabled=true расчётное RTO = 4-7 минут — выполняется с запасом. Итоговый mm2.properties: dc1->dc2.enabled=true, dc1->dc2.topics=.*, tasks.max=96, emit.checkpoints.interval.seconds=10, sync.group.offsets.enabled=true, replication.policy.class=DefaultReplicationPolicy, dc1->dc2.replication.factor=3, offset.storage.replication.factor=3.",
+      "bloomLevel": "analytical",
+      "studyHint": "Все уроки Модуля 11"
+    }
+  ]
+}

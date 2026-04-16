@@ -1,0 +1,368 @@
+---
+title: "Active-Active и Active-Passive топологии"
+description: "Сравнение топологий Multi-DC: Active-Passive для DR, Active-Active для низкой задержки, Hub-and-Spoke и Fan-Out для распределённых систем"
+order: 2
+free: false
+estimatedTime: 30
+topics: ["Active-Active", "Active-Passive", "Topology", "MirrorMaker 2", "Disaster Recovery", "Hub-and-Spoke"]
+---
+
+# Active-Active и Active-Passive топологии
+
+Выбор топологии Multi-DC — один из самых важных архитектурных решений при проектировании отказоустойчивой системы на Kafka. Два принципиально разных подхода решают разные задачи: Active-Passive ставит простоту failover выше всего, Active-Active минимизирует задержку за счёт операционной сложности.
+
+Не существует "правильной" топологии. Существует топология, соответствующая вашим требованиям по RPO, RTO, пропускной способности и операционной зрелости команды.
+
+---
+
+## Active-Passive: надёжность через простоту
+
+В Active-Passive топологии один кластер (Primary) обслуживает 100% трафика. Второй кластер (DR Standby) получает реплицированные данные, но в нормальном режиме не обслуживает ни продюсеров, ни consumer'ов.
+
+<DiagramContainer title="Active-Passive: Primary DC и DR Standby" color="blue">
+  <div className="space-y-6 p-2">
+    <FlowRow gap={10} justify="center" align="start">
+      <FlowColumn gap={4} align="center">
+        <FlowNode
+          variant="source"
+          size="md"
+          tooltip="DC-1 Primary: обслуживает 100% продюсеров и consumer'ов. Все бизнес-события записываются сюда. Consumer group 'orders-processor' читает топик 'orders' с offset'ом, который отслеживается на DC-1. При нормальной работе DC-2 не получает запросов от приложений."
+        >
+          DC-1 (Primary)
+        </FlowNode>
+        <FlowRow gap={3} justify="center">
+          <FlowNode
+            variant="process"
+            size="sm"
+            tooltip="Продюсеры пишут заказы в топик orders на DC-1. Producer config: bootstrap.servers=dc1-broker1:9092,dc1-broker2:9092. В нормальном режиме продюсеры никогда не обращаются к DC-2."
+          >
+            Producers
+          </FlowNode>
+          <FlowNode
+            variant="process"
+            size="sm"
+            tooltip="Consumer'ы читают из DC-1. Consumer group 'orders-processor' committed offset на DC-1. После failover на DC-2 эти offset'ы нужно транслировать через MirrorCheckpointConnector — offset 5000 на DC-1 может соответствовать offset 5123 на DC-2."
+          >
+            Consumers
+          </FlowNode>
+        </FlowRow>
+        <FlowNode
+          variant="queue"
+          size="sm"
+          tooltip="Топик orders на DC-1. 12 партиций, RF=3, retention=7 дней. DefaultReplicationPolicy: при репликации на DC-2 топик получает имя dc1.orders. Consumer группы отслеживают offset именно по топику 'orders', партиция [0..11]."
+        >
+          orders (12 партиций)
+        </FlowNode>
+        <FlowNode
+          variant="queue"
+          size="sm"
+          tooltip="Топик payments на DC-1. Реплицируется на DC-2 как dc1.payments. При failover consumer'ы, читавшие 'payments' на DC-1 с offset 8000, должны переключиться на чтение 'dc1.payments' на DC-2 с транслированным offset'ом."
+        >
+          payments (6 партиций)
+        </FlowNode>
+      </FlowColumn>
+
+      <FlowColumn gap={6} align="center" justify="center">
+        <Arrow
+          direction="right"
+          label="MM2: dc1->dc2"
+          tooltip="MirrorSourceConnector: dc1->dc2.enabled=true. Однонаправленная репликация. Читает записи из DC-1 и воспроизводит на DC-2. Параллелизм: tasks.max = число партиций. DefaultReplicationPolicy: dc1.orders, dc1.payments. Задержка репликации: обычно 100ms-2s в зависимости от network bandwidth между DC."
+        />
+        <DataBox
+          label="MirrorCheckpointConnector"
+          tooltip="Периодически (emit.checkpoints.interval.seconds=60) записывает маппинг offset'ов в dc1.checkpoints.internal на DC-2. При sync.group.offsets.enabled=true: автоматически commit'ит переведённые offset'ы в consumer groups на DC-2. После failover consumer'ы на DC-2 автоматически возобновляют чтение с правильной позиции."
+        >
+          offset маппинг
+        </DataBox>
+      </FlowColumn>
+
+      <FlowColumn gap={4} align="center">
+        <FlowNode
+          variant="sink"
+          size="md"
+          tooltip="DC-2 DR Standby: получает реплицированные данные. В нормальном режиме consumer'ы не работают, продюсеры не подключены. При failover: DC-2 становится новым Primary. Время переключения (RTO): 5-20 минут включая обнаружение сбоя, трансляцию offset'ов и DNS-переключение."
+        >
+          DC-2 (DR Standby)
+        </FlowNode>
+        <FlowNode
+          variant="queue"
+          size="sm"
+          tooltip="Реплицированный топик dc1.orders на DR-кластере. Содержит те же данные что и orders на DC-1, но имя другое (DefaultReplicationPolicy). Consumer'ы после failover читают dc1.orders вместо orders. sync.group.offsets.enabled=true автоматически транслирует committed offset'ы."
+        >
+          dc1.orders
+        </FlowNode>
+        <FlowNode
+          variant="queue"
+          size="sm"
+          tooltip="Реплицированный топик dc1.payments на DR-кластере. Lag между DC-1 orders offset и dc1.orders offset на DC-2 определяет RPO: если лаг = 2 секунды, то RPO = 2 секунды."
+        >
+          dc1.payments
+        </FlowNode>
+      </FlowColumn>
+    </FlowRow>
+
+    <FlowRow gap={6} justify="center">
+      <DataBox
+        label="RPO"
+        tooltip="Recovery Point Objective. В Active-Passive = текущий lag MirrorSourceConnector. Типично: 1-30 секунд. При сбое DC-1 данные, записанные после последнего успешного checkpoint MM2, будут потеряны."
+      >
+        1-30 секунд
+      </DataBox>
+      <DataBox
+        label="RTO"
+        tooltip="Recovery Time Objective. Включает: обнаружение сбоя (1-5 мин) + трансляция offset'ов (1 мин с RemoteClusterUtils или автоматически при sync.group.offsets.enabled=true) + DNS переключение (TTL, 1-5 мин) + перезапуск приложений (1-5 мин). Итого: 5-20 минут."
+      >
+        5-20 минут
+      </DataBox>
+      <DataBox
+        label="Конфигурация"
+        tooltip="mm2.properties: dc1->dc2.enabled=true. DefaultReplicationPolicy (имена с префиксом). sync.group.offsets.enabled=true для автоматической трансляции offset'ов. Одностороннее направление репликации."
+      >
+        Простая однонаправленная
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+### Процедура failover в Active-Passive
+
+Failover — это последовательность шагов, каждый из которых влияет на RPO или RTO. Понимание порядка критично:
+
+1. **Обнаружение сбоя.** Мониторинг heartbeat-топика (`heartbeats`) на DC-2. Если heartbeat_age превышает порог (обычно 30-60 секунд), DC-1 считается недоступным. Также: потеря TCP-соединений от продюсеров.
+
+2. **Остановка продюсеров на DC-1.** Это предотвращает запись данных в DC-1, которые не успеют реплицироваться. Application-level circuit breaker или внешний оркестратор отключает продюсеров.
+
+3. **Ожидание дренирования MM2.** После остановки продюсеров MM2 продолжает реплицировать оставшиеся записи. Ожидание: `tasks.max * replication_task_poll_interval`. Если DC-1 полностью недоступен, этот шаг пропускается, принимая RPO = текущий lag.
+
+4. **Трансляция offset'ов consumer groups.** При `sync.group.offsets.enabled=true` — автоматически. Иначе — вручную через `RemoteClusterUtils.translateOffsets()`. Подробно в уроке 03.
+
+5. **Переключение DNS/Load Balancer.** Bootstrap servers продюсеров и consumer'ов перенаправляются на DC-2. TTL DNS влияет на скорость распространения изменения.
+
+6. **Перезапуск consumer'ов и продюсеров на DC-2.** Consumer'ы подключаются к DC-2, находят committed offset'ы (автоматически транслированные) и возобновляют чтение из `dc1.orders`.
+
+7. **Верификация потока данных.** Проверка через consumer lag мониторинг: `records-lag-max` для всех consumer groups должен снижаться.
+
+---
+
+## Active-Active: двунаправленная репликация
+
+В Active-Active оба кластера одновременно обслуживают продюсеров и consumer'ов. MM2 реплицирует данные в обоих направлениях. Цель: каждый регион обслуживает локальных пользователей с минимальной задержкой, при этом оба кластера содержат (почти) полный набор данных.
+
+<MM2TopologyDiagram client:visible />
+
+### IdentityReplicationPolicy: обязательное требование
+
+Для Active-Active обязательно использовать `IdentityReplicationPolicy`. Без неё:
+
+- DefaultReplicationPolicy: DC-1 реплицирует `orders` -> DC-2 как `dc1.orders`. DC-2 реплицирует `orders` -> DC-1 как `dc2.orders`.
+- Результат: на DC-1 существуют два разных топика: `orders` (локальный) и `dc2.orders` (реплика). Consumer'ы на DC-2 читают `dc2.orders`, а не `orders`. Логика приложения разрушена.
+
+С IdentityReplicationPolicy: и DC-1, и DC-2 имеют топик `orders` с одинаковым именем. Consumer'ы используют одну и ту же конфигурацию независимо от того, к какому кластеру они подключены.
+
+```properties
+# Active-Active конфигурация mm2.properties
+clusters = dc1, dc2
+
+dc1.bootstrap.servers = dc1-broker1:9092,dc1-broker2:9092
+dc2.bootstrap.servers = dc2-broker1:9092,dc2-broker2:9092
+
+# Двунаправленная репликация
+dc1->dc2.enabled = true
+dc1->dc2.topics = .*
+dc2->dc1.enabled = true
+dc2->dc1.topics = .*
+
+# Исключить внутренние топики MM2 из репликации (критично!)
+dc1->dc2.topics.exclude = .*\.internal, heartbeats, .*\.replica
+dc2->dc1.topics.exclude = .*\.internal, heartbeats, .*\.replica
+
+# IdentityReplicationPolicy: топики сохраняют оригинальное имя
+replication.policy.class = org.apache.kafka.connect.mirror.IdentityReplicationPolicy
+
+# Heartbeat и checkpoint для обоих направлений
+dc1->dc2.emit.heartbeats.enabled = true
+dc2->dc1.emit.heartbeats.enabled = true
+dc1->dc2.emit.checkpoints.enabled = true
+dc2->dc1.emit.checkpoints.enabled = true
+```
+
+### Предотвращение циклической репликации
+
+Главная техническая проблема Active-Active: если DC-1 реплицирует запись на DC-2, а DC-2 реплицирует её обратно на DC-1, возникает бесконечный цикл.
+
+MM2 решает это через заголовки. К каждой реплицированной записи добавляется заголовок `__mm2.record.header.source.cluster.alias=dc1`. Когда MirrorSourceConnector на DC-2 читает эту запись при репликации dc2->dc1, он проверяет заголовок: если source == "dc1" (текущий target), запись пропускается.
+
+Дополнительная защита — явное исключение внутренних топиков через `topics.exclude`. Топики `heartbeats`, `*.checkpoints.internal`, `*.internal` не должны реплицироваться обратно.
+
+### Разрешение конфликтов в Active-Active
+
+Kafka не имеет встроенного разрешения конфликтов для Active-Active записи. Если два продюсера в DC-1 и DC-2 одновременно записывают разные данные по одному ключу, порядок записей в обоих кластерах будет определяться задержкой репликации и порядком прибытия.
+
+Практические стратегии:
+
+**Partition Affinity (рекомендованное решение).** Каждый DC "владеет" своим диапазоном ключей. Например: DC-1 обслуживает пользователей с ID A-M, DC-2 обслуживает N-Z. Ни один ключ никогда не записывается одновременно из двух DC. Конфликтов нет по определению.
+
+**Application-level idempotency.** Consumer'ы хранят версию каждой записи. При получении дублирующей записи проверяется версия: если входящая версия не выше уже обработанной, запись игнорируется. Требует хранилища версий (Redis, PostgreSQL).
+
+**CRDT-based merging.** Конфликтующие значения merge'атся через структуры данных без конфликтов (Conflict-free Replicated Data Types). Применимо только для специфических типов данных (счётчики, наборы, timestamps).
+
+<Callout type="tip">
+Сравнение топологий: когда что использовать.
+
+| Критерий | Active-Passive | Active-Active |
+|----------|---------------|---------------|
+| Основная цель | Disaster Recovery | Низкая задержка, гео-распределение |
+| RPO | Секунды (зависит от MM2 lag) | Практически 0 (локальная запись) |
+| RTO | 5-20 минут | Практически 0 (нет failover) |
+| Конфликты | Нет | Требует стратегии |
+| Операционная сложность | Низкая | Высокая |
+| Использование ресурсов DR | Idle (только репликация) | 100% utilization обоих DC |
+| ReplicationPolicy | DefaultReplicationPolicy | IdentityReplicationPolicy (обязательно) |
+
+Выбирайте Active-Active только если ваши SLA требуют нулевого RTO и у вас есть чёткая стратегия разрешения конфликтов.
+</Callout>
+
+---
+
+## Hub-and-Spoke и Fan-Out топологии
+
+Помимо двух основных топологий, MM2 поддерживает более сложные паттерны для специфических архитектур.
+
+### Hub-and-Spoke: агрегация из множества источников
+
+<DiagramContainer title="Hub-and-Spoke: периферийные кластеры -> центральный хаб" color="emerald">
+  <div className="space-y-4 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">Паттерн для IoT-агрегации, региональных данных, CDC-конвейеров из нескольких источников</div>
+    <FlowRow gap={6} justify="center" align="center">
+      <FlowColumn gap={3} align="center">
+        <FlowNode
+          variant="source"
+          size="sm"
+          tooltip="Edge-1: IoT-устройства региона Европа. Продюсеры пишут sensor-данные локально. MM2 Edge1->Hub реплицирует всё в центральный Hub. Topic prefix с DefaultReplicationPolicy: edge1.sensor-data."
+        >
+          Edge-1 (EU)
+        </FlowNode>
+        <FlowNode
+          variant="source"
+          size="sm"
+          tooltip="Edge-2: IoT-устройства региона Азия. Независимый кластер. MM2 Edge2->Hub реплицирует локальные данные. Topic prefix: edge2.sensor-data. Hub видит оба потока данных параллельно."
+        >
+          Edge-2 (Asia)
+        </FlowNode>
+        <FlowNode
+          variant="source"
+          size="sm"
+          tooltip="Edge-3: IoT-устройства региона США. Третий независимый кластер. MM2 Edge3->Hub. Topic prefix: edge3.sensor-data. На Hub доступны все три потока для global analytics."
+        >
+          Edge-3 (US)
+        </FlowNode>
+      </FlowColumn>
+
+      <FlowColumn gap={4} align="center" justify="center">
+        <Arrow direction="right" label="MM2 (однонаправленно)" tooltip="Каждый edge-кластер имеет свой MM2 (или shared MM2 с несколькими конфигурациями): edge1->hub.enabled=true, edge2->hub.enabled=true, edge3->hub.enabled=true. Hub НЕ реплицирует обратно на edge. Топология строго однонаправленная." />
+      </FlowColumn>
+
+      <FlowColumn gap={3} align="center">
+        <FlowNode
+          variant="process"
+          size="md"
+          tooltip="Central Hub: агрегирует данные из всех edge-кластеров. Доступны топики edge1.sensor-data, edge2.sensor-data, edge3.sensor-data. Kafka Streams на Hub может join'ить данные из всех регионов для global analytics. JDBC Sink может загружать в Data Warehouse."
+        >
+          Central Hub
+        </FlowNode>
+        <FlowNode
+          variant="queue"
+          size="sm"
+          tooltip="Агрегированные топики на Hub: edge1.sensor-data (данные из EU), edge2.sensor-data (Asia), edge3.sensor-data (US). Analytics consumer группы читают все три топика. Hub не является производителем данных -- только агрегатором."
+        >
+          edge1.*, edge2.*, edge3.*
+        </FlowNode>
+      </FlowColumn>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+**Применение Hub-and-Spoke:** IoT-платформы (сотни edge-устройств -> центральная аналитика), многорегиональный CDC (несколько PostgreSQL баз -> центральный Kafka для стриминга в Data Warehouse), мультиарендные системы (каждый tenant = отдельный кластер, Hub = master).
+
+### Fan-Out: распределение из центра
+
+Fan-Out — инверсия Hub-and-Spoke. Центральный кластер является источником данных (например, глобальный каталог товаров, конфигурация), а edge-кластеры получают реплики для локальных consumer'ов.
+
+<DiagramContainer title="Fan-Out: центральный хаб -> периферийные кластеры" color="violet">
+  <div className="space-y-4 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">Паттерн для раздачи конфигурации, глобальных справочников, прав доступа в региональные кластеры</div>
+    <FlowRow gap={6} justify="center" align="center">
+      <FlowColumn gap={3} align="center">
+        <FlowNode
+          variant="source"
+          size="md"
+          tooltip="Central Hub: источник глобальных данных. Команды публикуют конфигурацию, справочники, права доступа в топики config.global, catalog.products. MM2 распределяет эти данные во все региональные кластеры."
+        >
+          Central Hub
+        </FlowNode>
+        <FlowNode
+          variant="queue"
+          size="sm"
+          tooltip="Топики Hub: config.global (конфигурация сервисов), catalog.products (каталог товаров для E-commerce), permissions.roles (права пользователей). Все реплицируются во все edge-кластеры через MM2 hub->edge1, hub->edge2, hub->edge3."
+        >
+          config.global / catalog.products
+        </FlowNode>
+      </FlowColumn>
+
+      <FlowColumn gap={4} align="center" justify="center">
+        <Arrow direction="right" label="MM2 hub->edge1,2,3" tooltip="Hub->edge1, hub->edge2, hub->edge3 -- три направления MM2. Edge-кластеры получают реплики hub.config.global, hub.catalog.products (с DefaultReplicationPolicy). Consumer'ы на edge читают локально, без cross-DC latency." />
+      </FlowColumn>
+
+      <FlowColumn gap={3} align="center">
+        <FlowNode
+          variant="sink"
+          size="sm"
+          tooltip="Edge-1 (EU): локальные consumer'ы читают hub.config.global без cross-DC latency. Данные актуальны с задержкой репликации MM2 (1-2 секунды). Продюсеры на edge не пишут в hub.* топики -- только читают."
+        >
+          Edge-1 (EU)
+        </FlowNode>
+        <FlowNode
+          variant="sink"
+          size="sm"
+          tooltip="Edge-2 (Asia): то же самое. Локальная копия глобальных данных. Если Hub временно недоступен, edge-кластеры продолжают работать с последней версией реплицированных данных."
+        >
+          Edge-2 (Asia)
+        </FlowNode>
+        <FlowNode
+          variant="sink"
+          size="sm"
+          tooltip="Edge-3 (US): третья реплика. Fan-Out позволяет масштабировать число edge-кластеров без изменения Hub. Добавить Edge-4: просто добавить hub->edge4 в mm2.properties."
+        >
+          Edge-3 (US)
+        </FlowNode>
+      </FlowColumn>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+**Применение Fan-Out:** Глобальные справочники (каталог товаров, таблицы тарифов, конфигурация сервисов), централизованная авторизация (права доступа распределяются в регионы), событийные уведомления от центрального оркестратора в региональные сервисы.
+
+---
+
+## Сравнительная таблица топологий
+
+| Топология | Направление MM2 | ReplicationPolicy | Конфликты | Основное применение |
+|-----------|----------------|-------------------|-----------|---------------------|
+| Active-Passive | dc1->dc2 | Default или Identity | Нет | Disaster Recovery |
+| Active-Active | dc1->dc2 и dc2->dc1 | Identity (обязательно) | Требует стратегии | Гео-распределение, низкая задержка |
+| Hub-and-Spoke | edge[1-N]->hub | Default | Нет | IoT-агрегация, CDC из нескольких источников |
+| Fan-Out | hub->edge[1-N] | Default | Нет | Распределение конфигурации, справочников |
+
+---
+
+## Ключевые выводы
+
+1. **Active-Passive** — стандарт для Disaster Recovery. Простая конфигурация, предсказуемый failover, RTO 5-20 минут, RPO в секунды. DefaultReplicationPolicy добавляет prefix к топикам.
+2. **Active-Active** — для геораспределённых систем с требованием низкой задержки. Обязателен IdentityReplicationPolicy. Требует явной стратегии разрешения конфликтов (partition affinity — самый безопасный выбор).
+3. **Циклическая репликация** в Active-Active предотвращается заголовком `__mm2.record.header.source.cluster.alias` и явным исключением служебных топиков через `topics.exclude`.
+4. **Hub-and-Spoke** и **Fan-Out** — специализированные топологии для IoT и распределения конфигурации соответственно.
+
+<KnowledgeCheck
+  question="E-commerce компания имеет два дата-центра: EU (основной) и US. Требования: (1) EU-пользователи должны получать ответы с задержкой менее 50ms, (2) US-пользователи тоже менее 50ms, (3) если EU DC падает, US DC должен продолжать работу без ручного вмешательства. Ни один DC не является чисто резервным. Какую топологию MM2 выбрать и почему?"
+  answer="Active-Active с IdentityReplicationPolicy. Обоснование: (1) Оба DC обслуживают своих локальных пользователей -- EU-пользователи подключаются к EU DC, US-пользователи к US DC. Это обеспечивает < 50ms без cross-DC hop. (2) Двунаправленная репликация MM2 (eu->us.enabled=true и us->eu.enabled=true) синхронизирует данные между DC. (3) При падении EU DC: US DC уже имеет реплицированные данные и продолжает работу немедленно (RTO ~ 0, нет ручного failover). IdentityReplicationPolicy обязателен: consumer'ы используют одинаковые имена топиков в обоих DC. Стратегия конфликтов: partition affinity -- EU-пользователи (EU ID prefix) всегда пишут в EU DC, US-пользователи (US ID prefix) в US DC. Никаких конфликтов по одному ключу. Конфигурация: eu->us.topics.exclude=.*\\.internal,heartbeats и обратно для предотвращения циклической репликации."
+/>
