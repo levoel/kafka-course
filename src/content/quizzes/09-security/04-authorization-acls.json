@@ -91,6 +91,39 @@
       "correctAnswer": "true",
       "explanation": "Истина. В Kafka StandardAuthorizer DENY всегда побеждает ALLOW — это принцип explicit denial. Если для User:compromised-app существуют ACL: ALLOW Write на topic 'orders' AND DENY Write на topic 'orders' (или DENY All на topic '*') — операция будет DENIED. Это позволяет использовать DENY ACL для инцидент-реагирования: kafka-acls.sh --add --deny-principal User:compromised-app --operation All --topic '*' --resource-pattern-type prefixed мгновенно блокирует все операции скомпрометированного аккаунта, даже если у него есть множество ALLOW ACL. Это быстрее и безопаснее, чем удалять все ALLOW ACL по одному.",
       "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m09-04-code-1",
+      "type": "code-challenge",
+      "question": "Напишите YAML-конфигурацию аргументов kafka-acls.sh для предоставления группе потребителей analytics-group права READ на топик transactions для principal User:analyst. Включите все необходимые параметры: операцию, топик, группу и principal.",
+      "language": "yaml",
+      "starterCode": "# Аргументы kafka-acls.sh для выдачи прав READ\nkafka-acls:\n  operation: TODO\n  topic: TODO\n  group: TODO\n  allow-principal: TODO\n  action: add",
+      "solutionCode": "kafka-acls:\n  operation: Read\n  topic: transactions\n  group: analytics-group\n  allow-principal: \"User:analyst\"\n  action: add",
+      "testCases": [
+        {
+          "id": "tc1",
+          "description": "Конфигурация содержит операцию Read",
+          "expectedOutput": "Read",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc2",
+          "description": "Конфигурация содержит топик transactions",
+          "expectedOutput": "transactions",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc3",
+          "description": "Конфигурация содержит группу analytics-group",
+          "expectedOutput": "analytics-group",
+          "matchMode": "contains",
+          "hidden": true
+        }
+      ],
+      "explanation": "Kafka ACL для consumer-группы требует указания трёх ресурсов: --operation Read разрешает операции чтения (FetchRequest, OffsetFetch); --topic transactions задаёт конкретный топик; --group analytics-group предоставляет право Group:Read для JoinGroup и OffsetCommit; --allow-principal User:analyst указывает principal в формате тип:имя. Полная команда kafka-acls.sh: kafka-acls.sh --bootstrap-server localhost:9092 --add --allow-principal User:analyst --operation Read --topic transactions --group analytics-group. Без Group:Read потребитель получит GroupAuthorizationException при попытке присоединиться к группе.",
+      "bloomLevel": "applied"
     }
   ]
 }

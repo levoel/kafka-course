@@ -3,7 +3,7 @@
   "moduleId": "01-kafka-architecture",
   "_meta": {
     "idPrefix": "kafka-m01-03",
-    "description": "Use IDs: kafka-m01-03-q1, q2, q3 for MC; kafka-m01-03-q4 for TF"
+    "description": "Use IDs: kafka-m01-03-q1, q2, q3 for MC; kafka-m01-03-q4 for TF; kafka-m01-03-code-1 for code challenge"
   },
   "questions": [
     {
@@ -90,6 +90,39 @@
       "question": "Если все три фолловера партиции выбыли из ISR и ISR=[Leader], настройка acks=all гарантирует, что данные будут продублированы на двух репликах перед подтверждением продюсеру.",
       "correctAnswer": "false",
       "explanation": "Ложь. При ISR=[Leader] настройка acks=all требует подтверждения от ВСЕХ реплик в ISR. ISR содержит только лидера — значит, acks=all фактически эквивалентен acks=1 (один лидер). Данные хранятся только на одной реплике. Именно для предотвращения этой ситуации используется min.insync.replicas=2: при ISR<2 лидер отклоняет запись с NotEnoughReplicasException, а не принимает её с иллюзией надёжности.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m01-03-code-1",
+      "type": "code-challenge",
+      "question": "Напишите JSON-конфигурацию брокера, которая устанавливает три параметра надёжности репликации: минимальное число синхронных реплик равно 2, фактор репликации по умолчанию равен 3, и запрещает выбор лидера из несинхронных реплик. Выведите конфигурацию в формате JSON.",
+      "language": "json",
+      "starterCode": "{\n  \"min.insync.replicas\": TODO,\n  \"default.replication.factor\": TODO,\n  \"unclean.leader.election.enable\": TODO\n}",
+      "solutionCode": "{\n  \"min.insync.replicas\": 2,\n  \"default.replication.factor\": 3,\n  \"unclean.leader.election.enable\": false\n}",
+      "testCases": [
+        {
+          "id": "tc1",
+          "description": "Конфигурация содержит min.insync.replicas равный 2",
+          "expectedOutput": "\"min.insync.replicas\": 2",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc2",
+          "description": "Конфигурация содержит default.replication.factor равный 3",
+          "expectedOutput": "\"default.replication.factor\": 3",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc3",
+          "description": "Конфигурация запрещает выбор лидера из несинхронных реплик",
+          "expectedOutput": "\"unclean.leader.election.enable\": false",
+          "matchMode": "contains",
+          "hidden": true
+        }
+      ],
+      "explanation": "Три параметра образуют связанную конфигурацию надёжности: min.insync.replicas=2 требует минимум двух синхронных реплик для подтверждения записи при acks=all — если ISR упадёт ниже 2, брокер отклонит запись с NotEnoughReplicasException; default.replication.factor=3 задаёт количество реплик для новых топиков — стандарт для production с тремя брокерами; unclean.leader.election.enable=false запрещает выбор лидера из реплик, не входящих в ISR — без этой настройки при потере всех ISR-реплик Kafka может выбрать отставшую реплику лидером ценой потери данных.",
       "bloomLevel": "applied"
     }
   ]

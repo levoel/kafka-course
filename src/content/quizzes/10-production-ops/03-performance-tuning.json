@@ -83,6 +83,32 @@
       "correctAnswer": "b",
       "explanation": "fetch.min.bytes=1 (default) означает: брокер отвечает на fetch запрос немедленно, даже если есть только один байт данных. При 200K records/s и частых poll() это генерирует тысячи fetch-запросов в секунду. При fetch.min.bytes=1048576 (1MB): брокер накапливает 1MB данных (или ждёт fetch.max.wait.ms=500ms) перед ответом. 200K records/s × 1KB avg = 200MB/s. 200MB/s / 1MB = 200 fetch/s -- в 40 раз меньше fetch запросов. Снижается CPU overhead на обе стороны. max.poll.records=1000 позволяет за один poll() получать больше записей, снижая overhead на poll() вызовы.",
       "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m10-03-code-1",
+      "type": "code-challenge",
+      "question": "Напишите Python-скрипт, который вычисляет необходимое количество брокеров для заданной нагрузки. Исходные данные: целевой throughput 500 МБ/с, пропускная способность одного брокера 100 МБ/с, фактор репликации 3. Формула: ceil(target_throughput * replication_factor / per_broker_throughput). Выведите результат в формате 'Brokers: N'.",
+      "language": "python",
+      "starterCode": "import math\n\n# Исходные данные\ntarget_throughput = 500    # МБ/с\nper_broker_throughput = 100  # МБ/с на один брокер\nreplication_factor = 3\n\n# TODO: Вычислите необходимое количество брокеров\n# Формула: ceil(target_throughput * replication_factor / per_broker_throughput)\nbroker_count = 0  # замените на вычисление\n\n# TODO: Выведите результат в формате 'Brokers: N'\nprint()",
+      "solutionCode": "import math\n\ntarget_throughput = 500\nper_broker_throughput = 100\nreplication_factor = 3\n\nbroker_count = math.ceil(target_throughput * replication_factor / per_broker_throughput)\n\nprint(f'Brokers: {broker_count}')",
+      "testCases": [
+        {
+          "id": "tc1",
+          "description": "Вывод содержит 'Brokers:'",
+          "expectedOutput": "Brokers:",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc2",
+          "description": "Результат равен 15 брокерам (500 * 3 / 100 = 15)",
+          "expectedOutput": "Brokers: 15",
+          "matchMode": "contains",
+          "hidden": true
+        }
+      ],
+      "explanation": "Формула учитывает репликацию: каждый МБ данных записывается на replication_factor брокеров, поэтому суммарная нагрузка на кластер = target_throughput * replication_factor = 500 * 3 = 1500 МБ/с. Делим на пропускную способность одного брокера: 1500 / 100 = 15 брокеров. math.ceil обеспечивает округление вверх при нецелых результатах. В production к расчётному числу добавляют запас 20-30% для пиковой нагрузки и планового обслуживания.",
+      "bloomLevel": "analytical"
     }
   ]
 }

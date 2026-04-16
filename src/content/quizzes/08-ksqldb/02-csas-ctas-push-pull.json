@@ -91,6 +91,39 @@
       "correctAnswer": "true",
       "explanation": "Истина. Persistent queries (CSAS/CTAS) — это постоянные Kafka Streams топологии. При рестарте ksqlDB-сервера он автоматически загружает все persistent queries из внутреннего хранилища метаданных (в Kafka-топике) и восстанавливает их выполнение. Kafka Streams под капотом использует consumer group offsets — обработка возобновляется с последнего закоммиченного offset. State stores восстанавливаются из changelog-топиков. Именно эта надёжность делает CSAS/CTAS инструментом для production-пайплайнов.",
       "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m08-02-code-1",
+      "type": "code-challenge",
+      "question": "Напишите ksqlDB CSAS-оператор, который создаёт поток orders_enriched путём объединения потока orders_stream с таблицей customers_table по полю customer_id. В результирующий поток включите поля: order_id, amount, customer_name.",
+      "language": "sql",
+      "starterCode": "-- TODO: Создайте поток orders_enriched через CSAS с JOIN\nCREATE STREAM orders_enriched AS\n  SELECT\n    -- TODO: выберите нужные поля\n  FROM orders_stream\n  -- TODO: добавьте JOIN с customers_table\n  EMIT CHANGES;",
+      "solutionCode": "CREATE STREAM orders_enriched AS\n  SELECT\n    o.order_id,\n    o.amount,\n    c.customer_name\n  FROM orders_stream o\n  JOIN customers_table c ON o.customer_id = c.customer_id\n  EMIT CHANGES;",
+      "testCases": [
+        {
+          "id": "tc1",
+          "description": "Оператор содержит CREATE STREAM",
+          "expectedOutput": "CREATE STREAM",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc2",
+          "description": "Оператор содержит JOIN с таблицей customers_table",
+          "expectedOutput": "JOIN",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc3",
+          "description": "JOIN выполняется по полю customer_id",
+          "expectedOutput": "customer_id",
+          "matchMode": "contains",
+          "hidden": true
+        }
+      ],
+      "explanation": "CSAS (CREATE STREAM AS SELECT) создаёт постоянный потоковый запрос. Stream-Table JOIN в ksqlDB соединяет каждое событие из orders_stream с текущей записью в customers_table по совпадающему ключу: ON o.customer_id = c.customer_id. KTable материализует последнее состояние клиента — при каждом заказе автоматически подтягиваются актуальные данные клиента. EMIT CHANGES переводит запрос в push-режим: результат непрерывно публикуется в новый Kafka-топик ORDERS_ENRICHED.",
+      "bloomLevel": "applied"
     }
   ]
 }
