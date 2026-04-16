@@ -1,17 +1,494 @@
 {
   "title": "Решение проблем Apache Kafka",
-  "description": "Частые ошибки и проблемы при работе с Apache Kafka.",
+  "description": "Частые ошибки при работе с Apache Kafka — симптомы, причины и пошаговые решения.",
   "filters": {
     "primary": {
       "label": "Область",
       "field": "area",
-      "options": []
+      "options": [
+        { "id": "broker", "label": "Брокер", "icon": "cube", "color": "blue" },
+        { "id": "producer", "label": "Producer", "icon": "rocket", "color": "purple" },
+        { "id": "consumer", "label": "Consumer", "icon": "layers", "color": "cyan" },
+        { "id": "connect", "label": "Kafka Connect", "icon": "gear", "color": "teal" },
+        { "id": "streams", "label": "Kafka Streams", "icon": "code", "color": "orange" },
+        { "id": "security", "label": "Безопасность", "icon": "wrench", "color": "red" },
+        { "id": "ops", "label": "Production Ops", "icon": "lightning", "color": "green" }
+      ]
     },
     "secondary": {
       "label": "Категория",
       "field": "category",
-      "options": []
+      "options": [
+        { "id": "config-error", "label": "Ошибки конфигурации", "icon": "cube", "color": "amber" },
+        { "id": "connectivity", "label": "Проблемы подключения", "icon": "rocket", "color": "indigo" },
+        { "id": "performance", "label": "Проблемы производительности", "icon": "lightning", "color": "orange" },
+        { "id": "data-loss", "label": "Потеря данных", "icon": "alert", "color": "red" },
+        { "id": "rebalancing", "label": "Проблемы ребалансировки", "icon": "layers", "color": "blue" }
+      ]
     }
   },
-  "entries": []
+  "entries": [
+    {
+      "errorMessage": "NOT_LEADER_OR_FOLLOWER (error code 6)",
+      "area": "broker",
+      "category": "connectivity",
+      "symptoms": [
+        "Producer или consumer получает NotLeaderOrFollowerException при попытке записи или чтения",
+        "Количество повторных попыток резко возрастает в метриках клиента",
+        "Ошибки носят временный характер и проходят после обновления метаданных",
+        "В логах брокера видны сообщения о смене лидера партиции"
+      ],
+      "cause": "Лидер партиции переместился на другой брокер во время перезапуска или переназначения разделов. Клиент использует устаревшие метаданные и направляет запросы на брокер, который больше не является лидером.",
+      "solution": [
+        "Увеличьте metadata.max.age.ms (например, до 60000 мс), чтобы клиент чаще обновлял метаданные",
+        "Настройте retries >= 10 и retry.backoff.ms >= 200 для автоматического повтора после обновления метаданных",
+        "Проверьте состояние брокеров командой kafka-topics.sh --describe и убедитесь в наличии лидера для каждой партиции",
+        "Мониторьте UncleanLeaderElectionsPerSec — ненулевое значение указывает на проблемы с репликацией"
+      ],
+      "relatedLessons": [
+        { "title": "Репликация и ISR", "slug": "01-kafka-architecture/03-replication-isr" },
+        { "title": "KRaft-контроллер", "slug": "01-kafka-architecture/04-kraft-controller" }
+      ]
+    },
+    {
+      "errorMessage": "REBALANCE_IN_PROGRESS",
+      "area": "consumer",
+      "category": "rebalancing",
+      "symptoms": [
+        "Консьюмеры прекращают обработку сообщений, лаг партиций растёт",
+        "В логах постоянно появляются записи 'Attempt to heartbeat failed since group is rebalancing'",
+        "Повторные вызовы commitSync() или commitAsync() завершаются ошибкой CommitFailedException",
+        "Консьюмер-группа не достигает стабильного состояния — ребалансировка запускается снова и снова"
+      ],
+      "cause": "Консьюмер превысил session.timeout.ms (не отправил heartbeat вовремя) или max.poll.interval.ms (слишком долго обрабатывал записи между вызовами poll()). Это интерпретируется координатором группы как сбой участника и запускает ребалансировку.",
+      "solution": [
+        "Увеличьте max.poll.interval.ms до значения, превышающего максимальное время обработки одного батча",
+        "Уменьшите max.poll.records, чтобы сократить объём работы между вызовами poll()",
+        "Перейдите на CooperativeStickyAssignor — он минимизирует число партиций, передаваемых при ребалансировке",
+        "Рассмотрите использование статического членства (group.instance.id) для консьюмеров с предсказуемым временем перезапуска"
+      ],
+      "relatedLessons": [
+        { "title": "Протоколы ребалансировки", "slug": "03-consumers/04-rebalancing-protocols" },
+        { "title": "Статическое членство", "slug": "03-consumers/05-static-membership" }
+      ]
+    },
+    {
+      "errorMessage": "LEADER_NOT_AVAILABLE (error code 5)",
+      "area": "broker",
+      "category": "connectivity",
+      "symptoms": [
+        "Продюсер не может отправить сообщения — все попытки завершаются LeaderNotAvailableException",
+        "Операции с топиком (describe, produce, consume) временно недоступны",
+        "Ошибка возникает сразу после создания нового топика или при запуске кластера",
+        "В логах брокера видны записи о выборах лидера (leader election)"
+      ],
+      "cause": "Лидер партиции ещё не избран — это типично для только что созданного топика или после того, как ISR опустел и unclean.leader.election.enable=false. Брокер возвращает ошибку, пока контроллер не завершит выборы.",
+      "solution": [
+        "Подождите несколько секунд: выборы лидера в KRaft обычно занимают менее 1 секунды, но при нестабильном кластере могут затягиваться",
+        "Проверьте состояние ISR: kafka-topics.sh --describe должен показывать непустой ISR для каждой партиции",
+        "Убедитесь, что replication.factor не превышает число доступных брокеров",
+        "Если ошибка носит постоянный характер, проверьте логи контроллера на наличие ошибок выборов"
+      ],
+      "relatedLessons": [
+        { "title": "Репликация и ISR", "slug": "01-kafka-architecture/03-replication-isr" },
+        { "title": "Брокеры, топики, партиции", "slug": "01-kafka-architecture/02-brokers-topics-partitions" }
+      ]
+    },
+    {
+      "errorMessage": "NOT_ENOUGH_REPLICAS (error code 19)",
+      "area": "broker",
+      "category": "data-loss",
+      "symptoms": [
+        "Продюсер с настройкой acks=all получает NotEnoughReplicasException и не может записать сообщения",
+        "Запись в топик полностью блокируется до восстановления достаточного числа реплик",
+        "В метриках брокера значение UnderReplicatedPartitions значительно больше нуля",
+        "Один или несколько брокеров отстают от лидера или полностью недоступны"
+      ],
+      "cause": "Число живых синхронизированных реплик (ISR) стало меньше min.insync.replicas. Это происходит, когда брокеры падают, сетевая связность между брокерами нарушена, или фолловер не успевает за лидером и вылетает из ISR по таймауту replica.lag.time.max.ms.",
+      "solution": [
+        "Верните упавшие брокеры в строй — это восстановит ISR и позволит возобновить запись",
+        "При длительном простое временно уменьшите min.insync.replicas до 1 на критических топиках (с пониманием рисков)",
+        "Проверьте сетевую связность между брокерами: высокая задержка или потери пакетов выбрасывают реплики из ISR",
+        "Увеличьте replica.lag.time.max.ms, если фолловеры отстают из-за нагрузки дискового I/O"
+      ],
+      "relatedLessons": [
+        { "title": "Репликация и ISR", "slug": "01-kafka-architecture/03-replication-isr" },
+        { "title": "Acks и повторные попытки", "slug": "02-producers/03-acks-retries" }
+      ]
+    },
+    {
+      "errorMessage": "OFFSET_OUT_OF_RANGE",
+      "area": "consumer",
+      "category": "data-loss",
+      "symptoms": [
+        "Консьюмер неожиданно сбрасывается на самое раннее или самое позднее смещение",
+        "В логах появляется OffsetOutOfRangeException при попытке получить данные",
+        "Часть сообщений пропускается или обрабатывается повторно после сброса смещения",
+        "Проблема возникает после длительного простоя консьюмер-группы"
+      ],
+      "cause": "Зафиксированное смещение больше не существует в топике: данные были удалены политикой хранения (retention.ms истёк или диск заполнен), либо зафиксированное смещение указывает за пределы текущего конца лога (LEO). Чаще всего это происходит, когда консьюмер-группа долго не работала и offsets.retention.minutes истёк.",
+      "solution": [
+        "Установите auto.offset.reset=earliest, чтобы при потере смещения начинать с доступных данных",
+        "Увеличьте offsets.retention.minutes на брокере (по умолчанию 7 дней) для хранения смещений спящих групп",
+        "Настройте мониторинг consumer lag — рост лага сигнализирует о проблемах задолго до потери смещений",
+        "Используйте kafka-consumer-groups.sh --reset-offsets для ручного задания смещения при необходимости"
+      ],
+      "relatedLessons": [
+        { "title": "Управление смещениями", "slug": "03-consumers/02-offset-management" },
+        { "title": "Consumer Groups", "slug": "03-consumers/03-consumer-groups" }
+      ]
+    },
+    {
+      "errorMessage": "RecordTooLargeException: The request included a message larger than the max message size the server will accept",
+      "area": "producer",
+      "category": "config-error",
+      "symptoms": [
+        "Продюсер отклоняет сообщения с RecordTooLargeException ещё на стороне клиента",
+        "Брокер возвращает ошибку MESSAGE_TOO_LARGE при попытке записи",
+        "Проблема стабильно воспроизводится для сообщений определённого размера",
+        "Компрессия включена, но сообщения всё равно превышают лимит"
+      ],
+      "cause": "Размер сообщения превышает один из трёх лимитов: max.request.size на продюсере (по умолчанию 1 МБ), message.max.bytes на брокере (по умолчанию 1 МБ) или max.message.bytes на уровне топика. Все три значения должны быть согласованы — несоответствие хотя бы одного вызывает ошибку.",
+      "solution": [
+        "Согласуйте все три параметра: max.request.size (продюсер) >= message.max.bytes (брокер) >= max.message.bytes (топик)",
+        "Включите компрессию на продюсере: compression.type=lz4 или snappy снижает размер батча в 3-5 раз",
+        "Рассмотрите разбиение больших сообщений на части с последующей сборкой на стороне консьюмера",
+        "Для бинарных данных используйте внешнее хранилище (S3, HDFS) и передавайте через Kafka только ссылки"
+      ],
+      "relatedLessons": [
+        { "title": "Батчинг и компрессия", "slug": "02-producers/02-batching-compression" },
+        { "title": "Producer API", "slug": "02-producers/01-producer-api" }
+      ]
+    },
+    {
+      "errorMessage": "TimeoutException: Expiring N record(s) for topic-partition after delivery.timeout.ms ms",
+      "area": "producer",
+      "category": "performance",
+      "symptoms": [
+        "Продюсер сообщает о TimeoutException, батчи сообщений истекают не отправленными",
+        "Метрика record-error-rate растёт, throughput падает",
+        "Проблема возникает при пиковой нагрузке или при замедлении брокеров",
+        "Очередь буфера (buffer.memory) постоянно заполнена — новые записи блокируются"
+      ],
+      "cause": "Брокер не подтверждает запросы за время delivery.timeout.ms (по умолчанию 120 000 мс). Причины: брокер перегружен медленным дисковым I/O или GC-паузами, сетевая задержка слишком высокая, или buffer.memory переполнен из-за высокого темпа продукции.",
+      "solution": [
+        "Увеличьте delivery.timeout.ms пропорционально реальным задержкам подтверждений в p99",
+        "Проверьте нагрузку на брокеры: метрики RequestHandlerAvgIdlePercent и NetworkProcessorAvgIdlePercent должны быть выше 30%",
+        "Увеличьте buffer.memory (по умолчанию 32 МБ) при высоком темпе продукции",
+        "Настройте compression.type=lz4 для уменьшения объёма данных, передаваемых по сети"
+      ],
+      "relatedLessons": [
+        { "title": "Acks и повторные попытки", "slug": "02-producers/03-acks-retries" },
+        { "title": "Настройка производительности", "slug": "10-production-ops/03-performance-tuning" }
+      ]
+    },
+    {
+      "errorMessage": "CommitFailedException: Offset commit cannot be completed since the consumer is not part of an active group",
+      "area": "consumer",
+      "category": "rebalancing",
+      "symptoms": [
+        "Вызов commitSync() бросает CommitFailedException после завершения обработки батча",
+        "Консьюмер теряет назначенные партиции в процессе обработки",
+        "Одни и те же сообщения обрабатываются несколько раз разными экземплярами",
+        "В логах видны записи о смене поколения группы (generation changed)"
+      ],
+      "cause": "Ребалансировка завершилась, пока консьюмер обрабатывал записи — координатор присвоил новое поколение группы. Попытка зафиксировать смещения для старого поколения отклоняется. Корневая причина: обработка батча заняла больше времени, чем max.poll.interval.ms.",
+      "solution": [
+        "Используйте commitAsync() с обратным вызовом для асинхронной фиксации — фиксация не блокирует обработку",
+        "Увеличьте max.poll.interval.ms до значения, в 1.5-2 раза превышающего максимальное время обработки батча",
+        "Уменьшите max.poll.records, чтобы каждый батч обрабатывался значительно быстрее таймаута",
+        "Перенесите тяжёлые операции (вызовы внешних API, запись в БД) в асинхронные задачи с отдельным пулом потоков"
+      ],
+      "relatedLessons": [
+        { "title": "Управление смещениями", "slug": "03-consumers/02-offset-management" },
+        { "title": "Протоколы ребалансировки", "slug": "03-consumers/04-rebalancing-protocols" }
+      ]
+    },
+    {
+      "errorMessage": "UNKNOWN_TOPIC_OR_PARTITION (error code 3)",
+      "area": "broker",
+      "category": "config-error",
+      "symptoms": [
+        "Продюсер или консьюмер получает UnknownTopicOrPartitionException при первом обращении",
+        "Ошибка стабильная, а не временная — топик не появляется после повторных попыток",
+        "Метаданные не содержат информации о запрашиваемом топике",
+        "Операции с другими топиками работают нормально"
+      ],
+      "cause": "Топик не существует в кластере. Возможные причины: auto.create.topics.enable=false на брокере (типично для production), опечатка в имени топика, или топик не был создан в рамках процесса деплоя. В production-кластерах автосоздание топиков отключают намеренно.",
+      "solution": [
+        "Создайте топик заранее командой: kafka-topics.sh --create --topic <name> --partitions <N> --replication-factor <R>",
+        "Дважды проверьте имя топика — Kafka чувствительна к регистру и не допускает специальных символов кроме точек, дефисов и подчёркиваний",
+        "В CI/CD пайплайне добавьте шаг создания топиков перед деплоем приложения",
+        "Если auto.create.topics.enable=true и ошибка всё равно возникает, проверьте права доступа (ACL)"
+      ],
+      "relatedLessons": [
+        { "title": "Брокеры, топики, партиции", "slug": "01-kafka-architecture/02-brokers-topics-partitions" },
+        { "title": "Авторизация и ACL", "slug": "09-security/04-authorization-acls" }
+      ]
+    },
+    {
+      "errorMessage": "SSL handshake failed: Received fatal alert: certificate_unknown",
+      "area": "security",
+      "category": "connectivity",
+      "symptoms": [
+        "Клиенты не могут подключиться к брокеру — соединение разрывается на этапе SSL-рукопожатия",
+        "В логах брокера появляются записи 'SSL handshake failed' или 'certificate_unknown'",
+        "Проблема воспроизводится для всех клиентов, а не только для одного",
+        "Ошибка может возникать периодически — незадолго до или после истечения срока сертификата"
+      ],
+      "cause": "Несоответствие SSL-конфигурации: клиент не доверяет сертификату брокера (отсутствует CA в truststore), сертификат истёк, имя хоста в сертификате не совпадает с адресом брокера, или между клиентом и брокером несовместимые версии TLS-протокола.",
+      "solution": [
+        "Проверьте срок действия сертификатов: openssl s_client -connect broker:9093 -showcerts покажет цепочку и дату истечения",
+        "Убедитесь, что CA-сертификат брокера добавлен в truststore всех клиентов",
+        "При ошибке hostname: либо добавьте правильный SAN в сертификат, либо установите ssl.endpoint.identification.algorithm='' (только для dev)",
+        "Проверьте совместимость TLS-версий: брокер и клиент должны поддерживать общие cipher suites"
+      ],
+      "relatedLessons": [
+        { "title": "SSL/TLS и взаимная аутентификация", "slug": "09-security/02-ssl-tls-mutual-auth" },
+        { "title": "Обзор аутентификации", "slug": "09-security/01-authentication-overview" }
+      ]
+    },
+    {
+      "errorMessage": "org.apache.kafka.connect.errors.ConnectException: Failed to find any class that implements Connector and which name matches <ClassName>",
+      "area": "connect",
+      "category": "config-error",
+      "symptoms": [
+        "Коннектор не запускается — воркер сообщает об ошибке поиска класса коннектора",
+        "REST API Kafka Connect возвращает 500 при попытке создать коннектор",
+        "Другие коннекторы, установленные ранее, работают без проблем",
+        "Ошибка воспроизводится при перезапуске воркера"
+      ],
+      "cause": "JAR-файл коннектора отсутствует в директориях, указанных в plugin.path воркера, или класс коннектора не находится в пути поиска плагинов. Kafka Connect использует изолированные classloaders для каждого плагина — JAR должен быть в отдельной поддиректории plugin.path.",
+      "solution": [
+        "Убедитесь, что JAR коннектора и все его зависимости находятся в отдельной папке внутри plugin.path",
+        "Проверьте значение plugin.path в connect-distributed.properties — укажите несколько путей через запятую при необходимости",
+        "После добавления JAR перезапустите воркер — плагины сканируются только при старте",
+        "Используйте confluent-hub install или ручную установку по документации конкретного коннектора"
+      ],
+      "relatedLessons": [
+        { "title": "Архитектура Kafka Connect", "slug": "05-kafka-connect/01-connect-architecture" },
+        { "title": "Source Connectors", "slug": "05-kafka-connect/02-source-connectors" }
+      ]
+    },
+    {
+      "errorMessage": "ERROR WorkerSinkTask: Task threw an uncaught and unrecoverable exception; stopping task",
+      "area": "connect",
+      "category": "config-error",
+      "symptoms": [
+        "Sink-коннектор останавливается с ошибкой, статус задачи переходит в FAILED",
+        "В логах воркера виден стектрейс SerializationException или SchemaException",
+        "Проблема возникает при изменении схемы сообщений в исходном топике",
+        "Другие задачи того же коннектора продолжают работать"
+      ],
+      "cause": "Sink-задача не может десериализовать входящие сообщения из-за несоответствия конвертера (value.converter) формату данных в топике. Типичные причины: схема изменилась и несовместима с текущей версией в Schema Registry, URL Schema Registry не задан, или сообщения в топике имеют смешанный формат.",
+      "solution": [
+        "Проверьте и согласуйте настройки key.converter и value.converter с форматом данных в топике",
+        "Задайте schema.registry.url в конфигурации воркера и коннектора",
+        "Настройте Dead Letter Queue (errors.deadletterqueue.topic.name) для изоляции проблемных сообщений без остановки задачи",
+        "Включите errors.tolerance=all и errors.log.enable=true для диагностики без прерывания обработки"
+      ],
+      "relatedLessons": [
+        { "title": "Обработка ошибок и DLQ", "slug": "05-kafka-connect/05-error-handling-dlq" },
+        { "title": "Sink Connectors", "slug": "05-kafka-connect/03-sink-connectors" }
+      ]
+    },
+    {
+      "errorMessage": "org.apache.kafka.streams.errors.StreamsException: Missing source topics: [<topic-name>]",
+      "area": "streams",
+      "category": "config-error",
+      "symptoms": [
+        "Приложение Kafka Streams не запускается — выбрасывается StreamsException при старте",
+        "Исключение содержит список топиков, которые не найдены в кластере",
+        "Приложение работало нормально в dev-среде, но не запускается в staging или production",
+        "Другие приложения, использующие те же топики, работают корректно"
+      ],
+      "cause": "Топология Kafka Streams ссылается на входные топики, которые не существуют в кластере. Это происходит при деплое приложения раньше, чем созданы необходимые топики, или при ошибке в именах топиков в конфигурации приложения.",
+      "solution": [
+        "Создайте входные топики перед запуском приложения — добавьте шаг создания топиков в процесс деплоя",
+        "Вызовите topology.describe() в логировании при старте для проверки всех топиков, на которые ссылается топология",
+        "Сравните имена топиков в конфигурации приложения и в кластере с учётом среды (dev/staging/prod)",
+        "Настройте StreamsConfig.REPLICATION_FACTOR_CONFIG — Streams создаёт changelog и repartition топики автоматически"
+      ],
+      "relatedLessons": [
+        { "title": "KStream, KTable, GlobalKTable", "slug": "07-kafka-streams/01-kstream-ktable-globalktable" },
+        { "title": "DSL операции", "slug": "07-kafka-streams/02-dsl-operations" }
+      ]
+    },
+    {
+      "errorMessage": "InvalidReplicationFactorException: Replication factor is larger than the number of available brokers",
+      "area": "broker",
+      "category": "config-error",
+      "symptoms": [
+        "Создание топика завершается ошибкой InvalidReplicationFactorException",
+        "Ошибка возникает при выполнении kafka-topics.sh --create или при автосоздании топика",
+        "В кластере работает меньше брокеров, чем указано в replication.factor",
+        "Другие топики с меньшим replication.factor создаются без проблем"
+      ],
+      "cause": "Значение replication.factor при создании топика превышает количество доступных (живых) брокеров в кластере. Kafka не может разместить реплики на несуществующих брокерах, поэтому отклоняет запрос на создание топика.",
+      "solution": [
+        "Убедитесь, что число живых брокеров не меньше replication.factor: kafka-broker-api-versions.sh покажет доступные брокеры",
+        "Для dev-окружений используйте replication.factor=1 и min.insync.replicas=1 — это нормально без требований к отказоустойчивости",
+        "Настройте default.replication.factor на брокере для автосоздаваемых топиков",
+        "При горизонтальном масштабировании сначала добавьте брокеры, потом увеличивайте replication.factor"
+      ],
+      "relatedLessons": [
+        { "title": "Брокеры, топики, партиции", "slug": "01-kafka-architecture/02-brokers-topics-partitions" },
+        { "title": "Репликация и ISR", "slug": "01-kafka-architecture/03-replication-isr" }
+      ]
+    },
+    {
+      "errorMessage": "Consumer group is rebalancing — generation mismatch, repeated empty polls",
+      "area": "consumer",
+      "category": "rebalancing",
+      "symptoms": [
+        "poll() возвращает пустые записи снова и снова, хотя в топике есть непрочитанные сообщения",
+        "ID поколения группы в логах постоянно меняется — ребалансировки следуют одна за другой",
+        "Некоторые экземпляры консьюмеров не получают ни одной партиции",
+        "kafka-consumer-groups.sh --describe показывает консьюмеров с нулевым числом партиций"
+      ],
+      "cause": "Один или несколько консьюмеров в группе ведут себя непредсказуемо: зависают, медленно обрабатывают данные или имеют нестабильное сетевое соединение. Каждый сбой запускает новую ребалансировку, не давая группе достичь стабильного состояния. Проблема усугубляется при большом числе партиций и участников группы.",
+      "solution": [
+        "Проверьте здоровье каждого экземпляра консьюмера — найдите зависающие или медленные обработчики",
+        "Включите статическое членство группы через group.instance.id — это позволяет кратковременно пропадающим консьюмерам переподключаться без ребалансировки",
+        "Убедитесь в отсутствии zombie-консьюмеров: процессы, которые числятся в группе, но уже не работают",
+        "Перейдите на CooperativeStickyAssignor для инкрементальной ребалансировки без остановки всей обработки"
+      ],
+      "relatedLessons": [
+        { "title": "Статическое членство", "slug": "03-consumers/05-static-membership" },
+        { "title": "Протоколы ребалансировки", "slug": "03-consumers/04-rebalancing-protocols" }
+      ]
+    },
+    {
+      "errorMessage": "java.lang.OutOfMemoryError: Java heap space (broker JVM crash)",
+      "area": "broker",
+      "category": "performance",
+      "symptoms": [
+        "Брокер внезапно завершает работу с OutOfMemoryError в логах или в hs_err_pid файле",
+        "Производительность брокера деградирует перед падением: GC-паузы растут, обработка запросов замедляется",
+        "OOM возникает при высоком числе одновременных соединений или при больших fetch-запросах",
+        "После перезапуска брокер снова падает под той же нагрузкой"
+      ],
+      "cause": "Хип JVM брокера исчерпан. Основные причины: слишком маленький -Xmx для текущей нагрузки, большое число соединений (каждое требует буферов), слишком большой fetch.max.bytes в запросах консьюмеров, или утечка памяти в обработчиках запросов.",
+      "solution": [
+        "Увеличьте размер хипа через KAFKA_HEAP_OPTS: -Xmx6g -Xms6g (типично 4-8 ГБ для production)",
+        "Настройте max.connections.per.ip и max.connections для ограничения числа одновременных подключений",
+        "Ограничьте fetch.max.bytes и max.partition.fetch.bytes в конфигурации консьюмеров",
+        "Включите JVM GC-логирование (-Xlog:gc*) и анализируйте паттерн выделения памяти перед OOM"
+      ],
+      "relatedLessons": [
+        { "title": "Настройка производительности", "slug": "10-production-ops/03-performance-tuning" },
+        { "title": "JMX-метрики", "slug": "10-production-ops/01-jmx-metrics-taxonomy" }
+      ]
+    },
+    {
+      "errorMessage": "SASL authentication failed: Security: KafkaClient; Exception: Unable to find LoginModule class",
+      "area": "security",
+      "category": "config-error",
+      "symptoms": [
+        "Клиенты не могут пройти аутентификацию, в логах видна ошибка поиска LoginModule",
+        "Ошибка возникает сразу при подключении до отправки каких-либо данных",
+        "В конфигурации SASL указан механизм (PLAIN, SCRAM, GSSAPI), но соединение не устанавливается",
+        "Брокер в логах показывает 'Failed authentication' для всех подключающихся клиентов"
+      ],
+      "cause": "SASL настроен в security.protocol, но JVM не может найти класс LoginModule, указанный в JAAS-конфигурации. Типичные причины: JAAS-файл не передан JVM через параметр -Djava.security.auth.login.config, имена секций KafkaServer или KafkaClient написаны с ошибкой, или нужный модуль (krb5, scram) отсутствует в classpath.",
+      "solution": [
+        "Передайте JAAS-конфигурацию через JVM-аргумент: -Djava.security.auth.login.config=/path/to/kafka_jaas.conf",
+        "Проверьте точность имён секций в JAAS: для брокера — KafkaServer, для клиента — KafkaClient (чувствительно к регистру)",
+        "Для SASL/PLAIN и SCRAM убедитесь, что PlainLoginModule или ScramLoginModule присутствует в classpath Kafka",
+        "Для Kerberos (GSSAPI) проверьте наличие krb5.conf и корректность principal/keytab"
+      ],
+      "relatedLessons": [
+        { "title": "SASL-механизмы", "slug": "09-security/03-sasl-mechanisms" },
+        { "title": "Обзор аутентификации", "slug": "09-security/01-authentication-overview" }
+      ]
+    },
+    {
+      "errorMessage": "Under-replicated partitions: kafka.server:type=ReplicaManager,name=UnderReplicatedPartitions > 0",
+      "area": "ops",
+      "category": "performance",
+      "symptoms": [
+        "Метрика UnderReplicatedPartitions ненулевая длительное время — более 30 секунд",
+        "Один или несколько брокеров значительно отстают от лидеров партиций",
+        "Производительность записи падает при acks=all — продюсеры ждут подтверждений от отстающих реплик",
+        "Брокер потребляет аномально высокий дисковый I/O или сетевой трафик"
+      ],
+      "cause": "Фолловеры не успевают догнать лидера и вылетают из ISR. Причины: перегруженность диска на брокере-фолловере, высокая сетевая задержка между брокерами, неравномерное распределение лидеров (один брокер является лидером для слишком многих партиций), или временный сбой одного брокера.",
+      "solution": [
+        "Проверьте дисковый I/O на отстающих брокерах: iostat -x 1 покажет утилизацию дисков",
+        "Перебалансируйте лидеров партиций: kafka-leader-election.sh для равномерного распределения нагрузки",
+        "Увеличьте replica.fetch.max.bytes и num.replica.fetchers на отстающем брокере для ускорения репликации",
+        "Проверьте сетевую связность между брокерами и увеличьте replica.lag.time.max.ms при высоких задержках"
+      ],
+      "relatedLessons": [
+        { "title": "Ребалансировка топиков", "slug": "10-production-ops/05-topic-rebalancing" },
+        { "title": "Стек мониторинга", "slug": "10-production-ops/02-monitoring-stack" }
+      ]
+    },
+    {
+      "errorMessage": "Log segment corruption: CRC check failed (found: <X>, computed: <Y>)",
+      "area": "ops",
+      "category": "data-loss",
+      "symptoms": [
+        "Брокер не может запуститься — в логах видна ошибка CRC при загрузке сегмента лога",
+        "Партиция становится недоступной после аварийного отключения питания или unclean shutdown",
+        "kafka-dump-log.sh показывает повреждённые записи в конкретном сегменте",
+        "Брокер запускается, но партиция остаётся в состоянии offline"
+      ],
+      "cause": "Файл сегмента лога повреждён — контрольная сумма CRC записей не совпадает. Чаще всего это следствие аварийного отключения без flush данных на диск, аппаратного сбоя (RAID без записи, битый сектор), или файловой системы без journaling.",
+      "solution": [
+        "Определите повреждённый сегмент командой: kafka-dump-log.sh --files /path/to/segment.log --print-data-log 2>&1 | grep -i corruption",
+        "Если кластер работает с репликацией, удалите повреждённые сегменты на проблемном брокере и дайте репликации восстановить данные",
+        "При отсутствии реплик: удалите повреждённый сегмент вручную и перезапустите брокер — данные из сегмента будут потеряны",
+        "Для профилактики используйте файловую систему ext4 или xfs с journaling и настройте UPS для брокеров"
+      ],
+      "relatedLessons": [
+        { "title": "Распределённый журнал фиксации", "slug": "01-kafka-architecture/01-distributed-commit-log" },
+        { "title": "Планирование ёмкости", "slug": "10-production-ops/04-capacity-planning" }
+      ]
+    },
+    {
+      "errorMessage": "ProducerFencedException: There is a newer producer with the same transactionalId",
+      "area": "producer",
+      "category": "data-loss",
+      "symptoms": [
+        "Транзакционный продюсер получает ProducerFencedException при вызове beginTransaction()",
+        "Все незавершённые транзакции текущего экземпляра продюсера прерываются",
+        "Проблема возникает при перезапуске приложения или при запуске нескольких экземпляров",
+        "Консьюмеры с isolation.level=read_committed не получают сообщения из прерванных транзакций"
+      ],
+      "cause": "Два экземпляра продюсера используют одинаковый transactional.id, или новый экземпляр был создан раньше, чем старый завершил свои транзакции. Kafka повышает эпоху продюсера (producer epoch) — старые экземпляры с меньшей эпохой блокируются для предотвращения дублирования сообщений.",
+      "solution": [
+        "Гарантируйте, что только один активный экземпляр использует данный transactional.id — реализуйте лидерную блокировку (leader election) при горизонтальном масштабировании",
+        "Перехватывайте ProducerFencedException отдельно от других исключений — это сигнал о создании нового экземпляра продюсера, а не о повторной попытке",
+        "При перезапуске приложения создавайте новый экземпляр KafkaProducer — старый экземпляр не подлежит восстановлению",
+        "На стороне консьюмеров установите isolation.level=read_committed для чтения только завершённых транзакций"
+      ],
+      "relatedLessons": [
+        { "title": "Транзакции", "slug": "02-producers/05-transactions" },
+        { "title": "Идемпотентный продюсер", "slug": "02-producers/04-idempotent-producer" }
+      ]
+    },
+    {
+      "errorMessage": "io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException: Schema being registered is incompatible with an earlier schema (compatibility: BACKWARD)",
+      "area": "connect",
+      "category": "config-error",
+      "symptoms": [
+        "Регистрация новой версии схемы в Schema Registry завершается ошибкой совместимости",
+        "Продюсер не может отправить сообщения с обновлённой схемой",
+        "В логах видна ошибка RestClientException с указанием нарушенного правила совместимости",
+        "Другие схемы в Registry продолжают работать нормально"
+      ],
+      "cause": "Новая версия схемы нарушает режим совместимости, установленный для данного subject в Schema Registry. При BACKWARD-совместимости консьюмеры со старой схемой должны уметь читать данные, записанные с новой. Удаление обязательного поля или изменение типа без значения по умолчанию нарушает это правило.",
+      "solution": [
+        "Изучите режим совместимости топика: GET /config/<subject> через Schema Registry REST API",
+        "При добавлении полей указывайте значение по умолчанию (default) — это обеспечивает BACKWARD-совместимость",
+        "Никогда не удаляйте поля из схемы при BACKWARD или FULL совместимости — помечайте их как deprecated",
+        "При необходимости кардинального изменения схемы: используйте новый subject или TopicNameStrategy с версионированием"
+      ],
+      "relatedLessons": [
+        { "title": "Режимы совместимости", "slug": "06-schema-registry/04-compatibility-modes" },
+        { "title": "Глубокое погружение в Avro", "slug": "06-schema-registry/02-avro-deep-dive" }
+      ]
+    }
+  ]
 }
