@@ -1,0 +1,233 @@
+---
+title: "Обзор аутентификации Kafka"
+description: "Ландшафт безопасности Kafka -- SASL-механизмы, SSL/TLS, listeners, security.protocol. Когда какой механизм использовать"
+order: 1
+difficulty: "advanced"
+estimatedTime: 20
+topics: ["Authentication", "SASL", "SSL/TLS", "Listeners", "Security Protocol"]
+---
+
+# Обзор аутентификации Kafka
+
+Безопасность Kafka — не опция для production-кластеров. Это обязательный слой, без которого любой процесс в сети может читать ваши данные, записывать мусор в топики и уничтожить конфигурацию кластера. В Kafka 4.0 с KRaft безопасность настраивается через конфигурацию брокера — ZooKeeper полностью удалён, и вместе с ним ушло старое ZooKeeper-хранилище ACL.
+
+Модуль 09 охватывает все три уровня безопасности:
+- **Аутентификация** (authentication): кто вы? Доказательство идентичности клиента.
+- **Авторизация** (authorization): что вам можно? ACL определяют разрешённые операции.
+- **Шифрование** (encryption): защита данных в пути. TLS предотвращает перехват трафика.
+
+Этот урок устанавливает фундамент: какие механизмы существуют, как Kafka broker обслуживает разные протоколы, и как выбрать правильный механизм для вашего случая.
+
+---
+
+## Security Protocol: четыре варианта
+
+Каждый listener в Kafka broker работает с одним из четырёх security protocol. Protocol определяет, есть ли шифрование и аутентификация на этом listener.
+
+<DiagramContainer title="Kafka Security Protocols" color="blue">
+  <div className="space-y-4 p-2">
+    <div className="text-center text-sm text-slate-400 mb-2">Четыре комбинации шифрования и аутентификации</div>
+    <FlowRow>
+      <DataBox
+        label="PLAINTEXT"
+        tooltip="Без шифрования, без аутентификации. Любой клиент может подключиться и выполнить любые операции. Допустимо только в изолированных dev-средах на localhost. В production НИКОГДА."
+      >
+        Нет TLS. Нет SASL. Только для dev.
+      </DataBox>
+      <DataBox
+        label="SSL"
+        tooltip="TLS шифрование канала. Брокер обязательно предоставляет сертификат. При ssl.client.auth=required — mutual TLS: клиент тоже предоставляет сертификат, это становится механизмом аутентификации. CN/SAN сертификата = principal."
+      >
+        TLS шифрование. Опциональный mTLS. security.protocol=SSL
+      </DataBox>
+      <DataBox
+        label="SASL_PLAINTEXT"
+        tooltip="SASL аутентификация (PLAIN, SCRAM, GSSAPI, OAUTHBEARER) поверх незашифрованного соединения. Credentials передаются в открытом виде. Только для доверенных внутренних сетей с изоляцией на сетевом уровне. Никогда через интернет."
+      >
+        SASL аутентификация. БЕЗ шифрования. Только внутренняя сеть.
+      </DataBox>
+      <DataBox
+        label="SASL_SSL"
+        tooltip="SASL аутентификация + TLS шифрование. Production standard. Клиент аутентифицируется через SASL (SCRAM, OAUTHBEARER, GSSAPI), а весь канал зашифрован TLS. Это правильный выбор для любого production-кластера."
+      >
+        SASL аутентификация + TLS шифрование. Production standard.
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+<Callout type="danger">
+SASL_PLAINTEXT передаёт credentials в открытом виде. НИКОГДА не используйте SASL_PLAINTEXT через интернет или недоверенную сеть. В production всегда SASL_SSL.
+</Callout>
+
+---
+
+## Listeners и security.protocol: брокер на нескольких портах
+
+Kafka broker может обслуживать разные протоколы на разных портах одновременно. Это позволяет, например, обслуживать внутренние сервисы через SASL_PLAINTEXT (доверенная сеть, без overhead TLS), а внешних клиентов — через SASL_SSL.
+
+```properties
+# Объявить listeners: имя, протокол, порт
+listeners=INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094
+
+# Сопоставить имена listeners с security protocol
+listener.security.protocol.map=INTERNAL:SASL_PLAINTEXT,EXTERNAL:SASL_SSL
+
+# Advertised listeners (для клиентов: hostname, не 0.0.0.0)
+advertised.listeners=INTERNAL://broker1.internal:9092,EXTERNAL://broker1.example.com:9094
+
+# Inter-broker listener (для репликации между брокерами)
+inter.broker.listener.name=INTERNAL
+```
+
+<DiagramContainer title="Broker с несколькими Listeners" color="emerald">
+  <div className="space-y-4 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="source"
+        tooltip="Внутренние сервисы (microservices в том же Kubernetes namespace). Подключаются к INTERNAL listener на порту 9092. SASL_PLAINTEXT — аутентификация без overhead TLS (сеть изолирована network policy)."
+      >
+        Internal Services
+      </FlowNode>
+      <Arrow direction="right" label=":9092 SASL_PLAINTEXT" />
+      <FlowNode
+        variant="process"
+        tooltip="Kafka Broker. Обслуживает два listener одновременно. INTERNAL listener: SASL аутентификация, без TLS. EXTERNAL listener: SASL аутентификация + TLS шифрование. Репликация между брокерами идёт через INTERNAL listener."
+      >
+        Kafka Broker
+      </FlowNode>
+      <Arrow direction="right" label=":9094 SASL_SSL" />
+      <FlowNode
+        variant="sink"
+        tooltip="Внешние клиенты (мобильные приложения, партнёрские API, удалённые сервисы). Подключаются к EXTERNAL listener. SASL_SSL: credentials аутентифицированы через SASL, трафик зашифрован TLS. Защита от перехвата."
+      >
+        External Clients
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+<Callout type="note">
+В Kafka 4.0 с KRaft метаданные безопасности (SCRAM credentials, ACLs) хранятся в metadata log контроллера. ZooKeeper ACL-хранилище полностью удалено. KRaft controller listeners используют отдельную security-конфигурацию — обычно PLAINTEXT или SASL_PLAINTEXT в изолированной controller сети.
+</Callout>
+
+---
+
+## SASL-механизмы: обзор четырёх вариантов
+
+SASL (Simple Authentication and Security Layer) — протокол-фреймворк, который позволяет выбрать механизм аутентификации независимо от транспорта. Kafka поддерживает четыре SASL-механизма, каждый со своими компромиссами.
+
+<DiagramContainer title="SASL Механизмы: сравнительная матрица" color="violet">
+  <div className="space-y-3 p-2">
+    <div className="text-center text-sm text-slate-400 mb-2">Выбор механизма зависит от сложности, инфраструктуры и требований к ротации credentials</div>
+    <FlowRow>
+      <DataBox
+        label="SASL/PLAIN"
+        tooltip="Логин + пароль в base64 (НЕ шифрование). Credentials хранятся статически в JAAS config файле брокера. Ротация паролей требует перезапуска брокера. Только с SSL. Только для dev или очень маленьких команд."
+      >
+        Сложность: Низкая. Хранение: JAAS config. Ротация: перезапуск брокера.
+      </DataBox>
+      <DataBox
+        label="SASL/SCRAM-SHA-256/512"
+        tooltip="Salted Challenge-Response Authentication Mechanism. Пароль НЕ передаётся по сети — только salted hash challenge. Credentials хранятся в KRaft metadata log (Kafka 4.0). Динамическое управление через kafka-configs.sh без перезапуска. Оптимальный выбор для production."
+      >
+        Сложность: Средняя. Хранение: KRaft metadata. Ротация: динамически, без перезапуска.
+      </DataBox>
+      <DataBox
+        label="SASL/OAUTHBEARER"
+        tooltip="JWT Bearer токены. Клиент получает токен от Identity Provider (Keycloak, Auth0, Azure AD) и предъявляет брокеру. Брокер валидирует подпись через JWKS endpoint. Токен имеет TTL — автоматическое обновление. Cloud-native стандарт для Kubernetes-сред с существующим IdP."
+      >
+        Сложность: Высокая. Хранение: внешний IdP (JWT). Ротация: автоматически (token TTL).
+      </DataBox>
+      <DataBox
+        label="SASL/GSSAPI (Kerberos)"
+        tooltip="Kerberos Ticket Granting. Enterprise SSO через Active Directory или MIT Kerberos. Требует: KDC (Key Distribution Center), keytab файлы, krb5.conf. Клиент аутентифицируется через KDC и получает Service Ticket для Kafka. Самый сложный в настройке и отладке."
+      >
+        Сложность: Очень высокая. Хранение: Kerberos KDC (keytab). Ротация: keytab renewal.
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+### SASL/PLAIN
+
+Простейший механизм. Username и password отправляются в base64-кодировке (это НЕ шифрование — base64 тривиально декодируется). Credentials хранятся статически в JAAS config файле брокера.
+
+```properties
+# Broker JAAS config (в server.properties или отдельный файл)
+listener.name.sasl_ssl.plain.sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+  username="admin" password="admin-secret" \
+  user_admin="admin-secret" \
+  user_producer="producer-secret" \
+  user_consumer="consumer-secret";
+```
+
+Каждый `user_<name>="<password>"` определяет допустимого пользователя. Добавление нового пользователя требует изменения конфига и перезапуска брокера.
+
+### SASL/SCRAM
+
+Salted Challenge-Response: клиент и сервер выполняют challenge-response обмен, в результате которого сервер убеждается, что клиент знает пароль — без передачи самого пароля по сети. Credentials хранятся в KRaft metadata log в виде salted hash.
+
+```bash
+# Создать пользователя (работает без перезапуска брокера)
+kafka-configs.sh --bootstrap-server localhost:9092 \
+  --alter \
+  --add-config 'SCRAM-SHA-256=[iterations=8192,password=alice-secret]' \
+  --entity-type users --entity-name alice
+```
+
+### SASL/OAUTHBEARER
+
+Клиент получает JWT token от IdP (Identity Provider) и предъявляет его брокеру. Брокер валидирует подпись JWT через JWKS endpoint IdP. Kafka 4.0 включает встроенный `OAuthBearerLoginCallbackHandler` и `OAuthBearerValidatorCallbackHandler` — не нужен кастомный код для стандартного `client_credentials` flow.
+
+### SASL/GSSAPI (Kerberos)
+
+Enterprise SSO через Kerberos. Клиент использует keytab для получения Ticket Granting Ticket (TGT) от KDC, затем Service Ticket для Kafka. Реализует SSO с Active Directory. Самый сложный в настройке, требует Kerberos инфраструктуры.
+
+---
+
+## Дерево принятия решений: когда какой механизм
+
+Выбор механизма зависит от вашей инфраструктуры, требований к безопасности и операционной сложности, которую вы готовы поддерживать.
+
+| Сценарий | Рекомендация | Обоснование |
+|----------|-------------|-------------|
+| Dev / локальное тестирование | SASL/PLAIN + SSL | Минимальная настройка. Статические credentials достаточны. |
+| Небольшая команда, нет IdP | SASL/SCRAM-SHA-256 + SSL | Динамическое управление пользователями, безопасный challenge-response, хранение в KRaft. |
+| Enterprise с IdP (Keycloak, Auth0, Azure AD) | SASL/OAUTHBEARER + SSL | Централизованное управление identity, SSO, короткоживущие токены. |
+| Enterprise с Active Directory / MIT Kerberos | SASL/GSSAPI + SSL | Интеграция с существующей Kerberos инфраструктурой, SSO для пользователей AD. |
+
+---
+
+## Inter-broker security
+
+Брокеры Kafka реплицируют данные друг другу — это тоже сетевой трафик, который нужно защищать. В KRaft кластере контроллеры обмениваются метаданными через отдельный controller listener.
+
+```properties
+# Протокол для inter-broker репликации
+security.inter.broker.protocol=SASL_SSL
+
+# SASL-механизм для inter-broker коммуникации
+sasl.mechanism.inter.broker.protocol=SCRAM-SHA-256
+
+# JAAS для inter-broker: брокер аутентифицируется как 'kafka-broker'
+listener.name.internal.scram-sha-256.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
+  username="kafka-broker" password="broker-secret";
+```
+
+В Kafka 4.0 KRaft: controller listener (порт для Raft consensus) обычно в изолированной сети и может использовать PLAINTEXT или отдельный SASL механизм. Клиенты никогда не подключаются к controller listener напрямую.
+
+---
+
+## Ключевые выводы
+
+1. Kafka security имеет три уровня: аутентификация (кто вы?), авторизация (что можно?), шифрование (защита в пути).
+2. Четыре security protocol: PLAINTEXT (dev), SSL (шифрование + опциональный mTLS), SASL_PLAINTEXT (SASL без TLS), SASL_SSL (production standard).
+3. Broker может обслуживать несколько listeners с разными протоколами на разных портах.
+4. SASL/PLAIN — только для dev и только с SSL. SASL/SCRAM — оптимальный production выбор. SASL/OAUTHBEARER — для сред с IdP. SASL/GSSAPI — для Kerberos enterprise.
+5. Inter-broker коммуникация тоже требует security-конфигурации.
+
+<KnowledgeCheck
+  question="Ваша компания использует SASL/PLAIN для аутентификации Kafka clients. Пароли хранятся в JAAS config файле. Команда безопасности требует возможность ротации паролей без перезапуска брокеров. Какой SASL-механизм решит эту задачу и почему?"
+  answer="SASL/SCRAM-SHA-256 или SCRAM-SHA-512. В отличие от PLAIN, SCRAM хранит credentials в KRaft metadata log (Kafka 4.0), а не в статическом JAAS config файле. Управление пользователями осуществляется через kafka-configs.sh --alter --add-config 'SCRAM-SHA-256=[...]' без перезапуска брокера. Изменение вступает в силу немедленно. Дополнительное преимущество SCRAM: пароль не передаётся по сети в открытом виде — используется salted challenge-response обмен."
+/>

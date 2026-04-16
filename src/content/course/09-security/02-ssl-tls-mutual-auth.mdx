@@ -1,0 +1,254 @@
+---
+title: "SSL/TLS Mutual Authentication"
+description: "Шифрование канала и взаимная аутентификация -- keystore, truststore, сертификаты, handshake flow"
+order: 2
+difficulty: "advanced"
+estimatedTime: 30
+topics: ["SSL", "TLS", "mTLS", "Keystore", "Truststore", "Certificate", "Handshake"]
+---
+
+# SSL/TLS Mutual Authentication
+
+Kafka использует TLS для двух целей: **шифрования канала** (никто не читает трафик в сети) и, опционально, **взаимной аутентификации** (mutual TLS, mTLS — обе стороны доказывают идентичность сертификатом). Понять разницу между этими режимами, а также как работают keystore и truststore — фундаментальный навык для любого Kafka operator.
+
+---
+
+## TLS vs SSL: терминология
+
+Название конфига в Kafka начинается с `ssl.*`, но реально используется **TLS** (Transport Layer Security). SSL был deprecated давно: SSL 2.0 — 1995, SSL 3.0 — 1996, TLS 1.0 — 1999. Kafka 4.0 поддерживает TLS 1.2 и TLS 1.3 (рекомендуется TLS 1.3).
+
+Два режима работы:
+
+- **One-way TLS**: только брокер предоставляет сертификат. Клиент проверяет подлинность брокера (защита от MITM), но брокер не знает, кто клиент. Шифрование есть, аутентификации клиента — нет. `ssl.client.auth=none`.
+- **Mutual TLS (mTLS)**: обе стороны предоставляют сертификат. Брокер аутентифицирует клиента по CN (Common Name) или SAN (Subject Alternative Name) сертификата — это становится Kafka principal. `ssl.client.auth=required`.
+
+---
+
+## Keystore и Truststore: два хранилища
+
+Каждая сторона (брокер и каждый клиент) поддерживает два JKS-хранилища:
+
+<DiagramContainer title="Keystore vs Truststore" color="blue">
+  <div className="space-y-4 p-2">
+    <div className="text-center text-sm text-slate-400 mb-2">Каждая сторона — брокер и клиент — имеет собственный keystore и truststore</div>
+    <FlowRow>
+      <DataBox
+        label="Keystore (JKS)"
+        tooltip="Содержит приватный ключ и собственный сертификат стороны. Думайте об этом как о паспорте: это ваше удостоверение личности, которое вы предъявляете другой стороне для аутентификации. Приватный ключ НИКОГДА не покидает keystore. Брокер предъявляет keystore клиенту при любом TLS-соединении."
+      >
+        Приватный ключ + собственный сертификат. 'Ваш паспорт'. Предъявляется другой стороне.
+      </DataBox>
+      <DataBox
+        label="Truststore (JKS)"
+        tooltip="Содержит сертификаты доверенных Certificate Authority (CA). Используется для проверки сертификата, предъявленного другой стороной. Думайте об этом как о списке признанных государств: если сертификат другой стороны подписан CA из вашего truststore — вы ему доверяете. Клиент использует truststore для проверки сертификата брокера."
+      >
+        Сертификаты доверенных CA. 'Список признанных паспортов'. Для проверки другой стороны.
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+При mTLS:
+- Брокер предъявляет свой keystore → клиент проверяет через свой truststore.
+- Клиент предъявляет свой keystore → брокер проверяет через свой truststore.
+- Оба truststore должны содержать сертификат CA, которым подписаны сертификаты обеих сторон.
+
+---
+
+## Создание сертификатов: пошаговый гайд
+
+Типичный workflow: создать собственный CA, подписать им сертификаты брокеров и клиентов. В production используйте корпоративный CA или управляемый сервис (AWS ACM, HashiCorp Vault).
+
+**Шаг 1: Создать CA (Certificate Authority)**
+
+```bash
+openssl req -new -x509 \
+  -keyout ca-key.pem -out ca-cert.pem \
+  -days 3650 \
+  -subj "/C=RU/O=KafkaCA/CN=kafka-ca" \
+  -passout pass:ca-password
+```
+
+**Шаг 2: Создать keystore для брокера (с самоподписанным сертификатом)**
+
+```bash
+keytool -genkey \
+  -keystore broker.keystore.jks \
+  -alias broker \
+  -validity 3650 \
+  -keyalg RSA -keysize 2048 \
+  -dname "CN=broker1.example.com,O=Kafka,C=RU" \
+  -storepass keystore-password \
+  -keypass key-password \
+  -ext SAN=dns:broker1.example.com,dns:broker2.example.com
+```
+
+**Шаг 3: Создать CSR (Certificate Signing Request)**
+
+```bash
+keytool -certreq \
+  -keystore broker.keystore.jks \
+  -alias broker \
+  -file broker.csr \
+  -storepass keystore-password
+```
+
+**Шаг 4: Подписать CSR сертификатом CA**
+
+```bash
+openssl x509 -req \
+  -CA ca-cert.pem -CAkey ca-key.pem \
+  -in broker.csr -out broker-signed.pem \
+  -days 3650 -CAcreateserial \
+  -passin pass:ca-password
+```
+
+**Шаг 5: Импортировать CA-сертификат в keystore брокера**
+
+```bash
+keytool -importcert \
+  -keystore broker.keystore.jks \
+  -alias CARoot \
+  -file ca-cert.pem \
+  -storepass keystore-password \
+  -noprompt
+```
+
+**Шаг 6: Импортировать подписанный сертификат в keystore брокера**
+
+```bash
+keytool -importcert \
+  -keystore broker.keystore.jks \
+  -alias broker \
+  -file broker-signed.pem \
+  -storepass keystore-password
+```
+
+**Шаг 7: Создать truststore с CA-сертификатом**
+
+```bash
+keytool -importcert \
+  -keystore broker.truststore.jks \
+  -alias CARoot \
+  -file ca-cert.pem \
+  -storepass truststore-password \
+  -noprompt
+```
+
+Повторите аналогичный процесс для клиента: создайте `client.keystore.jks` и `client.truststore.jks`. Клиентский `truststore` содержит тот же CA-сертификат — клиент доверяет брокерам, подписанным этим CA.
+
+<Callout type="tip">
+В production используйте сертификаты с SAN (Subject Alternative Name), а не только CN. SAN позволяет указать несколько hostname и IP-адресов в одном сертификате. keytool поддерживает `-ext SAN=dns:broker1.example.com,dns:broker2.example.com,ip:10.0.1.1`. Без SAN hostname verification выдаёт предупреждение или ошибку в современных JDK.
+</Callout>
+
+---
+
+## Broker config для SSL
+
+```properties
+# Listener с SSL
+listeners=SSL://0.0.0.0:9093
+advertised.listeners=SSL://broker1.example.com:9093
+
+# Broker keystore
+ssl.keystore.location=/etc/kafka/ssl/broker.keystore.jks
+ssl.keystore.password=keystore-password
+ssl.key.password=key-password
+
+# Broker truststore (для проверки клиентских сертификатов)
+ssl.truststore.location=/etc/kafka/ssl/broker.truststore.jks
+ssl.truststore.password=truststore-password
+
+# Mutual TLS: клиент ОБЯЗАН предоставить сертификат
+ssl.client.auth=required
+
+# Минимальная версия TLS (рекомендуется TLSv1.3)
+ssl.enabled.protocols=TLSv1.3,TLSv1.2
+
+# Hostname verification (обязательно в production)
+ssl.endpoint.identification.algorithm=https
+```
+
+---
+
+## Client config для SSL
+
+```properties
+# Клиент подключается через SSL
+security.protocol=SSL
+
+# Client keystore (для mTLS: клиент предъявляет свой сертификат)
+ssl.keystore.location=/etc/kafka/ssl/client.keystore.jks
+ssl.keystore.password=client-keystore-password
+ssl.key.password=client-key-password
+
+# Client truststore (для проверки сертификата брокера)
+ssl.truststore.location=/etc/kafka/ssl/client.truststore.jks
+ssl.truststore.password=client-truststore-password
+```
+
+<Callout type="warning">
+ssl.client.auth=required включает mutual TLS: клиент ОБЯЗАН предоставить сертификат. Если client keystore не настроен или пустой, соединение будет отклонено с ошибкой "peer not authenticated". Для одностороннего TLS (только шифрование) используйте ssl.client.auth=none.
+</Callout>
+
+---
+
+## TLS Handshake: визуальный поток
+
+<TlsHandshakeDiagram client:visible />
+
+Диаграмма выше показывает полный TLS handshake с mTLS. Ключевые моменты:
+
+1. **ClientHello**: клиент отправляет список поддерживаемых версий TLS и cipher suites.
+2. **ServerHello + Certificate**: брокер выбирает cipher suite и отправляет свой сертификат из keystore. При mTLS — запрашивает сертификат клиента (CertificateRequest).
+3. **Проверка брокерского сертификата**: клиент проверяет подпись через свой truststore.
+4. **ClientCertificate**: при mTLS клиент отправляет свой сертификат из keystore.
+5. **Проверка клиентского сертификата**: брокер проверяет подпись через свой truststore. CN/SAN сертификата становится Kafka principal (например, `User:alice`).
+6. **Encrypted channel**: после завершения handshake весь Kafka-трафик зашифрован.
+
+---
+
+## ssl.endpoint.identification.algorithm: hostname verification
+
+По умолчанию Kafka 3.0+ включает hostname verification. Это означает, что hostname в сертификате брокера (CN или SAN) должен совпадать с hostname, к которому подключается клиент. Без этого возможна атака Man-in-the-Middle: злоумышленник подменяет брокер своим сервером с другим сертификатом.
+
+```properties
+# Hostname verification включена (рекомендуется)
+ssl.endpoint.identification.algorithm=https
+
+# Отключить hostname verification (ТОЛЬКО для локального dev с self-signed cert на localhost)
+ssl.endpoint.identification.algorithm=
+```
+
+---
+
+## Troubleshooting SSL
+
+Три самые частые ошибки и их причины:
+
+**"SSL handshake failed"**
+- Причины: несовместимые TLS версии (брокер требует TLSv1.3, клиент поддерживает только TLSv1.2); несовместимые cipher suites; сертификат истёк.
+- Диагностика: `openssl s_client -connect broker1:9093 -tls1_3` — увидите handshake подробно.
+
+**"peer not authenticated"**
+- Причины: `ssl.client.auth=required` на брокере, а клиент не предоставил сертификат (keystore не настроен или пустой).
+- Решение: убедитесь, что client keystore содержит валидный сертификат, подписанный CA из broker truststore.
+
+**"certificate unknown" / "PKIX path building failed"**
+- Причины: CA-сертификат не добавлен в truststore; промежуточные CA не включены в цепочку сертификатов.
+- Решение: добавьте весь chain (CA + intermediate CAs) в truststore обеих сторон.
+
+---
+
+## Ключевые выводы
+
+1. SSL в Kafka = TLS. Поддерживаются TLS 1.2 и TLS 1.3. Config-ключи начинаются с `ssl.*`.
+2. **Keystore** — ваш "паспорт" (приватный ключ + сертификат). **Truststore** — "список признанных паспортов" (сертификаты доверенных CA).
+3. `ssl.client.auth=required` включает mTLS: клиент аутентифицируется по CN/SAN своего сертификата.
+4. `ssl.endpoint.identification.algorithm=https` обязателен в production для защиты от MITM.
+5. При ошибке SSL: проверьте keystore/truststore обеих сторон, истечение сертификата, hostname verification.
+
+<KnowledgeCheck
+  question="Команда настроила SSL на Kafka-кластере. Один producer получает ошибку 'SSL handshake failed: peer not authenticated'. Какие три вещи нужно проверить?"
+  answer="1. ssl.client.auth на брокере: если установлен required, а producer не предоставил client keystore (ssl.keystore.location не задан или keystore пустой) — broker отклоняет соединение. 2. Валидность и trust chain клиентского сертификата: CA, подписавший client keystore сертификат, должен быть в broker truststore. Без этого broker не может верифицировать подпись. 3. Срок действия сертификата: проверьте keytool -list -v -keystore client.keystore.jks — убедитесь, что сертификат не истёк (Valid from/until)."
+/>

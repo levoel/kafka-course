@@ -1,0 +1,364 @@
+---
+title: "SASL-механизмы"
+description: "PLAIN, SCRAM-SHA-256/512, OAUTHBEARER, GSSAPI -- конфигурация брокера и клиента для каждого механизма"
+order: 3
+difficulty: "advanced"
+estimatedTime: 35
+topics: ["SASL", "PLAIN", "SCRAM", "OAUTHBEARER", "GSSAPI", "Kerberos", "JAAS"]
+---
+
+# SASL-механизмы
+
+Этот урок — deep-dive в каждый SASL-механизм: как он работает изнутри, как настраивается на брокере и клиенте, каковы его ограничения и когда он подходит. Все примеры используют `SASL_SSL` (SASL + TLS шифрование) — production standard.
+
+---
+
+## JAAS: основа SASL-конфигурации
+
+JAAS (Java Authentication and Authorization Service) — стандартный Java-механизм, через который Kafka настраивает SASL. Для каждого механизма нужен JAAS-конфиг: какой `LoginModule` использовать и с какими параметрами.
+
+Два способа передать JAAS-конфиг:
+
+**Способ 1: Inline в server.properties (предпочтительный)**
+
+```properties
+listener.name.sasl_ssl.plain.sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+  username="admin" password="admin-secret" \
+  user_admin="admin-secret";
+```
+
+**Способ 2: Отдельный файл (устаревший)**
+
+```bash
+# Запуск с указанием файла
+KAFKA_OPTS="-Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf" \
+  kafka-server-start.sh server.properties
+```
+
+Inline конфиг предпочтительнее: нет дополнительного файла, проще управлять через ConfigMaps в Kubernetes, изменения видны в одном месте.
+
+---
+
+## SASL/PLAIN
+
+SASL/PLAIN передаёт username и password в base64-кодировке. Это **не шифрование**: base64 тривиально декодируется. Без SSL это эквивалент отправки пароля открытым текстом.
+
+<Callout type="danger">
+SASL/PLAIN передаёт логин и пароль как есть (base64, не шифрование). БЕЗ SSL это эквивалент отправки пароля открытым текстом по сети. Всегда комбинируйте SASL/PLAIN с SSL encryption (security.protocol=SASL_SSL).
+</Callout>
+
+### Broker config: SASL/PLAIN
+
+```properties
+# Включить PLAIN механизм для SASL_SSL listener
+listener.name.sasl_ssl.sasl.enabled.mechanisms=PLAIN
+
+# JAAS config: статические credentials
+# user_<name>="<password>" определяет каждого допустимого пользователя
+listener.name.sasl_ssl.plain.sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+  username="admin" password="admin-secret" \
+  user_admin="admin-secret" \
+  user_producer="producer-secret" \
+  user_consumer="consumer-secret" \
+  user_monitoring="monitoring-secret";
+```
+
+Добавление нового пользователя (`user_newapp="newapp-secret"`) требует изменения конфига и **перезапуска брокера**. Это главное ограничение PLAIN.
+
+### Client config: SASL/PLAIN
+
+```properties
+security.protocol=SASL_SSL
+sasl.mechanism=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+  username="producer" \
+  password="producer-secret";
+
+# SSL для шифрования канала
+ssl.truststore.location=/etc/kafka/ssl/client.truststore.jks
+ssl.truststore.password=truststore-password
+```
+
+### Ограничения PLAIN
+
+- Credentials в plaintext в конфиг-файле брокера.
+- Ротация пароля = изменение конфига + перезапуск брокера.
+- Нет динамического управления пользователями.
+
+**Вывод:** SASL/PLAIN подходит только для dev/test окружений или очень маленьких кластеров с редкими изменениями пользователей.
+
+---
+
+## SASL/SCRAM-SHA-256 и SCRAM-SHA-512
+
+SCRAM (Salted Challenge-Response Authentication Mechanism) — стандарт RFC 5802. Ключевые свойства:
+- Пароль **не передаётся по сети** — только salted hash challenge/response.
+- Credentials хранятся в KRaft metadata log (в Kafka 4.0) в виде salted hash — не plaintext.
+- Динамическое управление: добавление/удаление пользователей через `kafka-configs.sh` **без перезапуска брокера**.
+
+<Callout type="tip">
+SCRAM-SHA-256/512 — оптимальный выбор для большинства production-кластеров: salted challenge-response (пароль не передаётся по сети), динамическое управление credentials без перезапуска, хранение в KRaft metadata.
+</Callout>
+
+### Управление пользователями
+
+```bash
+# Создать пользователя alice (SCRAM-SHA-256)
+kafka-configs.sh --bootstrap-server localhost:9092 \
+  --command-config admin.properties \
+  --alter \
+  --add-config 'SCRAM-SHA-256=[iterations=8192,password=alice-secret]' \
+  --entity-type users --entity-name alice
+
+# Создать пользователя с обоими алгоритмами (для обратной совместимости)
+kafka-configs.sh --bootstrap-server localhost:9092 \
+  --command-config admin.properties \
+  --alter \
+  --add-config 'SCRAM-SHA-256=[iterations=8192,password=alice-secret],SCRAM-SHA-512=[iterations=8192,password=alice-secret]' \
+  --entity-type users --entity-name alice
+
+# Список пользователей
+kafka-configs.sh --bootstrap-server localhost:9092 \
+  --command-config admin.properties \
+  --describe --entity-type users
+
+# Удалить пользователя alice
+kafka-configs.sh --bootstrap-server localhost:9092 \
+  --command-config admin.properties \
+  --alter \
+  --delete-config 'SCRAM-SHA-256,SCRAM-SHA-512' \
+  --entity-type users --entity-name alice
+```
+
+В Kafka 4.0 credentials хранятся в `__cluster_metadata` internal topic (KRaft log). В Kafka 2.x/3.x они хранились в ZooKeeper — это deprecated и удалено в 4.0.
+
+### Broker config: SASL/SCRAM
+
+```properties
+# Включить SCRAM-SHA-256 механизм
+listener.name.sasl_ssl.sasl.enabled.mechanisms=SCRAM-SHA-256
+
+# JAAS: ScramLoginModule делегирует в KRaft metadata store
+# username/password в JAAS — это credential для самого брокера (inter-broker auth)
+listener.name.sasl_ssl.scram-sha-256.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
+  username="kafka-broker" \
+  password="broker-secret";
+
+# Inter-broker protocol
+security.inter.broker.protocol=SASL_SSL
+sasl.mechanism.inter.broker.protocol=SCRAM-SHA-256
+```
+
+### Client config: SASL/SCRAM
+
+```properties
+security.protocol=SASL_SSL
+sasl.mechanism=SCRAM-SHA-256
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
+  username="alice" \
+  password="alice-secret";
+
+ssl.truststore.location=/etc/kafka/ssl/client.truststore.jks
+ssl.truststore.password=truststore-password
+```
+
+### SCRAM-SHA-256 vs SCRAM-SHA-512
+
+SCRAM-SHA-512 использует SHA-512 вместо SHA-256 — немного сильнее, но незначительно медленнее при handshake (разница измеряется миллисекундами). SHA-256 достаточен для большинства случаев. SHA-512 предпочтителен в высокочувствительных средах (финансы, здравоохранение).
+
+---
+
+## SASL/OAUTHBEARER
+
+OAUTHBEARER интегрирует Kafka с системами управления идентичностью через JWT (JSON Web Token). Клиент получает токен от Identity Provider, предъявляет его брокеру. Брокер валидирует подпись токена через JWKS endpoint (без обращения к IdP при каждом запросе).
+
+Kafka 4.0 включает полноценные встроенные обработчики:
+- `OAuthBearerLoginCallbackHandler`: для клиента — получает токен через `grant_type=client_credentials`.
+- `OAuthBearerValidatorCallbackHandler`: для брокера — валидирует JWT через JWKS.
+
+### Broker config: SASL/OAUTHBEARER
+
+```properties
+# Включить OAUTHBEARER механизм
+listener.name.sasl_ssl.sasl.enabled.mechanisms=OAUTHBEARER
+
+# Broker: JAAS (минимальный — фактически конфиг через отдельные ключи)
+listener.name.sasl_ssl.oauthbearer.sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required;
+
+# Брокер получает токен для inter-broker auth
+listener.name.sasl_ssl.oauthbearer.sasl.login.callback.handler.class=org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler
+
+# Брокер валидирует клиентские токены
+listener.name.sasl_ssl.oauthbearer.sasl.server.callback.handler.class=org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerValidatorCallbackHandler
+
+# JWKS endpoint для валидации подписи JWT
+sasl.oauthbearer.jwks.endpoint.url=https://keycloak.example.com/realms/kafka/protocol/openid-connect/certs
+
+# Token endpoint для получения токена (inter-broker)
+sasl.oauthbearer.token.endpoint.url=https://keycloak.example.com/realms/kafka/protocol/openid-connect/token
+
+# Ожидаемый audience в JWT (защита от token confusion attacks)
+sasl.oauthbearer.expected.audience=kafka-broker
+```
+
+### Client config: SASL/OAUTHBEARER
+
+```properties
+security.protocol=SASL_SSL
+sasl.mechanism=OAUTHBEARER
+
+sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required \
+  clientId="kafka-producer-app" \
+  clientSecret="client-secret-value" \
+  scope="kafka:read kafka:write";
+
+sasl.login.callback.handler.class=org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler
+
+sasl.oauthbearer.token.endpoint.url=https://keycloak.example.com/realms/kafka/protocol/openid-connect/token
+
+ssl.truststore.location=/etc/kafka/ssl/client.truststore.jks
+ssl.truststore.password=truststore-password
+```
+
+### Интеграция с IdP
+
+OAUTHBEARER работает с любым OAuth 2.0 / OIDC-совместимым IdP:
+- **Keycloak** (open source, on-prem): создайте Realm, Client с `client_credentials` grant, настройте audience mapper.
+- **Auth0**: Applications → Machine-to-Machine, настройте API с аудиторией `kafka-broker`.
+- **Azure AD (Entra ID)**: App Registration, Client Secret, настройте `aud` claim.
+- **Google Identity Platform**: Service Account с JWT.
+
+**Ключевое преимущество:** централизованное управление identity. Отзыв доступа у сервиса = отзыв client credentials в IdP. Токены короткоживущие (обычно 5-60 минут) — автоматически обновляются Kafka client library.
+
+**Маппинг JWT claim в Kafka principal:**
+
+```properties
+# Какой claim JWT использовать как principal (default: sub)
+sasl.oauthbearer.sub.claim.name=preferred_username
+```
+
+---
+
+## SASL/GSSAPI (Kerberos)
+
+GSSAPI (Generic Security Services API) в контексте Kafka означает Kerberos. Это enterprise SSO через Active Directory или MIT Kerberos. Клиент аутентифицируется в KDC (Key Distribution Center) и получает Service Ticket для Kafka.
+
+### Как работает Kerberos authentication
+
+1. Клиент аутентифицируется в KDC через keytab файл → получает TGT (Ticket Granting Ticket).
+2. Клиент запрашивает Service Ticket у KDC для Kafka service (`kafka/broker.example.com@REALM`).
+3. Клиент предъявляет Service Ticket Kafka-брокеру.
+4. Брокер верифицирует Service Ticket через свой keytab — без обращения к KDC при каждом запросе.
+
+### Broker config: SASL/GSSAPI
+
+```properties
+# Включить GSSAPI механизм
+listener.name.sasl_ssl.sasl.enabled.mechanisms=GSSAPI
+
+# Kerberos service name (используется для формирования SPN: kafka/broker.example.com@REALM)
+sasl.kerberos.service.name=kafka
+
+# Broker JAAS: Krb5LoginModule с keytab
+listener.name.sasl_ssl.gssapi.sasl.jaas.config=com.sun.security.auth.module.Krb5LoginModule required \
+  useKeyTab=true \
+  storeKey=true \
+  keyTab="/etc/kafka/kafka.service.keytab" \
+  principal="kafka/broker1.example.com@EXAMPLE.COM";
+```
+
+Дополнительно: JVM должна знать расположение `krb5.conf`:
+
+```bash
+# В KAFKA_OPTS или kafka-server-start.sh
+export KAFKA_OPTS="-Djava.security.krb5.conf=/etc/krb5.conf"
+```
+
+### Client config: SASL/GSSAPI
+
+```properties
+security.protocol=SASL_SSL
+sasl.mechanism=GSSAPI
+sasl.kerberos.service.name=kafka
+
+sasl.jaas.config=com.sun.security.auth.module.Krb5LoginModule required \
+  useKeyTab=true \
+  storeKey=true \
+  keyTab="/etc/kafka/alice.keytab" \
+  principal="alice@EXAMPLE.COM";
+```
+
+**Практические сложности GSSAPI:**
+- Требуется рабочий KDC, настроенный realm, keytab файлы для каждого сервиса.
+- `krb5.conf` должен быть синхронизирован на всех машинах.
+- Системное время: Kerberos требует синхронизацию времени в пределах 5 минут (NTP обязателен).
+- Отладка через `KRB5_TRACE=/dev/stderr` или Kerberos log.
+
+**Вывод:** SASL/GSSAPI выбирают, когда организация уже использует Active Directory/MIT Kerberos и требует SSO интеграцию. В облачных средах OAUTHBEARER обычно предпочтительнее.
+
+---
+
+## Несколько механизмов на одном listener
+
+Kafka поддерживает несколько активных SASL-механизмов одновременно на одном listener. Клиент выбирает механизм через `sasl.mechanism`.
+
+```properties
+# Broker: два механизма активны
+listener.name.sasl_ssl.sasl.enabled.mechanisms=SCRAM-SHA-256,OAUTHBEARER
+
+# Конфигурация для каждого механизма отдельно
+listener.name.sasl_ssl.scram-sha-256.sasl.jaas.config=...
+listener.name.sasl_ssl.oauthbearer.sasl.jaas.config=...
+
+# Inter-broker: фиксированный механизм (выбирает один)
+sasl.mechanism.inter.broker.protocol=SCRAM-SHA-256
+```
+
+Это позволяет поддерживать смешанную среду: старые сервисы на SCRAM, новые — на OAUTHBEARER.
+
+---
+
+## Миграция с PLAIN на SCRAM без downtime
+
+Поэтапная миграция с SASL/PLAIN на SASL/SCRAM без остановки кластера:
+
+**Шаг 1**: Добавить SCRAM к активным механизмам (PLAIN остаётся):
+
+```properties
+listener.name.sasl_ssl.sasl.enabled.mechanisms=PLAIN,SCRAM-SHA-256
+```
+
+Перезапустите брокеры по одному (rolling restart).
+
+**Шаг 2**: Создать SCRAM credentials для всех существующих пользователей:
+
+```bash
+kafka-configs.sh --alter --add-config 'SCRAM-SHA-256=[...]' --entity-type users --entity-name producer
+kafka-configs.sh --alter --add-config 'SCRAM-SHA-256=[...]' --entity-type users --entity-name consumer
+```
+
+**Шаг 3**: Мигрировать клиентов по одному на `sasl.mechanism=SCRAM-SHA-256`. Каждый клиент мигрирует независимо — оба механизма активны, клиенты в любом порядке переключаются.
+
+**Шаг 4**: Когда все клиенты мигрированы, убрать PLAIN из enabled mechanisms:
+
+```properties
+listener.name.sasl_ssl.sasl.enabled.mechanisms=SCRAM-SHA-256
+```
+
+Rolling restart. Миграция завершена без единой секунды downtime.
+
+---
+
+## Ключевые выводы
+
+1. JAAS config — основа SASL. Inline в `server.properties` предпочтительнее отдельного файла.
+2. **PLAIN**: статические credentials в JAAS config, ротация = перезапуск. Только с SSL. Только dev.
+3. **SCRAM**: salted challenge-response, credentials в KRaft metadata, динамическое управление без перезапуска. Production default.
+4. **OAUTHBEARER**: JWT от внешнего IdP. Централизованное управление identity, короткоживущие токены. Cloud-native.
+5. **GSSAPI**: Kerberos enterprise SSO. Самый сложный. Только при наличии KDC инфраструктуры.
+6. Несколько механизмов на listener — для плавной миграции между механизмами.
+
+<KnowledgeCheck
+  question="Компания мигрирует Kafka-кластер на SASL/OAUTHBEARER с Keycloak. В чём ключевое отличие OAUTHBEARER от SCRAM в части управления credentials? Назовите два преимущества OAUTHBEARER для enterprise."
+  answer="Ключевое отличие: SCRAM credentials хранятся внутри Kafka (KRaft metadata log) и управляются через kafka-configs.sh. OAUTHBEARER credentials управляются во внешнем Identity Provider (Keycloak) — Kafka является resource server, а не identity store. Преимущества OAUTHBEARER для enterprise: 1. Централизованное управление identity: отзыв доступа у сервиса выполняется в IdP (Keycloak admin console) и мгновенно применяется — не нужно трогать Kafka конфиг. 2. SSO и short-lived tokens: токены имеют короткий TTL (5-60 минут), автоматически обновляются. Компрометация токена ограничена его lifetime. Интеграция с существующими корпоративными directory (LDAP, Active Directory) через Keycloak — нет дублирования identity store."
+/>
