@@ -1,0 +1,163 @@
+---
+title: "Итоги модуля: ksqlDB"
+description: "Kafka Streams vs ksqlDB — когда что использовать. Обзор ключевых SQL-паттернов"
+order: 5
+difficulty: "intermediate"
+estimatedTime: 15
+topics: ["Summary", "Kafka Streams vs ksqlDB", "Decision Guide"]
+---
+
+# Итоги модуля: ksqlDB
+
+Модуль 08 завершён. Вы прошли путь от SQL-абстракций ksqlDB через CSAS/CTAS и push/pull queries к production-деплойменту. Теперь — систематизация: что когда применять, и как ksqlDB соотносится с Kafka Streams из Модуля 07.
+
+---
+
+## Что мы изучили
+
+**Урок 01: Streams и Tables в ksqlDB**
+
+ksqlDB — SQL-интерфейс поверх Kafka Streams. Каждое SQL-выражение компилируется в Kafka Streams топологию и выполняется как стандартное Streams-приложение. `STREAM` = `KStream` (append-only события), `TABLE` = `KTable` (актуальное состояние по ключу). `value_format` определяет сериализацию: JSON без схемы, AVRO/PROTOBUF через Schema Registry.
+
+**Урок 02: CSAS/CTAS и Push/Pull queries**
+
+CSAS (CREATE STREAM AS SELECT) — непрерывная трансформация потока. CTAS (CREATE TABLE AS SELECT) — непрерывная агрегация с материализацией. Push query (`EMIT CHANGES`) — непрерывная подписка на новые данные, соединение открыто. Pull query — точечный lookup по ключу, только для материализованных TABLE, соединение закрывается сразу.
+
+**Урок 03: Windowed Aggregations и UDFs**
+
+`WINDOW TUMBLING` — фиксированные непересекающиеся окна. `WINDOW HOPPING` — перекрывающиеся окна. `WINDOW SESSION` — динамические окна по пробелам активности. `GRACE PERIOD` — продление приёма запоздавших записей. UDF (скаляр), UDAF (агрегат), UDTF (один-ко-многим) — деплоятся как Java JAR в `ext/`.
+
+**Урок 04: ksqlDB в Production**
+
+Headless mode (`ksql.queries.file`) — обязателен для production. Capacity planning: CPU + диск (RocksDB) + RAM на каждый persistent query. HA через Kafka Streams rebalancing + standby replicas. Мониторинг через JMX и Prometheus. CREATE SOURCE/SINK CONNECTOR — управление Connect коннекторами из SQL.
+
+---
+
+## Kafka Streams vs ksqlDB: матрица решений
+
+| Критерий | Kafka Streams | ksqlDB |
+|----------|--------------|--------|
+| Язык | Java / Kotlin / Scala | SQL |
+| Деплоймент | JAR встроен в ваше приложение | Standalone-сервер кластер |
+| Flexibility | Полный DSL + Processor API | SQL-подмножество |
+| Sliding windows | Да (`SlidingWindows`) | Нет |
+| Foreign key join | Да (KTable-KTable FK join) | Ограниченно |
+| Внешние вызовы | Да (через Processor API) | Нет (только SQL) |
+| Пользовательская логика | Processor API (любая Java) | UDF (только Java) |
+| CI/CD интеграция | JAR + стандартный деплоймент | SQL-файл + headless mode |
+| Embedding в микросервис | Да (библиотека) | Нет (отдельный сервер) |
+| Идеально для | Сложная обработка событий, микросервисы | SQL-разработчики, быстрый прототип, стандартные трансформации |
+
+---
+
+## Когда использовать ksqlDB
+
+**Используйте ksqlDB, если:**
+
+- Команда предпочитает SQL и не хочет писать Java-код.
+- Задачи — стандартные: фильтрация, маппинг, GROUP BY агрегации, TUMBLING/HOPPING/SESSION windowing.
+- Нужна быстрая итерация: написал SQL → мгновенно видишь результат.
+- Пайплайн прозрачен: источник → трансформация → сток, без сложной бизнес-логики.
+- Команда уже использует Confluent Platform и хочет единый SQL-интерфейс для всего (Connect + processing + sink).
+
+**Используйте Kafka Streams, если:**
+
+- Нужны sliding windows (`SlidingWindows`) — в ksqlDB их нет.
+- Требуются сложные joins, недоступные в ksqlDB SQL.
+- Нужно встроить processing в микросервис (JAR без внешнего процесса).
+- Логика обработки требует Processor API: внешние вызовы, сложные состояния, punctuators.
+- Производительность критична: Kafka Streams позволяет тонкую настройку, которую SQL не даёт.
+- Команда опытна в Java/Kotlin и предпочитает типобезопасный DSL.
+
+---
+
+## Взаимосвязь модулей
+
+```
+Модуль 05 (Kafka Connect)
+    |
+    | CREATE SOURCE/SINK CONNECTOR
+    v
+Модуль 06 (Schema Registry)
+    |
+    | value_format = 'AVRO'/'PROTOBUF'
+    v
+Модуль 07 (Kafka Streams)  ------> Модуль 08 (ksqlDB)
+    |                                   |
+    | KStream, KTable                   | STREAM, TABLE
+    | WindowedBy, state stores          | WINDOW TUMBLING/HOPPING
+    | Processor API                     | CSAS, CTAS
+    |                                   | Push / Pull queries
+    |                                   |
+    v                                   v
+              Kafka Cluster (топики, партиции, репликация)
+                          |
+                        Модуль 09 (Security)
+```
+
+Оба модуля (07 и 08) описывают разные подходы к одному и тому же: stream processing поверх Kafka. ksqlDB компилирует SQL в Kafka Streams топологии — это не конкуренты, а уровни абстракции.
+
+---
+
+## Ключевые SQL-паттерны модуля
+
+**Паттерн 1: Event enrichment (обогащение событий)**
+
+```sql
+-- Регистрация источников
+CREATE STREAM orders (order_id VARCHAR KEY, customer_id VARCHAR, amount DOUBLE)
+  WITH (kafka_topic='orders', value_format='JSON');
+
+CREATE TABLE customers (customer_id VARCHAR PRIMARY KEY, name VARCHAR, tier VARCHAR)
+  WITH (kafka_topic='customers', value_format='AVRO');
+
+-- Непрерывное обогащение через KStream-KTable join
+CREATE STREAM enriched_orders AS
+  SELECT o.order_id, o.amount, c.name, c.tier
+  FROM orders o
+  LEFT JOIN customers c ON o.customer_id = c.customer_id
+  EMIT CHANGES;
+```
+
+**Паттерн 2: Real-time aggregation с materialized view**
+
+```sql
+CREATE TABLE hourly_revenue AS
+  SELECT
+    product_category,
+    SUM(amount) AS total_revenue,
+    COUNT(*) AS order_count,
+    WINDOWSTART AS win_start
+  FROM orders
+  WINDOW TUMBLING (SIZE 1 HOUR, GRACE PERIOD 10 MINUTES)
+  GROUP BY product_category
+  EMIT CHANGES;
+
+-- Точечный запрос текущего состояния
+SELECT * FROM hourly_revenue WHERE product_category = 'electronics';
+```
+
+**Паттерн 3: Headless production deployment**
+
+```bash
+# queries.sql в Git-репозитории
+# CI/CD: при изменении queries.sql — рестарт ksqlDB с новым файлом
+docker run -d \
+  -e KSQL_BOOTSTRAP_SERVERS=kafka:9092 \
+  -e KSQL_KSQL_QUERIES_FILE=/etc/ksqldb/queries.sql \
+  -v ./queries.sql:/etc/ksqldb/queries.sql \
+  confluentinc/cp-ksqldb-server:7.9.0
+```
+
+---
+
+## Что дальше
+
+**Модуль 09: Security** — TLS, SASL, ACL, RBAC. Защита Kafka-кластера, Schema Registry, Kafka Connect и ksqlDB. Аутентификация продюсеров и консьюмеров. Authorization через ACL и Confluent RBAC.
+
+После Module 09 у вас будет полная картина Kafka-экосистемы: архитектура (01), продюсеры (02), консьюмеры (03), внутренности Kafka (04), Connect (05), Schema Registry (06), Kafka Streams (07), ksqlDB (08), Security (09).
+
+<KnowledgeCheck
+  question="Команда разрабатывает систему real-time обнаружения мошенничества. Требования: (1) сложные правила с вычислением скользящего среднего за последние 5 минут, (2) обращение к внешнему ML-сервису для scoring, (3) высокая производительность. Kafka Streams или ksqlDB?"
+  answer="Kafka Streams — правильный выбор по нескольким причинам. Во-первых, sliding windows (скользящее среднее за 5 минут) реализуется через SlidingWindows.ofTimeDifferenceWithNoGrace(Duration.ofMinutes(5)) в Kafka Streams DSL — в ksqlDB нет SQL-аналога WINDOW SLIDING. Во-вторых, обращение к внешнему ML-сервису (HTTP-запрос в процессинге) невозможно в ksqlDB SQL — это задача для Processor API или Kafka Streams с внешним вызовом в процессоре. В-третьих, performance-critical путь требует тонкой настройки, которую даёт Kafka Streams (custom SerDes, batch processing, RocksDB tuning). ksqlDB подойдёт для вспомогательных задач: alerting на явные пороги, агрегация метрик по tumbling/hopping windows, enrichment из reference tables."
+/>
