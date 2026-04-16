@@ -1,0 +1,401 @@
+---
+title: "Performance Tuning с числовыми целями"
+description: "Конкретные числа для настройки producer, consumer, broker -- batch.size, linger.ms, fetch.min.bytes и целевые метрики"
+order: 3
+difficulty: "advanced"
+estimatedTime: 35
+topics: ["Performance Tuning", "Throughput", "Latency", "batch.size", "linger.ms", "acks", "Compression", "fetch.min.bytes"]
+---
+
+# Performance Tuning с числовыми целями
+
+Самый распространённый совет по оптимизации Kafka: "увеличьте batch.size". Это бесполезно без конкретных цифр. Этот урок устроен иначе: каждая рекомендация сопровождается конкретным значением, конкретной целью и конкретным trade-off.
+
+Два базовых режима: **throughput-optimized** и **latency-optimized**. Они конфликтуют — нельзя максимизировать оба одновременно. Выбор определяется use case.
+
+---
+
+## Два режима: throughput vs latency
+
+<DiagramContainer title="Throughput vs Latency: фундаментальный trade-off" color="amber">
+  <div className="space-y-4 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">Увеличение batch.size и linger.ms повышает throughput, но добавляет latency. Уменьшение обеих ускоряет доставку, но снижает эффективность.</div>
+    <FlowRow>
+      <DataBox
+        label="Throughput-оптимизированный"
+        tooltip="Цель: максимальная пропускная способность. batch.size=1MB, linger.ms=50. Потребители: аналитика, ETL, batch-обработка. Допустимая задержка: 50-200ms. Достижимо: 100K+ records/s per producer."
+      >
+        batch.size=1MB, linger.ms=50ms
+      </DataBox>
+      <Arrow direction="right" label="vs" />
+      <DataBox
+        label="Latency-оптимизированный"
+        tooltip="Цель: минимальная задержка доставки. batch.size=16KB, linger.ms=0. Потребители: real-time мониторинг, алерты, финтех. Целевая задержка: менее 5ms p99. Throughput ограничен: 20-50K records/s."
+      >
+        batch.size=16KB, linger.ms=0ms
+      </DataBox>
+    </FlowRow>
+    <FlowRow>
+      <DataBox
+        label="Аналитика / ETL / Logs"
+        tooltip="Типичные use cases для throughput-режима: сбор логов в ELK/ClickHouse, ETL-пайплайны, аналитические события. Данные можно буферизировать -- задержка в 50ms не критична."
+      >
+        Аналитика / ETL
+      </DataBox>
+      <Arrow direction="right" label="приоритет" />
+      <DataBox
+        label="Мониторинг / Fraud detection / Trading"
+        tooltip="Типичные use cases для latency-режима: системы обнаружения мошенничества, алгоритмический трейдинг, real-time метрики для автоматических реакций. Каждая миллисекунда задержки имеет значение."
+      >
+        Real-time / Fraud / Trading
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+---
+
+## Producer throughput optimization: конкретные числа
+
+Baseline конфигурация для throughput-оптимизированного producer:
+
+```properties
+# Throughput-optimized producer
+batch.size=1048576              # 1 MB (default: 16384 = 16 KB)
+linger.ms=50                    # ждать 50ms для заполнения batch (default: 0)
+compression.type=lz4            # быстрое сжатие (default: none)
+buffer.memory=67108864          # 64 MB буфер (default: 33554432 = 32 MB)
+max.in.flight.requests.per.connection=5   # параллельных запросов (default: 5)
+acks=all                        # максимальная durability
+```
+
+**Цель: 100K+ records/s при avg msg size 500 bytes = 50 MB/s**
+
+<DiagramContainer title="Путь записи через producer accumulator" color="emerald">
+  <div className="space-y-4 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">Batch заполняется до batch.size или истекает linger.ms -- что наступит раньше</div>
+    <FlowRow>
+      <FlowNode
+        variant="source"
+        size="sm"
+        tooltip="producer.send() -- запись поступает в RecordAccumulator. Данный момент: начало отсчёта linger.ms."
+      >
+        producer.send()
+      </FlowNode>
+      <Arrow direction="right" />
+      <DataBox
+        label="RecordAccumulator (buffer)"
+        tooltip="Буфер для накопления записей перед отправкой. Размер контролируется buffer.memory (64 MB). При заполнении буфера producer блокируется (max.block.ms). batch-size-avg JMX-метрика показывает средний заполненный размер -- сравнивайте с batch.size."
+      >
+        buffer.memory=64MB
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="Batch готов? batch.size OR linger.ms"
+        tooltip="Batch отправляется когда: (1) размер достиг batch.size=1MB, ИЛИ (2) истекло linger.ms=50ms. Что наступит раньше. При 1000 records/s по 500 bytes: за 50ms накопится 25KB -- намного меньше batch.size. Batch отправится по linger.ms. При 100K records/s: за 50ms накопится 2.5MB -- batch достигнет 1MB раньше и отправится раньше linger.ms."
+      >
+        batch.size=1MB OR linger.ms=50ms
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="Сжатие (lz4)"
+        tooltip="При compression.type=lz4: batch сжимается перед отправкой. lz4 даёт 2-2.5x сжатие при скорости ~500 MB/s. Для batch 1MB: сжатый размер ~400-500KB. Снижает сетевой трафик и объём данных на диске брокера."
+      >
+        compression=lz4
+      </DataBox>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="sink"
+        size="sm"
+        tooltip="Сжатый batch отправляется брокеру. max.in.flight.requests.per.connection=5 позволяет держать 5 незавершённых batch в полёте -- конвейеризация повышает throughput. ACK получен -- batch из буфера удаляется."
+      >
+        Брокер (ACK)
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+**Почему batch.size=1MB, а не 16KB (default)?**
+
+При 16KB batch и 100K records/s по 500 bytes:
+- Throughput в байтах: 100,000 * 500 = 50 MB/s
+- Размер batch: 16 KB
+- Количество запросов к брокеру: 50 MB / 16 KB = ~3,200 запросов/с
+- Каждый запрос: round trip к брокеру (~1-5ms), CPU overhead на обе стороны
+
+При 1MB batch и той же нагрузке:
+- Количество запросов к брокеру: 50 MB / 1 MB = 50 запросов/с
+- В 64 раза меньше запросов — соответственно ниже overhead
+
+**Наблюдаемые результаты:**
+- batch.size=1MB + linger.ms=50 + compression=lz4: 200K-500K records/s (зависит от msg size)
+- batch.size=16KB + linger.ms=0: 20K-50K records/s
+
+---
+
+## Producer latency optimization: конкретные числа
+
+```properties
+# Latency-optimized producer
+acks=1                          # только лидер-ACK (не ждём ISR)
+batch.size=16384                # 16 KB (default) — меньше ждать заполнения
+linger.ms=0                    # отправлять немедленно, не ждать
+compression.type=none           # нет сжатия = нет CPU-задержки
+buffer.memory=33554432          # 32 MB (default) достаточно
+max.block.ms=5000               # 5 сек блокировки при полном буфере
+```
+
+**Цель: менее 5ms p99 produce latency (в пределах одного датацентра)**
+
+<DiagramContainer title="Сравнение: throughput vs latency конфигурации" color="slate">
+  <div className="overflow-x-auto p-2">
+    <Grid columns={3}>
+      <FlowNode variant="header" tooltip="Параметр конфигурации">Параметр</FlowNode>
+      <FlowNode variant="header" tooltip="Throughput-оптимизированная конфигурация">Throughput</FlowNode>
+      <FlowNode variant="header" tooltip="Latency-оптимизированная конфигурация">Latency</FlowNode>
+
+      <DataBox label="batch.size" tooltip="Размер batch до принудительной отправки. Больше = выше throughput. Меньше = быстрее отправка.">batch.size</DataBox>
+      <DataBox label="1048576 (1MB)" tooltip="1 MB: много записей в одном запросе. Batch заполняется за 50ms при высокой нагрузке.">1,048,576 (1 MB)</DataBox>
+      <DataBox label="16384 (16KB)" tooltip="16 KB: default значение. Batch заполняется быстро или отправляется сразу (linger.ms=0).">16,384 (16 KB)</DataBox>
+
+      <DataBox label="linger.ms" tooltip="Время ожидания для заполнения batch. 0 = отправлять немедленно.">linger.ms</DataBox>
+      <DataBox label="50ms" tooltip="Ждать 50ms для заполнения batch. Добавляет задержку, но увеличивает эффективность batch-ing.">50 ms</DataBox>
+      <DataBox label="0ms" tooltip="Не ждать. Отправить немедленно после producer.send(). Минимальная задержка.">0 ms</DataBox>
+
+      <DataBox label="compression.type" tooltip="Алгоритм сжатия. none = нет overhead на CPU. lz4 = быстрое сжатие.">compression.type</DataBox>
+      <DataBox label="lz4" tooltip="lz4: ~2x compression ratio, ~500 MB/s скорость. Снижает сетевой трафик.">lz4</DataBox>
+      <DataBox label="none" tooltip="Нет сжатия. Нет CPU overhead на сериализацию/десериализацию. Минимальная задержка.">none</DataBox>
+
+      <DataBox label="acks" tooltip="Подтверждение записи. all = ISR подтвердила. 1 = только лидер.">acks</DataBox>
+      <DataBox label="all" tooltip="Ждать подтверждения всех ISR-реплик. Максимальная durability. +50-100ms latency при acks=all.">all</DataBox>
+      <DataBox label="1" tooltip="Только лидер. Риск: если лидер упадёт до репликации -- данные потеряны. Минимальная задержка.">1</DataBox>
+
+      <DataBox label="Достижимый throughput" tooltip="Реальный throughput при средней записи 500 bytes.">Throughput</DataBox>
+      <DataBox label="100K-500K records/s" tooltip="При среднем размере записи 500 bytes и batch.size=1MB: 100K+ records/s per producer.">100K-500K records/s</DataBox>
+      <DataBox label="20K-50K records/s" tooltip="При latency-режиме и немедленной отправке: количество запросов ограничивает throughput.">20K-50K records/s</DataBox>
+
+      <DataBox label="Целевая latency p99" tooltip="Задержка на 99-м перцентиле.">Latency p99</DataBox>
+      <DataBox label="50-150ms" tooltip="Минимум linger.ms=50ms плюс обработка брокером. При acks=all и ISR-ожидании может быть выше.">50-150 ms</DataBox>
+      <DataBox label="меньше 5ms" tooltip="При acks=1 и linger.ms=0 в пределах одного датацентра: 1-5ms p99 достижимо.">менее 5 ms</DataBox>
+    </Grid>
+  </div>
+</DiagramContainer>
+
+---
+
+## Consumer throughput optimization: конкретные числа
+
+```properties
+# Throughput-optimized consumer
+fetch.min.bytes=1048576         # ждать 1MB данных перед возвратом fetch (default: 1)
+fetch.max.wait.ms=500           # максимум 500ms ждать fetch.min.bytes (default: 500)
+max.poll.records=1000           # возвращать до 1000 записей за poll() (default: 500)
+fetch.max.bytes=52428800        # максимум 50MB в ответе на fetch (default: 52428800)
+max.partition.fetch.bytes=1048576   # 1MB per partition per fetch (default: 1048576)
+```
+
+**Цель: consumer удерживает lag менее 1000 записей при input rate = 50K records/s**
+
+**Почему fetch.min.bytes=1MB важно?**
+
+При `fetch.min.bytes=1` (default): брокер отвечает на каждый fetch-запрос немедленно, даже если данных нет. При интенсивном потреблении это создаёт тысячи пустых fetch-запросов в секунду.
+
+При `fetch.min.bytes=1MB`: брокер ждёт накопления 1MB данных (или истечения `fetch.max.wait.ms=500ms`). Количество fetch-запросов резко падает, снижается overhead на обе стороны.
+
+<DiagramContainer title="Consumer lag: уровни и действия" color="amber">
+  <div className="space-y-3 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">records-lag-max: от нормы до критического инцидента</div>
+    <FlowColumn>
+      <DataBox
+        label="Lag меньше 100"
+        tooltip="НОРМАЛЬНО. Consumer успевает за продюсерами. Мониторьте, но действий не требуется."
+      >
+        Зелёная зона: lag меньше 100 -- норма, без действий
+      </DataBox>
+      <Arrow direction="down" />
+      <DataBox
+        label="Lag 100-1000"
+        tooltip="НАБЛЮДЕНИЕ. Lag накапливается. Причины: временный всплеск нагрузки, медленная обработка. Действие: мониторить тренд. Если lag растёт -- переходим в следующую зону."
+      >
+        Жёлтая зона: lag 100-1000 -- мониторить, проверить processing time
+      </DataBox>
+      <Arrow direction="down" />
+      <DataBox
+        label="Lag 1000-10000"
+        tooltip="WARNING. Серьёзное отставание. Действия: (1) Scale consumer group: добавить инстансы (до числа партиций). (2) Проверить max.poll.interval.ms: consumer исключается из группы если не вызывает poll() за это время. (3) Проверить обработку: не блокируется ли consumer внешними вызовами."
+      >
+        Оранжевая зона: lag 1000-10000 -- scale consumer group, проверить max.poll.interval.ms
+      </DataBox>
+      <Arrow direction="down" />
+      <DataBox
+        label="Lag больше 10000"
+        tooltip="КРИТИЧНО. Немедленные действия: (1) Scale consumers (горизонтально, до max=partitions). (2) Проверить: нет ли rebalancing storm (frequent rebalances prevent consumption). (3) Проверить stuck processing (thread dump). (4) Рассмотреть увеличение retention если lag продолжает расти -- данные могут быть удалены до обработки."
+      >
+        Красная зона: lag больше 10000 -- немедленно: scale + диагностика
+      </DataBox>
+    </FlowColumn>
+  </div>
+</DiagramContainer>
+
+**Масштабирование consumer group:**
+
+Максимальный параллелизм = число партиций топика. Нельзя назначить двух consumers на одну партицию в рамках одной группы.
+
+```bash
+# Пример: топик orders, 12 партиций
+# Consumer group с 6 инстансами: каждый обрабатывает 2 партиции
+# Consumer group с 12 инстансами: каждый обрабатывает 1 партицию (максимальный параллелизм)
+# Consumer group с 13 инстансами: один инстанс будет idle (лишний)
+```
+
+---
+
+## Broker-side tuning: параметры I/O
+
+```properties
+# Broker thread configuration
+num.io.threads=8               # I/O потоки (default: 8, увеличить если RequestHandlerAvgIdlePercent < 0.3)
+num.network.threads=3          # сетевые потоки (default: 3, увеличить при высоком connection count)
+num.replica.fetchers=1         # потоки для репликации от фолловеров (default: 1, увеличить если follower lag растёт)
+
+# Socket buffers
+socket.send.buffer.bytes=102400    # TCP send buffer (100 KB)
+socket.receive.buffer.bytes=102400 # TCP receive buffer (100 KB)
+socket.request.max.bytes=104857600 # Максимальный размер запроса (100 MB)
+```
+
+**Когда увеличивать num.io.threads:**
+
+`RequestHandlerAvgIdlePercent` ниже 0.30 в течение 10 минут → попробовать увеличить `num.io.threads` с 8 до 12 или 16. Каждый I/O поток обрабатывает сетевые запросы: Produce, Fetch, Metadata. При высокой нагрузке очередь заполняется.
+
+**Когда увеличивать num.replica.fetchers:**
+
+`kafka.server:type=ReplicaFetcherManager,name=MaxLag` растёт → фолловеры не успевают реплицировать. Увеличение `num.replica.fetchers` с 1 до 2-4 позволяет нескольким потокам параллельно реплицировать от разных лидеров.
+
+---
+
+## Сравнение алгоритмов сжатия: числа
+
+<DiagramContainer title="Алгоритмы сжатия Kafka: сравнение" color="slate">
+  <div className="overflow-x-auto p-2">
+    <Grid columns={6}>
+      <FlowNode variant="header" tooltip="Алгоритм сжатия">Алгоритм</FlowNode>
+      <FlowNode variant="header" tooltip="Коэффициент сжатия (во сколько раз уменьшается размер)">Ratio</FlowNode>
+      <FlowNode variant="header" tooltip="Скорость сжатия (на стороне producer)">Сжатие MB/s</FlowNode>
+      <FlowNode variant="header" tooltip="Скорость декомпрессии (на стороне consumer/broker)">Дек. MB/s</FlowNode>
+      <FlowNode variant="header" tooltip="Нагрузка на CPU (LOW/MEDIUM/HIGH)">CPU</FlowNode>
+      <FlowNode variant="header" tooltip="Рекомендованный сценарий использования">Рекомендация</FlowNode>
+
+      <DataBox label="none" tooltip="Без сжатия. Нет CPU overhead. Максимальная throughput с минимальной latency. Использует максимальную пропускную способность сети.">none</DataBox>
+      <DataBox label="1.0x" tooltip="Нет сжатия -- данные занимают столько же места, сколько и до.">1.0x</DataBox>
+      <DataBox label="N/A" tooltip="Нет операции сжатия.">N/A</DataBox>
+      <DataBox label="N/A" tooltip="Нет операции декомпрессии.">N/A</DataBox>
+      <DataBox label="0%" tooltip="Никакой нагрузки на CPU для сжатия/декомпрессии.">0%</DataBox>
+      <DataBox label="Latency-критичные системы" tooltip="Использовать при: latency меньше 5ms p99, сеть не является bottleneck, данные уже сжаты (бинарные форматы).">Latency-критично</DataBox>
+
+      <DataBox label="lz4" tooltip="Рекомендованный алгоритм по умолчанию для throughput. Быстрый, хорошее сжатие.">lz4</DataBox>
+      <DataBox label="2.0-2.5x" tooltip="Типичное сжатие текстовых/JSON данных. 1MB сырых данных -> ~400-500KB.">2.0-2.5x</DataBox>
+      <DataBox label="~500 MB/s" tooltip="Очень высокая скорость сжатия. Producer не является bottleneck при использовании lz4.">~500 MB/s</DataBox>
+      <DataBox label="~800 MB/s" tooltip="Декомпрессия ещё быстрее сжатия. Consumer overhead минимален.">~800 MB/s</DataBox>
+      <DataBox label="LOW" tooltip="Минимальная нагрузка на CPU. Подходит для любых серверов.">LOW</DataBox>
+      <DataBox label="Default для throughput" tooltip="Использовать как baseline для всех throughput-оптимизированных систем. Замените snappy на lz4.">Default throughput</DataBox>
+
+      <DataBox label="snappy" tooltip="Legacy алгоритм. Был popular в Hadoop-экосистеме. Медленнее lz4, хуже ratio. Не рекомендуется для новых систем.">snappy</DataBox>
+      <DataBox label="1.5-2.0x" tooltip="Хуже чем lz4 по ratio. Для большинства форматов данных.">1.5-2.0x</DataBox>
+      <DataBox label="~400 MB/s" tooltip="Медленнее lz4. Нет преимуществ перед lz4.">~400 MB/s</DataBox>
+      <DataBox label="~600 MB/s" tooltip="Медленнее lz4 по декомпрессии.">~600 MB/s</DataBox>
+      <DataBox label="LOW" tooltip="Низкая нагрузка на CPU, но хуже чем lz4 по throughput.">LOW</DataBox>
+      <DataBox label="Legacy (использовать lz4)" tooltip="Если используете snappy -- замените на lz4. Лучше по всем параметрам.">Legacy -> lz4</DataBox>
+
+      <DataBox label="zstd" tooltip="Zstandard: лучший ratio, но больше CPU. Рекомендован при ограниченной пропускной способности сети.">zstd</DataBox>
+      <DataBox label="2.5-3.5x" tooltip="Лучший коэффициент сжатия. 1MB -> ~300-400KB. Значительная экономия на сети и диске.">2.5-3.5x</DataBox>
+      <DataBox label="~200 MB/s" tooltip="Медленнее lz4 по скорости сжатия. При высокой нагрузке producer может стать bottleneck на CPU.">~200 MB/s</DataBox>
+      <DataBox label="~500 MB/s" tooltip="Приемлемая скорость декомпрессии на стороне consumer.">~500 MB/s</DataBox>
+      <DataBox label="MEDIUM" tooltip="Заметная нагрузка на CPU по сравнению с lz4. Требует оценки CPU capacity.">MEDIUM</DataBox>
+      <DataBox label="Bandwidth-limited сети" tooltip="Использовать когда: сеть является bottleneck (1 Gbps NIC при высокой нагрузке), данные хранятся долго (retention 30+ дней), CPU не является ограничением.">Bandwidth-limited</DataBox>
+
+      <DataBox label="gzip" tooltip="Legacy алгоритм. Медленный. Не рекомендован для Kafka.">gzip</DataBox>
+      <DataBox label="2.0-3.0x" tooltip="Хороший ratio, но медленная скорость делает его неэффективным.">2.0-3.0x</DataBox>
+      <DataBox label="~50 MB/s" tooltip="В 10 раз медленнее lz4. Серьёзный bottleneck при высокой нагрузке.">~50 MB/s</DataBox>
+      <DataBox label="~200 MB/s" tooltip="Медленная декомпрессия накапливает задержки на стороне consumer.">~200 MB/s</DataBox>
+      <DataBox label="HIGH" tooltip="Высокая нагрузка на CPU. В высоконагруженных системах может стать bottleneck.">HIGH</DataBox>
+      <DataBox label="Избегать" tooltip="Gzip -- legacy выбор. Нет сценариев, где gzip лучше zstd или lz4. Не рекомендован.">Избегать</DataBox>
+    </Grid>
+  </div>
+</DiagramContainer>
+
+---
+
+## End-to-end latency: анатомия задержки
+
+<DiagramContainer title="End-to-end latency: от producer.send() до consumer.poll()" color="violet">
+  <div className="space-y-4 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">Каждый этап добавляет задержку. Hover для типичных значений.</div>
+    <FlowRow>
+      <DataBox
+        label="Producer batch (linger.ms)"
+        tooltip="Первый этап: запись ждёт в RecordAccumulator. При linger.ms=50: до 50ms задержки. При linger.ms=0: почти 0. Контролируется конфигурацией producer."
+      >
+        0-50ms (linger.ms)
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="Network (producer to broker)"
+        tooltip="Сетевая задержка от producer к брокеру-лидеру. В пределах датацентра: 0.1-1ms. Между датацентрами: 5-50ms. Выбор датацентра и network topology влияют на этот этап."
+      >
+        0.1-1ms (network)
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="Broker processing"
+        tooltip="Обработка на брокере: запись в page cache, обновление индексов. Обычно: 0.5-5ms. При disk bottleneck или высокой нагрузке: до 50ms+ (LocalTimeMs JMX-метрика)."
+      >
+        0.5-5ms (LocalTimeMs)
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="ISR replication (acks=all)"
+        tooltip="Ожидание репликации ISR-фолловерами. Только при acks=all. Включает network latency broker-to-broker + disk write фолловера. Обычно: 1-20ms. (RemoteTimeMs JMX-метрика)."
+      >
+        1-20ms (acks=all)
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="Consumer fetch (fetch.max.wait.ms)"
+        tooltip="Consumer ожидает данных на брокере: до fetch.max.wait.ms=500ms. При активном потоке данных: практически 0 (данные уже есть). При редких данных: полный fetch.max.wait.ms."
+      >
+        0-500ms (fetch wait)
+      </DataBox>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="sink"
+        size="sm"
+        tooltip="consumer.poll() вернул запись. Суммарная latency: при linger.ms=0, acks=1, активном потоке данных = 1-5ms p99. При linger.ms=50, acks=all = 60-150ms p99."
+      >
+        consumer.poll()
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+**Реальные числа end-to-end latency (в пределах одного датацентра):**
+
+| Конфигурация | p50 | p99 | Сценарий |
+|-------------|-----|-----|---------|
+| linger.ms=0, acks=1 | 1ms | 5ms | Latency-критичные системы |
+| linger.ms=0, acks=all, RF=3 | 3ms | 20ms | Дюрабельность + низкая задержка |
+| linger.ms=50, acks=all, RF=3 | 55ms | 100ms | Throughput-оптимизированный |
+| linger.ms=50, acks=all, сжатие lz4 | 57ms | 110ms | Throughput + сжатие |
+
+<Callout type="warning">
+log.flush.interval.messages и log.flush.interval.ms -- НЕ настраивайте в production. Kafka намеренно использует OS page cache для записи и периодически делает fsync (управляемый операционной системой). Принудительный flush после каждого сообщения (log.flush.interval.messages=1) снижает throughput в 10-100 раз. Durability обеспечивается через replication (acks=all, min.insync.replicas=2), не через fsync. Это фундаментальное архитектурное решение Kafka. Не нарушайте его.
+</Callout>
+
+<Callout type="tip">
+batch.size=1048576 (1 MB) + linger.ms=50 + compression.type=lz4 -- это baseline для throughput-оптимизированного producer. Начните с этих значений и корректируйте на основе JMX метрик: batch-size-avg (заполняется ли batch?) и record-queue-time-avg (сколько записей ждут в буфере?).
+</Callout>
+
+<KnowledgeCheck
+  question="Producer отправляет 10K msg/s, средний размер 1 KB. JMX-метрика batch-size-avg = 2 KB. Текущий конфиг: batch.size=16384 (16 KB), linger.ms=0. Какие два config-параметра нужно изменить и до каких значений, чтобы увеличить batch fill? Какой trade-off это создаст?"
+  answer="batch-size-avg = 2 KB при batch.size=16 KB означает: batch отправляется немедленно после одной-двух записей, не дожидаясь заполнения. При linger.ms=0 это ожидаемо: каждый вызов producer.send() немедленно создаёт и отправляет batch. Два параметра для изменения: (1) linger.ms: увеличить с 0 до 50ms. За 50ms при 10K msg/s накопится 500 записей по 1KB = 500KB в batch (намного лучше 2KB). (2) batch.size: увеличить с 16KB до 1048576 (1MB) чтобы batch мог принять все накопленные за 50ms записи. Trade-off: добавляет задержку до 50ms. Каждая запись будет ждать в буфере до отправки batch. Если use case требует менее 50ms latency -- эта оптимизация недопустима. После изменений проверить batch-size-avg (должен вырасти к 500KB+) и record-queue-time-avg (ожидаемо вырастет до ~50ms)."
+/>

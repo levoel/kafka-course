@@ -1,0 +1,440 @@
+---
+title: "Monitoring Stack"
+description: "Prometheus + JMX Exporter + Grafana для мониторинга Kafka. От JMX MBean до alert в Slack"
+order: 2
+difficulty: "advanced"
+estimatedTime: 30
+topics: ["Prometheus", "JMX Exporter", "Grafana", "Alerting", "kafka-exporter", "Monitoring Pipeline"]
+---
+
+# Monitoring Stack: Prometheus + JMX Exporter + Grafana
+
+Знать имена JMX-метрик — необходимо. Но метрики в JMX-формате нельзя агрегировать, строить графики, настраивать алерты без дополнительного стека. Стандарт индустрии: Prometheus как база данных временных рядов и Grafana как визуализация.
+
+В этом уроке: полный конвейер от MBean до алерта в Slack. Два инструмента экспорта (JMX Exporter и kafka-exporter), их отличия, и когда нужны оба.
+
+---
+
+## Архитектура мониторинг-пайплайна
+
+<DiagramContainer title="Kafka Monitoring Pipeline" color="blue">
+  <div className="space-y-4 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">Данные текут слева направо: от JVM-метрик Kafka до алерта инженеру</div>
+    <FlowRow>
+      <FlowNode
+        variant="source"
+        tooltip="Kafka Broker JVM. Экспортирует метрики через JMX (port 9999). MBeans обновляются в реальном времени внутри JVM."
+      >
+        Kafka Broker JVM
+      </FlowNode>
+      <Arrow direction="right" />
+      <DataBox
+        label="JMX Exporter (port 9404)"
+        tooltip="Java-агент (jmx_prometheus_javaagent.jar) присоединяется к JVM брокера через KAFKA_OPTS. Читает JMX MBeans и экспортирует их как /metrics endpoint в Prometheus text format. Работает внутри JVM-процесса брокера."
+      >
+        javaagent:9404/metrics
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="Prometheus (scrape каждые 15s)"
+        tooltip="Prometheus периодически (каждые 15 секунд) опрашивает /metrics эндпоинт JMX Exporter на каждом брокере. Сохраняет временные ряды в TSDB. Retention по умолчанию: 15 дней."
+      >
+        TSDB + scrape
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="Grafana (визуализация)"
+        tooltip="Grafana запрашивает данные из Prometheus через PromQL. Строит дашборды с панелями: time series, gauge, stat, heatmap. Дашборд обновляется каждые 30 секунд (настраивается)."
+      >
+        Дашборды + PromQL
+      </DataBox>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="sink"
+        tooltip="Alertmanager получает alert от Prometheus/Grafana и маршрутизирует его: Slack, PagerDuty, email, OpsGenie. Поддерживает группировку, дедупликацию, silencing."
+      >
+        Alertmanager / Slack
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+Также существует альтернативный путь: **kafka-exporter** (danielqsj) → Prometheus → Grafana. Этот инструмент фокусируется на consumer group lag и topic-level метриках без JMX. О нём — в разделе 4.
+
+---
+
+## Grafana Dashboard: обзор панелей
+
+<GrafanaDashboardDiagram client:visible />
+
+Диаграмма выше показывает ключевые панели Grafana-дашборда для Kafka. В следующих разделах — как настроить каждую компоненту стека.
+
+---
+
+## JMX Exporter: настройка
+
+JMX Exporter — Java-агент (не отдельный процесс), который присоединяется к JVM Kafka-брокера и экспортирует MBeans как HTTP endpoint.
+
+**Шаг 1: Скачать JAR**
+
+```bash
+# Актуальная версия: 1.1.0 (2025)
+wget https://github.com/prometheus/jmx_exporter/releases/download/1.1.0/\
+jmx_prometheus_javaagent-1.1.0.jar \
+  -O /opt/jmx_exporter/jmx_prometheus_javaagent.jar
+```
+
+**Шаг 2: Создать конфиг kafka-broker.yml**
+
+```yaml
+# /opt/jmx_exporter/kafka-broker.yml
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+
+rules:
+  # Общие правила: kafka.server metrics
+  - pattern: "kafka.server<type=(.+), name=(.+)><>(\\w+)"
+    name: "kafka_server_$1_$2"
+    type: GAUGE
+
+  # Per-topic метрики: BytesInPerSec, MessagesInPerSec per topic
+  - pattern: "kafka.server<type=(.+), name=(.+), topic=(.+)><>(\\w+)"
+    name: "kafka_server_$1_$2"
+    labels:
+      topic: "$3"
+    type: GAUGE
+
+  # Request metrics: Produce, FetchConsumer, FetchFollower latency
+  - pattern: "kafka.network<type=(.+), name=(.+), request=(.+)><>(\\w+)"
+    name: "kafka_network_$1_$2"
+    labels:
+      request: "$3"
+    type: GAUGE
+
+  # Controller metrics: KRaft-specific
+  - pattern: "kafka.controller<type=(.+), name=(.+)><>(\\w+)"
+    name: "kafka_controller_$1_$2"
+    type: GAUGE
+
+  # Log metrics: LogEndOffset, LogStartOffset per topic/partition
+  - pattern: "kafka.log<type=(.+), name=(.+), topic=(.+), partition=(.+)><>(\\w+)"
+    name: "kafka_log_$1_$2"
+    labels:
+      topic: "$3"
+      partition: "$4"
+    type: GAUGE
+```
+
+**Шаг 3: Подключить агент к брокеру**
+
+```bash
+# В kafka-server-start.sh или через переменную окружения
+export KAFKA_OPTS="-javaagent:/opt/jmx_exporter/jmx_prometheus_javaagent.jar=9404:/opt/jmx_exporter/kafka-broker.yml"
+
+# Для Docker Compose:
+# environment:
+#   KAFKA_OPTS: "-javaagent:/opt/jmx_exporter/jmx_prometheus_javaagent.jar=9404:/opt/jmx_exporter/kafka-broker.yml"
+```
+
+**Шаг 4: Проверить работу**
+
+```bash
+# Должны увидеть строки вида kafka_server_*
+curl http://localhost:9404/metrics | grep kafka_server_replicamanager
+
+# Ожидаемый вывод:
+# kafka_server_replicamanager_underreplicatedpartitions 0.0
+# kafka_server_replicamanager_underminisrpartitioncount 0.0
+# kafka_server_replicamanager_partitioncount 150.0
+```
+
+<Callout type="tip">
+Для production кластера используйте ОБА экспортера: JMX Exporter для broker internals (RequestHandlerAvgIdlePercent, latency percentiles) + kafka-exporter для consumer group lag. Они дополняют друг друга -- JMX Exporter не видит consumer group offsets, kafka-exporter не видит broker JVM метрики.
+</Callout>
+
+---
+
+## kafka-exporter: альтернатива для consumer lag
+
+`danielqsj/kafka-exporter` — Go-бинарный экспортер, который подключается к Kafka через обычный client API (не JMX). Специализируется на topic-level и consumer group метриках.
+
+**Запуск:**
+
+```bash
+# Docker
+docker run -d \
+  --name kafka-exporter \
+  -p 9308:9308 \
+  danielqsj/kafka-exporter \
+    --kafka.server=broker1:9092 \
+    --kafka.server=broker2:9092 \
+    --kafka.server=broker3:9092
+
+# Проверка
+curl http://localhost:9308/metrics | grep kafka_consumergroup_lag
+```
+
+**Метрики, которые экспортирует kafka-exporter:**
+
+| Метрика | Описание |
+|---------|----------|
+| `kafka_consumergroup_current_offset` | Текущий offset consumer group |
+| `kafka_consumergroup_lag` | Лаг consumer group (per partition) |
+| `kafka_topic_partitions` | Количество партиций топика |
+| `kafka_topic_partition_current_offset` | Log End Offset партиции |
+| `kafka_topic_partition_oldest_offset` | Log Start Offset (начало retention) |
+| `kafka_brokers` | Количество брокеров в кластере |
+
+**Преимущества kafka-exporter:**
+- Не требует JMX Agent — просто подключается как обычный Kafka-клиент.
+- Отлично работает с managed Kafka (Confluent Cloud, MSK, Aiven) где JMX недоступен.
+- Нативные метрики consumer group lag — самое удобное представление.
+
+**Недостатки kafka-exporter:**
+- Нет broker JVM метрик: RequestHandlerAvgIdlePercent, request latency percentiles, GC pauses.
+- Нет producer-side метрик.
+- Только topic/consumer group уровень.
+
+---
+
+## Prometheus: конфигурация scrape
+
+```yaml
+# prometheus.yml
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # JMX Exporter на каждом брокере
+  - job_name: 'kafka-broker'
+    static_configs:
+      - targets:
+          - 'broker-1:9404'
+          - 'broker-2:9404'
+          - 'broker-3:9404'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    # Добавить label broker_id по адресу
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        regex: '([^:]+).*'
+        replacement: '$1'
+
+  # kafka-exporter для consumer group lag
+  - job_name: 'kafka-exporter'
+    static_configs:
+      - targets: ['kafka-exporter:9308']
+    scrape_interval: 30s   # consumer lag менее критичен к частоте
+```
+
+**Ресурсы Prometheus для 3-брокерного кластера:**
+- Временных рядов: ~200,000 (при стандартном kafka-broker.yml конфиге)
+- Потребление памяти: ~2-4 ГБ RAM
+- Дисковое место: ~10 ГБ/месяц при retention 15 дней
+- CPU: менее 1 ядра при 15s scrape interval
+
+---
+
+## Grafana: дашборд
+
+**Готовые дашборды (импортируйте по ID):**
+
+| ID | Название | Источник |
+|----|---------|---------|
+| 7589 | Kafka Overview by Confluent | grafana.com |
+| 12460 | Kafka Exporter Overview | grafana.com (kafka-exporter) |
+| 18276 | Kafka KRaft Metrics | Community, KRaft-specific |
+
+**Ключевые панели для создания вручную:**
+
+Панель 1: **Broker Health** (четыре stat-виджета)
+- `kafka_server_replicamanager_underreplicatedpartitions` — Single Stat, зелёный если 0, красный если больше 0
+- `kafka_controller_kafkacontroller_activecontrollercount` — Single Stat, зелёный если 1
+- `kafka_server_kafkarequesthandlerpool_requesthandleravgidlepercent` — Gauge, 0-100%
+
+Панель 2: **Throughput** (time series)
+- `kafka_server_brokertopicmetrics_messagesinpersec` per broker — позволяет видеть hot-spot
+- `kafka_server_brokertopicmetrics_bytesinpersec` и `bytesoutpersec` — stacked area
+
+Панель 3: **Request Latency** (heatmap)
+- `kafka_network_requestmetrics_totaltimems{quantile="0.99", request="Produce"}` — produce p99
+- `kafka_network_requestmetrics_totaltimems{quantile="0.99", request="FetchConsumer"}` — fetch p99
+
+Панель 4: **Consumer Lag** (time series с threshold-линиями)
+- `kafka_consumergroup_lag` grouped by consumergroup — одна линия на группу
+- Threshold: 1000 (WARNING, жёлтый), 10000 (CRITICAL, красный)
+
+---
+
+## Alerting rules: Prometheus + Alertmanager
+
+```yaml
+# kafka-alerts.yml — файл правил для Prometheus
+groups:
+  - name: kafka-critical
+    rules:
+      # URP > 0 в течение 5 минут
+      - alert: KafkaUnderReplicatedPartitions
+        expr: kafka_server_replicamanager_underreplicatedpartitions > 0
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Under-replicated partitions: {{ $value }} (instance: {{ $labels.instance }})"
+          description: "Возможная потеря данных или упавший брокер. Немедленно: проверить BytesInPerSec per broker."
+          runbook: "https://wiki.example.com/kafka/runbooks/under-replicated"
+
+      # UnderMinIsr > 0 немедленно
+      - alert: KafkaUnderMinIsrPartitions
+        expr: kafka_server_replicamanager_underminisrpartitioncount > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Партиции ниже min.insync.replicas: запись с acks=all невозможна"
+
+      # ActiveController != 1
+      - alert: KafkaNoActiveController
+        expr: sum(kafka_controller_kafkacontroller_activecontrollercount) != 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Нет активного KRaft-контроллера или split-brain"
+
+      # I/O-потоки перегружены
+      - alert: KafkaRequestHandlerOverload
+        expr: kafka_server_kafkarequesthandlerpool_requesthandleravgidlepercent < 0.3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "I/O Handler idle percent: {{ $value | humanizePercentage }} (меньше 30%)"
+
+  - name: kafka-consumer-lag
+    rules:
+      # Consumer group lag > 10000
+      - alert: KafkaConsumerLagHigh
+        expr: kafka_consumergroup_lag > 10000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consumer group {{ $labels.consumergroup }} lag: {{ $value }}"
+          description: "Topic: {{ $labels.topic }}, partition: {{ $labels.partition }}"
+
+  - name: kafka-latency
+    rules:
+      # Produce p99 > 500ms
+      - alert: KafkaProduceLatencyHigh
+        expr: kafka_network_requestmetrics_totaltimems{quantile="0.99", request="Produce"} > 500
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Produce p99 latency: {{ $value }}ms (порог: 500ms)"
+```
+
+---
+
+## Consumer lag monitoring: специализированные инструменты
+
+Помимо Prometheus-based мониторинга, существуют специализированные инструменты для consumer lag:
+
+**Burrow (LinkedIn):**
+
+Burrow оценивает lag не как числовое значение, а как статус: OK, WARNING, ERR, STOP, STALL. Анализирует тренд: растёт ли lag или уменьшается? Consumer, который медленно уменьшает накопленный lag, получает статус OK, а не WARNING.
+
+```bash
+# Burrow API
+curl http://burrow:8000/v3/kafka/local/consumer/analytics-pipeline/status
+```
+
+**kminion (Redpanda):**
+
+Лёгкий Prometheus-экспортер с акцентом на consumer group lag. Поддерживает Kafka 2.x и 4.x.
+
+```yaml
+# docker-compose.monitoring.yml
+services:
+  kminion:
+    image: redpandadata/kminion:latest
+    environment:
+      KAFKA_BROKERS: "broker1:9092,broker2:9092,broker3:9092"
+    ports:
+      - "8080:8080"
+```
+
+**kafka-lag-exporter (Lightbend):**
+
+Предсказывает, когда consumer group достигнет нулевого лага, основываясь на текущем тренде. Полезно для оценки: "сколько времени нужно на восстановление после накопленного лага?"
+
+---
+
+## Docker Compose: полный мониторинг-стек
+
+```yaml
+# docker-compose.monitoring.yml
+version: '3.8'
+services:
+  # JMX Exporter (уже запускается как часть брокера через KAFKA_OPTS)
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    command:
+      - "--kafka.server=broker1:9092"
+      - "--kafka.server=broker2:9092"
+      - "--kafka.server=broker3:9092"
+      - "--log.level=info"
+    ports:
+      - "9308:9308"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./kafka-alerts.yml:/etc/prometheus/kafka-alerts.yml
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=15d'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/dashboards
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml
+    ports:
+      - "9093:9093"
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:
+```
+
+<KnowledgeCheck
+  question="В Grafana alert: KafkaConsumerLagHigh = 50,000 для consumer group analytics-pipeline. BytesInPerSec на всех брокерах = 12 MB/s (нормально, без аномалий). records-consumed-rate для этой группы = 0. Какова вероятная причина и что делать?"
+  answer="records-consumed-rate = 0 при ненулевом лаге означает: consumer group не потребляет данные вовсе. Вероятные причины: (1) все инстансы приложения analytics-pipeline упали или зависли -- проверить процессы/поды; (2) consumer group застряла в ребалансировке (rebalance storm) -- смотреть rebalance-latency и join-rate; (3) max.poll.interval.ms превышен -- обработка записи занимает слишком долго, брокер исключил консьюмер из группы. Действия: 1) kafka-consumer-groups.sh --describe для просмотра состояния группы (STABLE? REBALANCING?). 2) Проверить статус инстансов приложения. 3) Если группа STABLE но lag растёт -- у приложения 0 активных потребителей. 4) Если REBALANCING -- диагностировать причину нестабильности (медленная обработка, crashes)."
+/>

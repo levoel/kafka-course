@@ -1,0 +1,439 @@
+---
+title: "Таксономия JMX-метрик Kafka"
+description: "Полная классификация JMX-метрик Kafka 4.0 -- брокер, продюсер, консьюмер. Какие метрики критичны, какие информативны"
+order: 1
+difficulty: "advanced"
+estimatedTime: 30
+topics: ["JMX", "Metrics", "MBean", "Broker Metrics", "Producer Metrics", "Consumer Metrics", "Monitoring"]
+---
+
+# Таксономия JMX-метрик Kafka
+
+Прежде чем настраивать Grafana-дашборды и писать Prometheus-правила, необходимо знать, что именно измерять. Kafka экспортирует сотни JMX-метрик. Большинство из них вы никогда не будете смотреть в боевой обстановке. Но десяток критически важных метрик должен быть перед глазами каждые 24 часа.
+
+Этот урок — систематизированный каталог метрик по категориям: брокер, реквесты, продюсер, консьюмер, KRaft-контроллер. Для каждой метрики: точное имя MBean, нормальное значение, порог алерта, причина аномалии.
+
+---
+
+## JMX в Kafka: фундамент экспорта метрик
+
+Kafka написана на JVM и использует **Java Management Extensions (JMX)** — стандартный механизм инструментирования JVM-приложений. Каждая метрика представлена как **MBean** (Managed Bean) с уникальным именем в формате:
+
+```
+domain:type=TypeValue,name=MetricName[,additionalKey=additionalValue]
+```
+
+Примеры:
+- `kafka.server:type=ReplicaManager,name=UnderReplicatedPartitions`
+- `kafka.network:type=RequestMetrics,name=TotalTimeMs,request=Produce`
+- `kafka.producer:type=producer-metrics,client-id=my-producer,name=record-send-rate`
+
+**Доступ к JMX:**
+
+```bash
+# Запуск Kafka с JMX-портом
+export JMX_PORT=9999
+bin/kafka-server-start.sh config/server.properties
+
+# Или через KAFKA_JMX_OPTS
+export KAFKA_JMX_OPTS="-Dcom.sun.management.jmxremote \
+  -Dcom.sun.management.jmxremote.port=9999 \
+  -Dcom.sun.management.jmxremote.authenticate=false \
+  -Dcom.sun.management.jmxremote.ssl=false"
+```
+
+**Kafka 4.0 и KRaft:** В Kafka 4.0 ZooKeeper полностью удалён. Это непосредственно влияет на метрики: все `SessionExpireListener` и ZooKeeper-era метрики контроллера удалены, вместо них появились новые KRaft-специфичные метрики. Если вы мигрируете мониторинг с Kafka 3.x на 4.0 — читайте раздел о запрещённых метриках в конце урока.
+
+---
+
+## Broker-level метрики: мониторить всегда
+
+Это метрики, которые должны быть на вашем главном дашборде. Отклонение любой из них от нормы — потенциальный инцидент.
+
+<DiagramContainer title="Критические метрики брокера — Kafka 4.0" color="red">
+  <div className="space-y-4 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">Каждый DataBox = одна JMX-метрика. Hover для деталей алерта.</div>
+    <FlowRow>
+      <DataBox
+        label="UnderReplicatedPartitions"
+        tooltip="kafka.server:type=ReplicaManager,name=UnderReplicatedPartitions. Норма: 0. Alert: больше 0 в течение более 5 минут. Причины: упавший брокер, disk I/O bottleneck, network partition. Это показатель нарушения ISR."
+      >
+        kafka.server:type=ReplicaManager
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="UnderMinIsrPartitionCount"
+        tooltip="kafka.server:type=ReplicaManager,name=UnderMinIsrPartitionCount. Норма: 0. Alert: больше 0 немедленно. Значение больше 0 означает: запись с acks=all будет падать с NotEnoughReplicasException. Прямая угроза записи данных."
+      >
+        kafka.server:type=ReplicaManager
+      </DataBox>
+    </FlowRow>
+    <FlowRow>
+      <DataBox
+        label="ActiveControllerCount"
+        tooltip="kafka.controller:type=KafkaController,name=ActiveControllerCount. Норма: ровно 1. Alert: не равно 1. 0 = нет активного контроллера (кластер не работает). Больше 1 = split-brain (критично). В KRaft это Raft-лидер среди контроллеров."
+      >
+        kafka.controller:type=KafkaController
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="RequestHandlerAvgIdlePercent"
+        tooltip="kafka.server:type=KafkaRequestHandlerPool,name=RequestHandlerAvgIdlePercent. Норма: больше 0.30 (30% простоя). Alert: меньше 0.30 на протяжении более 10 минут. Означает: I/O-потоки перегружены. Решение: увеличить num.io.threads или масштабировать кластер."
+      >
+        kafka.server:type=KafkaRequestHandlerPool
+      </DataBox>
+    </FlowRow>
+    <FlowRow>
+      <DataBox
+        label="MessagesInPerSec"
+        tooltip="kafka.server:type=BrokerTopicMetrics,name=MessagesInPerSec. Норма: зависит от нагрузки. Используется для трекинга throughput и обнаружения аномалий: внезапный drop до нуля = брокер перестал принимать записи."
+      >
+        kafka.server:type=BrokerTopicMetrics
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="BytesInPerSec / BytesOutPerSec"
+        tooltip="kafka.server:type=BrokerTopicMetrics,name=BytesInPerSec и BytesOutPerSec. Байты в секунду. BytesOutPerSec включает исходящий трафик к потребителям И трафик репликации фолловерам. Используйте per-broker вид для выявления hot-spot брокера."
+      >
+        kafka.server:type=BrokerTopicMetrics
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+**Детальный справочник критических метрик брокера:**
+
+`kafka.server:type=ReplicaManager,name=UnderReplicatedPartitions`
+
+Количество партиций, где ISR (In-Sync Replicas) меньше replication.factor. Это не то же самое, что UnderMinIsrPartitionCount. Партиция может быть under-replicated (ISR=2 при RF=3), но всё ещё принимать записи (если min.insync.replicas=2). Норма: 0. Если значение больше 0 в течение более 5 минут — это инцидент. Допустима ненулевая значение во время перезапуска брокера (rolling restart): несколько минут, пока фолловер догоняет лидера.
+
+`kafka.server:type=ReplicaManager,name=UnderMinIsrPartitionCount`
+
+Партиции, где ISR упал ниже min.insync.replicas. Для этих партиций produce с acks=all будет отклонён: `NotEnoughReplicasException`. Норма: строго 0. Любое значение больше 0 — немедленный алерт, бизнес под угрозой.
+
+`kafka.controller:type=KafkaController,name=ActiveControllerCount`
+
+В KRaft-кластере ровно один брокер является активным контроллером (Raft-лидером). Значение должно быть 1 на каждом брокере (каждый знает, кто контроллер). Alert при != 1.
+
+`kafka.server:type=KafkaRequestHandlerPool,name=RequestHandlerAvgIdlePercent`
+
+Доля времени, когда I/O-потоки брокера не заняты обработкой запросов. Значение 1.0 = все потоки простаивают (нет нагрузки). Значение 0.0 = все потоки заняты 100% времени (перегрузка). Норма: выше 0.30. При значении ниже 0.30 больше 10 минут: увеличьте `num.io.threads` или добавьте брокеры.
+
+---
+
+## Request-level метрики: диагностика задержек
+
+Когда latency растёт, эти метрики показывают, на каком этапе обработки запроса возникает задержка.
+
+<DiagramContainer title="Pipeline обработки запроса Kafka" color="blue">
+  <div className="space-y-4 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">TotalTimeMs = сумма всех этапов. Hover каждый этап для понимания что замеряет.</div>
+    <FlowRow>
+      <FlowNode
+        variant="source"
+        size="sm"
+        tooltip="Клиентский запрос поступает на сетевой поток брокера. Начало отсчёта TotalTimeMs."
+      >
+        Клиент
+      </FlowNode>
+      <Arrow direction="right" />
+      <DataBox
+        label="RequestQueueTimeMs"
+        tooltip="kafka.network:type=RequestMetrics,name=RequestQueueTimeMs,request=Produce. Время ожидания в очереди перед тем, как I/O-поток взял запрос. Если это растёт -- I/O-потоки перегружены. Диагностика: проверить RequestHandlerAvgIdlePercent."
+      >
+        Очередь запросов
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="LocalTimeMs"
+        tooltip="Время записи на диск лидером. Если растёт -- disk I/O bottleneck. Диагностика: смотреть IOPS и disk utilization на хосте брокера."
+      >
+        Запись на диск (лидер)
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="RemoteTimeMs"
+        tooltip="Время ожидания подтверждения от ISR-фолловеров (только при acks=all). Если растёт -- фолловеры отстают или есть network latency между брокерами."
+      >
+        Ожидание ISR (acks=all)
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="ResponseQueueTimeMs"
+        tooltip="Время ожидания в очереди ответов. Если растёт -- сетевые потоки перегружены исходящим трафиком."
+      >
+        Очередь ответов
+      </DataBox>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="sink"
+        size="sm"
+        tooltip="Ответ отправлен клиенту. TotalTimeMs = сумма всех предыдущих этапов. Норма p99 для acks=all: меньше 100ms. Норма p99 для acks=1: меньше 20ms."
+      >
+        Ответ клиенту
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+**Ключевые request-level метрики:**
+
+`kafka.network:type=RequestMetrics,name=TotalTimeMs,request=Produce`
+
+Полная задержка produce-запроса. MBean атрибуты: `Mean`, `50thPercentile`, `95thPercentile`, `99thPercentile`, `999thPercentile`. В production отслеживайте p99 и p999. Норма p99 при acks=all: меньше 100ms. При acks=1: меньше 20ms. Alert при p99 больше 500ms — disk bottleneck или ISR-проблема.
+
+`kafka.network:type=RequestMetrics,name=TotalTimeMs,request=FetchConsumer`
+
+Задержка ответа на fetch-запрос потребителя. Включает `fetch.min.bytes` waiting time (брокер ждёт накопления данных). При нормальной нагрузке и настроенных `fetch.min.bytes`/`fetch.max.wait.ms` — ожидаемо высокое значение p50 (потребитель ждёт данных). Проблемой является рост p999.
+
+`kafka.network:type=RequestMetrics,name=TotalTimeMs,request=FetchFollower`
+
+Задержка fetch-запросов от фолловеров. Если растёт — фолловеры не успевают реплицировать. Следствие: ISR сжимается, UnderReplicatedPartitions растёт.
+
+`kafka.network:type=RequestMetrics,name=RequestsPerSec,request=Produce`
+
+Количество produce-запросов в секунду. Отличается от record-send-rate (одна запись) тем, что один запрос может содержать batch из тысяч записей. Позволяет оценить накладные расходы на запросы.
+
+---
+
+## Producer-side метрики: диагностика на стороне клиента
+
+Producer-метрики привязаны к client-id. В JMX-нотации `client-id=*` означает, что нужно подставить реальный client.id вашего продюсера.
+
+<DiagramContainer title="Жизненный цикл записи на стороне продюсера" color="emerald">
+  <div className="space-y-4 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="source"
+        size="sm"
+        tooltip="Приложение вызывает producer.send(record). Запись поступает в RecordAccumulator."
+      >
+        producer.send()
+      </FlowNode>
+      <Arrow direction="right" />
+      <DataBox
+        label="record-queue-time-avg"
+        tooltip="kafka.producer:type=producer-metrics,client-id={id},name=record-queue-time-avg. Среднее время записи в буфере RecordAccumulator до отправки. При throughput-конфигурации (linger.ms=50) ожидаемо до 50ms. При latency-конфигурации (linger.ms=0) должно быть близко к 0."
+      >
+        Буфер (RecordAccumulator)
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="batch-size-avg"
+        tooltip="kafka.producer:type=producer-metrics,client-id={id},name=batch-size-avg. Средний размер отправляемого batch в байтах. Сравнивайте с batch.size конфигом. Если batch-size-avg намного меньше batch.size -- batch не заполняется, throughput не оптимален. Увеличьте linger.ms."
+      >
+        Батчинг и сжатие
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="request-latency-avg"
+        tooltip="kafka.producer:type=producer-metrics,client-id={id},name=request-latency-avg. Среднее время от отправки batch до получения ACK от брокера. Включает network latency + broker processing. При acks=all также включает ISR-ожидание."
+      >
+        Сетевой запрос к брокеру
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="record-send-rate"
+        tooltip="kafka.producer:type=producer-metrics,client-id={id},name=record-send-rate. Количество успешно отправленных записей в секунду. Мониторьте вместе с record-error-rate: если send-rate падает, а error-rate растёт -- продюсер испытывает проблемы."
+      >
+        Подтверждение (ACK)
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+**Полный список producer JMX метрик:**
+
+| Метрика | Значение | Когда смотреть |
+|---------|----------|----------------|
+| `record-send-rate` | Записей/сек успешно отправлено | Всегда — базовый throughput |
+| `record-error-rate` | Ошибок/сек | Alert при больше 0 устойчиво |
+| `request-latency-avg` | Средняя задержка запроса (ms) | При жалобах на latency |
+| `batch-size-avg` | Средний размер batch (байты) | При тюнинге throughput |
+| `compression-rate-avg` | Отношение сжатия (0.0-1.0) | При настройке compression |
+| `record-queue-time-avg` | Время записи в буфере (ms) | При тюнинге linger.ms |
+| `bufferpool-wait-ratio` | Доля времени блокировки на buffer | Alert при больше 0.01 |
+
+`bufferpool-wait-ratio` — часто упускаемая метрика. Значение больше 0.01 означает: продюсер блокируется ожидая свободного места в `buffer.memory`. Решение: увеличить `buffer.memory` или снизить нагрузку.
+
+---
+
+## Consumer-side метрики: лаг как главный индикатор
+
+Главная метрика консьюмера — лаг. Всё остальное вторично.
+
+<DiagramContainer title="Метрики лага консьюмера" color="amber">
+  <div className="space-y-4 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">records-lag-max = расстояние от позиции потребителя до конца партиции (Log End Offset)</div>
+    <FlowRow>
+      <DataBox
+        label="records-lag-max"
+        tooltip="kafka.consumer:type=consumer-fetch-manager-metrics,client-id={id},name=records-lag-max. КРИТИЧНО. Максимальный лаг по всем назначенным партициям. Норма: менее 100 записей при стабильной нагрузке. Alert при более 1000 (WARNING), более 10000 (CRITICAL). Растущий лаг = консьюмер не справляется."
+      >
+        Лаг: max по партициям
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="records-consumed-rate"
+        tooltip="kafka.consumer:type=consumer-fetch-manager-metrics,client-id={id},name=records-consumed-rate. Скорость потребления записей (records/sec). Сравнивайте с MessagesInPerSec брокера: если consumed-rate меньше входящей скорости -- лаг будет расти."
+      >
+        Скорость потребления
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="rebalance-latency-avg"
+        tooltip="kafka.consumer:type=consumer-coordinator-metrics,client-id={id},name=rebalance-latency-avg. Средняя длительность ребалансировки группы (ms). Частые ребалансировки (rebalance-rate-per-hour больше 10) убивают throughput. Причины: crash, slow processing, max.poll.interval.ms exceeded."
+      >
+        Время ребалансировки
+      </DataBox>
+    </FlowRow>
+    <FlowRow>
+      <DataBox
+        label="fetch-latency-avg"
+        tooltip="kafka.consumer:type=consumer-fetch-manager-metrics,client-id={id},name=fetch-latency-avg. Средняя задержка fetch-запроса. Включает время ожидания fetch.min.bytes. Высокое значение при fetch.min.bytes больше 0 является нормальным (брокер ждёт накопления данных)."
+      >
+        Задержка fetch-запроса
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="assigned-partitions"
+        tooltip="kafka.consumer:type=consumer-coordinator-metrics,client-id={id},name=assigned-partitions. Количество назначенных партиций этому консьюмеру. После ребалансировки должно стабилизироваться. Резкое изменение = ребалансировка произошла."
+      >
+        Назначенные партиции
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="last-rebalance-seconds-ago"
+        tooltip="kafka.consumer:type=consumer-coordinator-metrics,client-id={id},name=last-rebalance-seconds-ago. Сколько секунд назад была последняя ребалансировка. Позволяет определить: ребалансировки стали частыми (значение постоянно малое)."
+      >
+        Время с ребалансировки
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+**Детализированный лаг per partition:** Помимо `records-lag-max` (агрегат), можно смотреть лаг по конкретной партиции:
+
+```
+kafka.consumer:type=consumer-fetch-manager-metrics,
+  client-id={id},topic={topic},partition={N},name=records-lag
+```
+
+Это позволяет обнаружить, что проблема только с одной партицией (например, hot partition или проблема с конкретным брокером).
+
+---
+
+## KRaft Controller метрики (Kafka 4.0 specific)
+
+В Kafka 4.0 контроллер работает на основе Raft-протокола. Часть метрик появилась заново или изменила смысл.
+
+<DiagramContainer title="KRaft Controller метрики" color="violet">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <DataBox
+        label="ActiveControllerCount"
+        tooltip="kafka.controller:type=KafkaController,name=ActiveControllerCount. Ровно 1 в здоровом кластере. KRaft использует Raft-консенсус: среди нескольких контроллер-нод выбирается лидер. Именно он и является активным контроллером. 0 = кластер не работает."
+      >
+        kafka.controller:type=KafkaController
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="EventQueueSize"
+        tooltip="kafka.controller:type=KafkaController,name=EventQueueSize. Количество необработанных событий в очереди контроллера. В норме должно быть близко к 0. Высокое значение = контроллер не справляется с нагрузкой (много leader elections, partition changes)."
+      >
+        Очередь событий контроллера
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="ActiveBrokerCount"
+        tooltip="kafka.controller:type=KafkaController,name=ActiveBrokerCount. Количество живых брокеров в кластере. Должно равняться ожидаемому числу брокеров. При падении брокера -- значение уменьшится, одновременно UnderReplicatedPartitions вырастет."
+      >
+        Количество живых брокеров
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+Дополнительные KRaft-метрики:
+- `kafka.controller:type=KafkaController,name=OfflinePartitionsCount` — партиции без лидера. Норма: 0. Если больше 0 — данные недоступны для чтения и записи.
+- `kafka.controller:type=KafkaController,name=PreferredReplicaImbalanceCount` — партиции, где текущий лидер не является предпочтительным (preferred leader). Ненулевое значение допустимо после rolling restart, но должно снижаться.
+
+---
+
+## Метрики, которых больше нет в Kafka 4.0
+
+При миграции мониторинга с Kafka 3.x на 4.0 следующие метрики не будут эмитировать данные:
+
+| Удалённая метрика | Причина удаления |
+|-------------------|------------------|
+| `kafka.server:type=SessionExpireListener,name=*` | Вся ZooKeeper-интеграция удалена |
+| `kafka.controller:type=ControllerStats,name=ZooKeeperRequestLatencyMs` | ZooKeeper-контроллер заменён KRaft |
+| `kafka.server:type=ZooKeeperClientMetrics,name=*` | ZooKeeper-клиент удалён из брокера |
+| `kafka.controller:type=KafkaController,name=ZkMigrationState` | Миграция ZK -> KRaft завершена, нет состояния |
+
+Если ваш старый Prometheus/Grafana стек содержит alerts на эти метрики — они будут вечно отсутствовать (no data), что может триггерить "no data" алерты. Удалите или обновите такие алерты при переходе на Kafka 4.0.
+
+---
+
+## Сводная таблица топ-15 метрик
+
+<DiagramContainer title="Топ-15 метрик для production Kafka 4.0" color="slate">
+  <div className="overflow-x-auto p-2">
+    <Grid columns={5}>
+      <FlowNode variant="header" tooltip="Краткое имя метрики для идентификации">Метрика</FlowNode>
+      <FlowNode variant="header" tooltip="Кто эмитирует эту метрику">Категория</FlowNode>
+      <FlowNode variant="header" tooltip="Нормальное значение в здоровом кластере">Норма</FlowNode>
+      <FlowNode variant="header" tooltip="При каком значении нужен алерт">Alert-порог</FlowNode>
+      <FlowNode variant="header" tooltip="Что искать при выходе за норму">Причина аномалии</FlowNode>
+
+      <DataBox label="UnderReplicatedPartitions" tooltip="ISR меньше replication.factor. Первый признак проблем с репликацией.">URP</DataBox>
+      <DataBox label="Broker" tooltip="Метрика уровня брокера, агрегат по всем партициям на брокере.">Брокер</DataBox>
+      <DataBox label="0" tooltip="Ноль означает: все партиции имеют полный ISR. Это норма.">0</DataBox>
+      <DataBox label="больше 0 на 5+ мин" tooltip="Alert если URP больше 0 устойчиво более 5 минут. Кратковременный рост (rolling restart) допустим.">больше 0 (5 мин)</DataBox>
+      <DataBox label="Упавший брокер, disk I/O, network partition" tooltip="Диагностика: смотреть BytesInPerSec per broker. Если один брокер = 0, он недоступен.">Брокер/диск/сеть</DataBox>
+
+      <DataBox label="UnderMinIsrPartitionCount" tooltip="ISR упал ниже min.insync.replicas. Запись с acks=all невозможна.">UMISR</DataBox>
+      <DataBox label="Broker" tooltip="Метрика уровня брокера.">Брокер</DataBox>
+      <DataBox label="0" tooltip="Строго ноль.">0</DataBox>
+      <DataBox label="больше 0 немедленно" tooltip="Немедленный критический алерт. Бизнес-критично.">больше 0 сразу</DataBox>
+      <DataBox label="Связан с URP, min.insync.replicas" tooltip="Следствие UnderReplicatedPartitions при acks=all и min.insync.replicas=2+">ISR+config</DataBox>
+
+      <DataBox label="ActiveControllerCount" tooltip="Количество активных KRaft-контроллеров. Ровно 1 в норме.">ACC</DataBox>
+      <DataBox label="Controller" tooltip="KRaft-контроллер метрика.">KRaft</DataBox>
+      <DataBox label="1" tooltip="Ровно один активный контроллер.">1</DataBox>
+      <DataBox label="не равно 1" tooltip="0 = нет лидера (кластер не работает). Больше 1 = split-brain (критично).">не 1</DataBox>
+      <DataBox label="Сбой Raft-консенсуса, network partition" tooltip="Редкое состояние. При возникновении: проверить network connectivity между контроллерами.">Raft/сеть</DataBox>
+
+      <DataBox label="RequestHandlerAvgIdlePercent" tooltip="Доля простоя I/O-потоков брокера.">RHAIP</DataBox>
+      <DataBox label="Broker" tooltip="Метрика пула I/O-потоков брокера.">Брокер</DataBox>
+      <DataBox label="больше 0.30" tooltip="30%+ простоя = достаточный запас мощности.">больше 0.30</DataBox>
+      <DataBox label="меньше 0.30 на 10+ мин" tooltip="I/O-потоки перегружены. Решение: увеличить num.io.threads или масштабировать.">меньше 0.30</DataBox>
+      <DataBox label="Перегрузка, мало num.io.threads" tooltip="Диагностика: проверить количество запросов (RequestsPerSec) и скорость их обработки.">Перегрузка</DataBox>
+
+      <DataBox label="TotalTimeMs p99 (Produce)" tooltip="99-й перцентиль задержки produce-запроса.">Produce p99</DataBox>
+      <DataBox label="Request" tooltip="Метрика уровня сетевых запросов.">Запросы</DataBox>
+      <DataBox label="меньше 100ms (acks=all)" tooltip="При acks=1: менее 20ms. При acks=all: менее 100ms с учётом ISR-ожидания.">меньше 100ms</DataBox>
+      <DataBox label="больше 500ms" tooltip="Критический threshold. Продюсеры испытывают значительные задержки.">больше 500ms</DataBox>
+      <DataBox label="Disk bottleneck, ISR-wait, перегрузка" tooltip="Диагностика: смотреть LocalTimeMs (диск) и RemoteTimeMs (ISR).">Диск/ISR</DataBox>
+
+      <DataBox label="records-lag-max" tooltip="Максимальный лаг консьюмера по всем партициям.">Lag Max</DataBox>
+      <DataBox label="Consumer" tooltip="Метрика уровня консьюмера.">Консьюмер</DataBox>
+      <DataBox label="меньше 100" tooltip="Нормальный лаг при стабильной нагрузке.">меньше 100</DataBox>
+      <DataBox label="больше 1000 / больше 10000" tooltip="Warning при больше 1000. Critical при больше 10000. Зависит от требований к freshness данных.">1K / 10K</DataBox>
+      <DataBox label="Медленная обработка, ребалансировка, нагрузка" tooltip="Диагностика: смотреть records-consumed-rate vs MessagesInPerSec брокера. Если consumed-rate меньше -- нужно масштабировать.">Скорость/ребалансировка</DataBox>
+    </Grid>
+  </div>
+</DiagramContainer>
+
+<Callout type="danger">
+UnderReplicatedPartitions больше 0 в течение более 5 минут -- это инцидент. Причины: (1) упавший брокер -- проверьте ActiveBrokerCount и BytesInPerSec per broker (если один брокер показывает 0, он недоступен); (2) disk I/O bottleneck на одном из брокеров -- фолловеры не успевают реплицировать из-за медленного диска; (3) network partition между брокерами -- фолловеры не могут установить соединение с лидером. Порядок диагностики: 1) ActiveBrokerCount -- упал ли брокер; 2) BytesInPerSec per broker -- кто показывает 0 или аномально низкое значение; 3) ReplicationBytesInPerSec -- идёт ли репликация.
+</Callout>
+
+<Callout type="tip">
+JMX-метрики экспортируются через порт, который вы настраиваете (обычно 9999). Для Prometheus/Grafana используйте JMX Exporter (jmx_prometheus_javaagent.jar), который конвертирует JMX MBeans в HTTP endpoint /metrics в Prometheus-формате. Следующий урок полностью посвящён этому стеку.
+</Callout>
+
+<KnowledgeCheck
+  question="На графике наблюдается: UnderReplicatedPartitions = 5, RequestHandlerAvgIdlePercent = 0.12, BytesInPerSec одного из трёх брокеров = 0. Что произошло? Опишите причину и первые три шага диагностики."
+  answer="Один из трёх брокеров недоступен: BytesInPerSec = 0 означает, что брокер не принимает трафик. Следствие: партиции, у которых недоступный брокер является частью ISR, стали under-replicated (URP = 5). RequestHandlerAvgIdlePercent = 0.12 объясняется перегрузкой оставшихся двух брокеров: весь трафик упавшего брокера (включая его партиции) перераспределился на них. Первые три шага: (1) Проверить ActiveBrokerCount -- если уменьшился на 1, брокер упал. (2) Проверить kafka-topics.sh --describe для under-replicated партиций: выяснить какой брокер отсутствует в ISR. (3) Восстановить упавший брокер (перезапуск процесса, проверка диска/сети) -- после восстановления фолловер начнёт репликацию, URP начнёт снижаться."
+/>
