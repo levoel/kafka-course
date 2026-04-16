@@ -1,0 +1,15 @@
+{
+  "name": "jdbc-sink-demo",
+  "config": {
+    "connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector",
+    "tasks.max": "1",
+    "topics": "file-events",
+    "connection.url": "jdbc:sqlite:/tmp/test-data/output.db",
+    "auto.create": "true",
+    "insert.mode": "upsert",
+    "pk.mode": "kafka",
+    "transforms": "addTimestamp",
+    "transforms.addTimestamp.type": "org.apache.kafka.connect.transforms.InsertField$Value",
+    "transforms.addTimestamp.timestamp.field": "processed_at"
+  }
+}
