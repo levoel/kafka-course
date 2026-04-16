@@ -1,0 +1,282 @@
+{
+  "lessonSlug": "04-kafka-internals/_exam",
+  "moduleId": "04-kafka-internals",
+  "examTitle": "Экзамен: Kafka Internals",
+  "passThreshold": 70,
+  "_meta": {
+    "idPrefix": "kafka-m04-exam",
+    "description": "10 analytical/applied questions covering log segments, LEO/HW, log compaction, tiered storage"
+  },
+  "questions": [
+    {
+      "id": "kafka-m04-exam-q1",
+      "type": "multiple-choice",
+      "question": "Партиция топика содержит 50 ГБ данных при log.segment.bytes=1073741824 (1 ГБ) и log.retention.hours=168 (7 дней). Сколько приблизительно .log файлов существует на диске для этой партиции?",
+      "options": [
+        {
+          "id": "a",
+          "text": "1 файл — Kafka хранит всё в одном сегменте"
+        },
+        {
+          "id": "b",
+          "text": "50 файлов — один .log файл на каждый гигабайт данных"
+        },
+        {
+          "id": "c",
+          "text": "150 файлов — три файла (.log, .index, .timeindex) на каждый сегмент"
+        },
+        {
+          "id": "d",
+          "text": "7 файлов — один сегмент за каждый день retention"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "При 50 ГБ данных и log.segment.bytes=1 ГБ создаётся примерно 50 сегментов (49 закрытых + 1 активный). Каждый сегмент имеет один .log файл. Итого ~50 .log файлов. Суммарно на диске 50 * 3 = 150 файлов (включая .index и .timeindex), но вопрос спрашивает именно о .log файлах.",
+      "studyHint": "Повторите урок 01: Лог-сегменты — физическая структура хранения",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m04-exam-q2",
+      "type": "multiple-choice",
+      "question": "Partition с тремя ISR-репликами: лидер LEO=150, фолловер-1 LEO=148, фолловер-2 LEO=145. Какой High Watermark и какой максимальный offset может прочитать consumer?",
+      "options": [
+        {
+          "id": "a",
+          "text": "HW=150, consumer читает до offset 150"
+        },
+        {
+          "id": "b",
+          "text": "HW=148, consumer читает до offset 147"
+        },
+        {
+          "id": "c",
+          "text": "HW=145, consumer читает до offset 144"
+        },
+        {
+          "id": "d",
+          "text": "HW=147, consumer читает до offset 146"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "High Watermark = min(LEO всех ISR реплик) = min(150, 148, 145) = 145. Consumer может читать записи с offset строго меньше HW, то есть максимальный доступный offset = 144. Записи 145-149 существуют у лидера, но недоступны consumer-у — фолловер-2 ещё не получил их.",
+      "studyHint": "Повторите урок 02: LEO и High Watermark — формула вычисления HW",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m04-exam-q3",
+      "type": "multiple-choice",
+      "question": "Compacted топик с cleanup.policy=compact. Ключ 'user-42' имеет записи на offset 10, 50 и 100. После полного цикла compaction, который offset останется?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Offset 10 — compaction сохраняет первую (исходную) запись"
+        },
+        {
+          "id": "b",
+          "text": "Все три offset — compaction не удаляет записи"
+        },
+        {
+          "id": "c",
+          "text": "Offset 50 — compaction сохраняет медианную запись"
+        },
+        {
+          "id": "d",
+          "text": "Offset 100 — compaction сохраняет последнюю запись для каждого ключа"
+        }
+      ],
+      "correctAnswer": "d",
+      "explanation": "Log compaction сохраняет только последнюю запись для каждого уникального ключа. Для ключа 'user-42' последняя запись находится на offset 100 (наибольший offset = самая новая запись). Записи на offset 10 и 50 будут удалены как более старые версии того же ключа. Offset 100 сохраняется без изменений.",
+      "studyHint": "Повторите урок 03: Log Compaction — принцип работы cleaner thread",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m04-exam-q4",
+      "type": "multiple-choice",
+      "question": "Инженер видит в Kafka UI: committed_offset=8000, log_end_offset=15000 для consumer group 'billing'. Какой consumer lag и что это означает для бизнеса (топик содержит платёжные события)?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Lag=7000, потребитель накопил задолженность в 7000 необработанных платёжных событий"
+        },
+        {
+          "id": "b",
+          "text": "Lag=15000, потребитель не обработал ни одного события"
+        },
+        {
+          "id": "c",
+          "text": "Lag=0, оба числа означают одно и то же"
+        },
+        {
+          "id": "d",
+          "text": "Lag не определён — нужно знать HW для вычисления"
+        }
+      ],
+      "correctAnswer": "a",
+      "explanation": "Consumer lag = log_end_offset - committed_offset = 15000 - 8000 = 7000. Consumer group 'billing' обработала 8000 платёжных событий, но в топике уже 15000. В очереди 7000 необработанных событий. Для billing-системы это критическая метрика: задержка обработки платежей напрямую влияет на пользовательский опыт и потенциально на финансовые SLA. Рост lag может означать, что consumer перегружен или упал.",
+      "studyHint": "Повторите урок 02: LEO и High Watermark — раздел 'Consumer Lag'",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m04-exam-q5",
+      "type": "multiple-choice",
+      "question": "Фолловер реплики перестаёт отвечать на heartbeat из-за перегруженного GC. Через replica.lag.time.max.ms=30000 (30 с) он исключается из ISR. Как это влияет на HW и потребителей?",
+      "options": [
+        {
+          "id": "a",
+          "text": "HW замораживается на текущем значении до восстановления фолловера"
+        },
+        {
+          "id": "b",
+          "text": "HW начинает следовать LEO лидера (если ISR теперь только лидер), consumers получают новые данные быстрее, но durability снижается"
+        },
+        {
+          "id": "c",
+          "text": "Лидер переводится в read-only режим для защиты данных"
+        },
+        {
+          "id": "d",
+          "text": "HW не изменится — лидер компенсирует отсутствующий фолловер"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "После исключения фолловера из ISR HW вычисляется только по оставшимся ISR-репликам. Если в ISR остался только лидер, HW = LEO лидера. Это немедленно освобождает consumer-ов от задержки HW — они видят данные почти сразу после записи. Однако durability снизилась: если лидер упадёт до восстановления фолловера, исключённый фолловер может стать лидером с меньшим LEO. Это trade-off между availability (потребители получают данные) и durability (устойчивость к потере данных).",
+      "studyHint": "Повторите урок 02: LEO и High Watermark — раздел 'HW и ISR shrinkage'",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m04-exam-q6",
+      "type": "multiple-choice",
+      "question": "В compacted топике min.cleanable.dirty.ratio=0.3 и max.compaction.lag.ms=3600000 (1 час). Head лога занимает 20% от общего объёма. Когда запустится cleaner thread?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Никогда — dirty ratio (20%) меньше min.cleanable.dirty.ratio (30%)"
+        },
+        {
+          "id": "b",
+          "text": "Немедленно — dirty ratio меньше порога, что означает 'очень грязный'"
+        },
+        {
+          "id": "c",
+          "text": "Через 1 час — max.compaction.lag.ms гарантирует запуск компактора, даже если dirty ratio не достигнут"
+        },
+        {
+          "id": "d",
+          "text": "Через 24 часа — стандартная периодичность cleaner thread"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Dirty ratio (20%) меньше min.cleanable.dirty.ratio (30%), что обычно предотвращает запуск cleaner thread. Но max.compaction.lag.ms=1 час гарантирует, что записи в head не будут ждать компактирования дольше 1 часа, независимо от dirty ratio. После истечения max.compaction.lag.ms cleaner thread запускается принудительно. Это защита от сценария с низким трафиком, когда dirty ratio никогда не достигает порога.",
+      "studyHint": "Повторите урок 03: Log Compaction — раздел 'max.compaction.lag.ms'",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m04-exam-q7",
+      "type": "multiple-choice",
+      "question": "Топик сконфигурирован с local.log.retention.ms=7200000 (2 часа) и log.retention.ms=2592000000 (30 дней). Consumer с lag=3 часа запрашивает данные. Что происходит?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Запрос завершается ошибкой — данные устарели и недоступны"
+        },
+        {
+          "id": "b",
+          "text": "Брокер обслуживает запрос из remote tier с повышенной задержкой (100-500 мс вместо 1-5 мс)"
+        },
+        {
+          "id": "c",
+          "text": "Данные автоматически перекачиваются из remote tier в local tier для ускорения"
+        },
+        {
+          "id": "d",
+          "text": "Consumer автоматически сбрасывается на latest offset при обнаружении remote tier"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Данные с lag=3 часа старше local.log.retention.ms=2 часа, поэтому они перемещены в remote tier (S3/GCS). Но global retention=30 дней — данные не удалены. Remote Log Manager скачивает нужный сегмент из remote tier и обслуживает FetchRequest consumer-а. Consumer получает данные, но с задержкой 100-500 мс вместо 1-5 мс. С точки зрения consumer API — обычный ответ, только медленнее. Именно для этого local.log.retention.ms должен быть в 2-3x больше максимального ожидаемого consumer lag.",
+      "studyHint": "Повторите урок 04: Tiered Storage — раздел 'Путь чтения (Fetch Path)'",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m04-exam-q8",
+      "type": "multiple-choice",
+      "question": "Почему .timeindex файл необходим, если .index файл уже позволяет найти запись по offset? В каком сценарии без .timeindex невозможно эффективно найти нужные данные?",
+      "options": [
+        {
+          "id": "a",
+          "text": ".timeindex дублирует .index для резервирования — если .index повреждён"
+        },
+        {
+          "id": "b",
+          "text": "При операции сброса offset по времени (seek-to-timestamp), например, --reset-offsets --to-datetime. Без .timeindex нужно читать весь .log файл для поиска первого сообщения с нужным timestamp"
+        },
+        {
+          "id": "c",
+          "text": ".timeindex ускоряет retention — брокер находит старые сегменты по .timeindex без проверки каждого сообщения"
+        },
+        {
+          "id": "d",
+          "text": ".timeindex используется только для compacted топиков"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": ".index позволяет найти запись только по offset (бинарный поиск offset → byte_position). Если consumer хочет начать читать с определённого момента времени (например, 'прочитай всё с вчера 14:00'), нужно сначала найти offset, соответствующий этому timestamp. .timeindex содержит разреженное отображение timestamp → offset. Kafka выполняет бинарный поиск по .timeindex для нахождения ближайшего offset, затем стандартный поиск по .index. Без .timeindex пришлось бы читать весь .log файл последовательно.",
+      "studyHint": "Повторите урок 01: Лог-сегменты — раздел '.timeindex — индекс по времени'",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m04-exam-q9",
+      "type": "multiple-choice",
+      "question": "SRE-инженер замечает: consumer lag для group 'payments' растёт с 100 сообщений/минуту в течение последнего часа. HW партиции продвигается нормально. Какова наиболее вероятная причина?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Фолловер исключён из ISR, HW не продвигается"
+        },
+        {
+          "id": "b",
+          "text": "Throughput producer-ов превышает скорость обработки consumer-а — consumer не справляется с нагрузкой"
+        },
+        {
+          "id": "c",
+          "text": "Данные частично находятся в remote tier, что замедляет fetch"
+        },
+        {
+          "id": "d",
+          "text": "log.segment.bytes слишком большой, что замедляет поиск по индексу"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "HW продвигается нормально — репликация в порядке, данные производятся. Consumer lag растёт, значит consumer group 'payments' обрабатывает сообщения медленнее, чем они производятся. Причины могут быть: (1) медленная бизнес-логика обработки (внешние API calls, БД операции); (2) неэффективная десериализация; (3) один из consumer-ов в группе упал, нагрузка перераспределилась. Решение: горизонтальное масштабирование group или оптимизация обработки. Если бы lag был из-за remote tier, HW работает нормально — это не влияет на lag напрямую.",
+      "studyHint": "Повторите урок 02: LEO и High Watermark — раздел 'Consumer Lag'",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m04-exam-q10",
+      "type": "multiple-choice",
+      "question": "Архитектор проектирует систему хранения событий изменения статуса заказов (order-status changelog). Заказ проходит через 10-15 статусов от 'created' до 'delivered'. Для downstream-систем важно только текущее состояние заказа, не история. Какую политику cleanup использовать и почему?",
+      "options": [
+        {
+          "id": "a",
+          "text": "cleanup.policy=delete с retention=30 дней — стандартная конфигурация для хранения данных"
+        },
+        {
+          "id": "b",
+          "text": "cleanup.policy=compact — каждый order_id как ключ, последний статус как значение. Downstream-системы всегда имеют актуальное состояние, топик не растёт бесконечно"
+        },
+        {
+          "id": "c",
+          "text": "cleanup.policy=compact,delete с retention=1 год — полная история и дедупликация"
+        },
+        {
+          "id": "d",
+          "text": "cleanup.policy=delete с retention=1 час — статусы заказов устаревают быстро"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "cleanup.policy=compact идеально подходит для changelog-топиков. Используя order_id как ключ, compaction гарантирует: (1) для каждого заказа хранится только последний статус; (2) топик не растёт бесконечно (compaction удаляет промежуточные статусы); (3) новый downstream-сервис, читающий с начала топика, получает актуальное состояние всех заказов; (4) при публикации tombstone (заказ архивирован) ключ удаляется. cleanup.policy=delete хранит всю историю статусов (10-15 записей на заказ), что избыточно для downstream-систем, которым нужно только текущее состояние.",
+      "studyHint": "Повторите урок 03: Log Compaction — раздел 'Когда нужен compaction'",
+      "bloomLevel": "analytical"
+    }
+  ]
+}

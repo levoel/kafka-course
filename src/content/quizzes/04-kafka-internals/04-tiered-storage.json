@@ -1,0 +1,99 @@
+{
+  "lessonSlug": "04-kafka-internals/04-tiered-storage",
+  "moduleId": "04-kafka-internals",
+  "_meta": {
+    "idPrefix": "kafka-m04-04",
+    "description": "Use IDs: kafka-m04-04-q1, kafka-m04-04-q2, ..."
+  },
+  "questions": [
+    {
+      "id": "kafka-m04-04-q1",
+      "type": "multiple-choice",
+      "question": "Что такое Remote Log Manager (RLM) в архитектуре Tiered Storage Kafka?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Отдельный кластер Kafka, который хранит исторические данные и реплицирует их из основного кластера"
+        },
+        {
+          "id": "b",
+          "text": "Компонент внутри брокера, отвечающий за offloading закрытых сегментов в remote-хранилище (S3/GCS), отслеживание метаданных и прозрачное обслуживание fetch-запросов из remote tier"
+        },
+        {
+          "id": "c",
+          "text": "Внешний сервис, который consumer должен явно вызывать для чтения данных из S3"
+        },
+        {
+          "id": "d",
+          "text": "Kafka Connect коннектор для синхронизации данных между брокером и объектным хранилищем"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Remote Log Manager — это встроенный компонент брокера Kafka (не внешний сервис). Он реализует интерфейс RemoteLogManagerPlugin и выполняет три функции: (1) offloading — перенос закрытых сегментов из local tier в remote tier при превышении local.log.retention.ms/bytes; (2) metadata tracking — хранение информации о том, какие офсеты находятся в remote tier (в internal Kafka топиках); (3) fetch routing — прозрачное скачивание сегментов из remote tier при запросах consumer на 'холодные' офсеты. Consumer не знает о tiered storage — он делает обычные FetchRequest.",
+      "studyHint": "Повторите урок 04: Tiered Storage — раздел 'Remote Log Manager'",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m04-04-q2",
+      "type": "multiple-choice",
+      "question": "Топик настроен с local.log.retention.ms=43200000 (12 часов) и log.retention.ms=604800000 (7 дней). Данные 5-дневной давности находятся в remote tier. Consumer запрашивает эти данные. Как изменится задержка по сравнению с чтением из local tier?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Задержка не изменится — tiered storage прозрачен для consumer"
+        },
+        {
+          "id": "b",
+          "text": "Задержка вырастет с единиц миллисекунд до 100-500 мс из-за скачивания сегмента из объектного хранилища"
+        },
+        {
+          "id": "c",
+          "text": "Запрос завершится ошибкой — данные в remote tier недоступны через стандартный Kafka API"
+        },
+        {
+          "id": "d",
+          "text": "Задержка уменьшится — объектное хранилище более оптимизировано для больших объёмов"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Remote tier (S3/GCS/Azure Blob) имеет принципиально иную задержку, чем local SSD. Чтение из local tier: 1-5 мс (диск рядом, данные могут быть в page cache). Чтение из remote tier: 100-500 мс (HTTP-запрос к объектному хранилищу, сетевая задержка, возможная десериализация). Consumer API прозрачен — он не получает ошибку, но ответ придёт значительно позже. Это ключевой trade-off tiered storage: экономия на дисках за счёт увеличения задержки для 'холодных' запросов.",
+      "studyHint": "Повторите урок 04: Tiered Storage — раздел 'Cost vs Latency Trade-off'",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m04-04-q3",
+      "type": "multiple-choice",
+      "question": "Команда хочет снизить стоимость хранения для топика с retention=30 дней. Большинство consumer-ов обрабатывают данные в течение 2 часов после публикации, но раз в неделю запускается batch-аналитика за последние 30 дней. Как оптимально настроить tiered storage?",
+      "options": [
+        {
+          "id": "a",
+          "text": "local.log.retention.ms=86400000 (24 ч), чтобы покрыть все варианты использования локально"
+        },
+        {
+          "id": "b",
+          "text": "local.log.retention.ms=14400000 (4 ч), log.retention.ms=2592000000 (30 дней) — горячие данные локально, исторические в remote tier"
+        },
+        {
+          "id": "c",
+          "text": "Отключить tiered storage — batch-аналитика требует локального хранения"
+        },
+        {
+          "id": "d",
+          "text": "local.log.retention.ms=2592000000 (30 дней) — весь retention локально для batch-аналитики"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Оптимальная стратегия: local.log.retention.ms=4 часа покрывает 2-часовой consumer lag с запасом. Ежедневный consumer читает только горячие данные из local tier с малой задержкой. Еженедельная batch-аналитика читает исторические данные из remote tier — задержка 100-500 мс на fetch приемлема для batch-процессов (они не time-sensitive). Вариант 'd' (30 дней локально) решает проблему batch, но уничтожает экономию — вы платите за SSD-хранилище для данных, которые batch читает раз в неделю.",
+      "studyHint": "Повторите урок 04: Tiered Storage — раздел 'Cost vs Latency Trade-off'",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m04-04-q4",
+      "type": "true-false",
+      "question": "Для использования Tiered Storage в Kafka потребители должны использовать специальный Kafka client с поддержкой tiered storage API для чтения данных из remote tier.",
+      "correctAnswer": false,
+      "explanation": "Tiered Storage полностью прозрачен для consumers. Потребители используют стандартный Kafka client и делают обычные FetchRequest на брокер. Брокер определяет, где находятся запрошенные данные (local или remote tier), и сам выполняет скачивание из remote tier при необходимости. Consumer не знает и не должен знать о tiered storage — с его точки зрения данные просто иногда приходят с большей задержкой. Никаких изменений в consumer-коде не требуется.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

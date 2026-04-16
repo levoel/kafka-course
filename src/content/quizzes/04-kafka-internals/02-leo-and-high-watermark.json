@@ -1,0 +1,137 @@
+{
+  "lessonSlug": "04-kafka-internals/02-leo-and-high-watermark",
+  "moduleId": "04-kafka-internals",
+  "_meta": {
+    "idPrefix": "kafka-m04-02",
+    "description": "Use IDs: kafka-m04-02-q1, kafka-m04-02-q2, ...; kafka-m04-02-code-1 for code challenge"
+  },
+  "questions": [
+    {
+      "id": "kafka-m04-02-q1",
+      "type": "multiple-choice",
+      "question": "Partition с 3 ISR-репликами: лидер LEO=200, фолловер-1 LEO=198, фолловер-2 LEO=195. Какой High Watermark у этой партиции и какой последний offset может прочитать consumer?",
+      "options": [
+        {
+          "id": "a",
+          "text": "HW=200, consumer читает до offset 200"
+        },
+        {
+          "id": "b",
+          "text": "HW=198, consumer читает до offset 197"
+        },
+        {
+          "id": "c",
+          "text": "HW=195, consumer читает до offset 194"
+        },
+        {
+          "id": "d",
+          "text": "HW=197, consumer читает offset 197 и выше"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "High Watermark = min(LEO всех ISR реплик) = min(200, 198, 195) = 195. Consumer может читать записи с offset строго меньше HW, то есть до offset 194 включительно. Запись с offset 195 уже записана лидером, но ещё не подтверждена фолловером-2, поэтому она не видна consumer-у. Фолловер-2 с наименьшим LEO является 'узким местом' для HW.",
+      "studyHint": "Повторите урок 02: LEO и High Watermark — раздел 'High Watermark — граница видимости'",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m04-02-q2",
+      "type": "multiple-choice",
+      "question": "Consumer group 'analytics' читает топик 'events'. Committed offset = 5000, но end_offset (LEO) = 7500. Чему равен consumer lag и что это означает?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Lag = 0, consumer читает в реальном времени"
+        },
+        {
+          "id": "b",
+          "text": "Lag = 2500, consumer отстаёт от producer-ов на 2500 сообщений"
+        },
+        {
+          "id": "c",
+          "text": "Lag = 7500, потребитель не читал ничего из партиции"
+        },
+        {
+          "id": "d",
+          "text": "Lag нельзя вычислить без знания throughput producer-а"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Consumer lag = end_offset - committed_offset = 7500 - 5000 = 2500 сообщений. Это означает, что consumer group 'analytics' обработала 5000 сообщений, но в топике уже 7500 сообщений — потребитель отстаёт на 2500. Если lag стабилен или растёт, потребитель не справляется с throughput. Lag = 2500, а не 7500 (consumer прочитал 5000 сообщений, а не 0).",
+      "studyHint": "Повторите урок 02: LEO и High Watermark — раздел 'Consumer Lag'",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m04-02-q3",
+      "type": "multiple-choice",
+      "question": "Почему потребитель Kafka не может читать сообщения между HW и LEO лидера, даже если они физически существуют в .log файле лидера?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Лидер удаляет эти сообщения из .log файла до репликации"
+        },
+        {
+          "id": "b",
+          "text": "Если лидер упадёт до репликации, новый лидер (фолловер) не будет иметь этих сообщений. Разрешение чтения до HW гарантирует, что прочитанные данные доступны у любого возможного нового лидера"
+        },
+        {
+          "id": "c",
+          "text": "Kafka API не предоставляет механизм для чтения данных между HW и LEO"
+        },
+        {
+          "id": "d",
+          "text": "Данные между HW и LEO зашифрованы до завершения репликации"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Ограничение чтения до HW — это фундаментальная гарантия консистентности. Если consumer прочитал сообщение с offset 196 (которое есть у лидера, но нет у фолловера-2), и лидер падает, новым лидером становится фолловер-2 с LEO=195. Сообщение с offset 196 исчезает из кластера. Consumer уже обработал это сообщение и зафиксировал downstream-эффекты, но данные больше не существуют в Kafka. HW предотвращает это: читается только то, что гарантированно реплицировано на все ISR-реплики.",
+      "studyHint": "Повторите урок 02: LEO и High Watermark — раздел 'Почему HW защищает от потери данных'",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m04-02-q4",
+      "type": "true-false",
+      "question": "Consumer lag всегда точно равен числу непрочитанных сообщений в топике для данной consumer group.",
+      "correctAnswer": false,
+      "explanation": "Consumer lag вычисляется как разница между end_offset (LEO) партиции и committed_offset consumer group. Это приближение: (1) LEO — это следующий офсет для записи, не последний записанный; (2) committed_offset фиксируется периодически, а не после каждого сообщения, поэтому реальный lag может быть меньше committed-based lag; (3) LAG не учитывает сообщения, обработанные, но ещё не закоммиченные consumer-ом. Lag — операционная метрика для трекинга отставания, но не точный счётчик непрочитанных сообщений.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m04-02-code-1",
+      "type": "code-challenge",
+      "question": "Создайте consumer без group_id. Используйте assign для ручного назначения TopicPartition('events', 0). Получите beginning_offsets и end_offsets для этой партиции. Вычислите и выведите consumer lag в формате: 'Lag: {число} messages'.",
+      "language": "python",
+      "useKafkaHelpers": true,
+      "starterCode": "from kafka import KafkaConsumer, TopicPartition\n\n# TODO: Создайте KafkaConsumer без group_id\n# consumer = KafkaConsumer(bootstrap_servers=[...])\n\n# TODO: Создайте TopicPartition для топика 'events', партиция 0\n# tp = TopicPartition(...)\n\n# TODO: Назначьте партицию consumer-у через assign()\n# consumer.assign([tp])\n\n# TODO: Получите beginning_offsets и end_offsets\n# beginning = consumer.beginning_offsets([tp])[tp]\n# end = consumer.end_offsets([tp])[tp]\n\n# TODO: Вычислите lag и выведите строку 'Lag: X messages'\n# print(f'Lag: {end - beginning} messages')\n",
+      "solutionCode": "from kafka import KafkaConsumer, TopicPartition\n\nconsumer = KafkaConsumer(bootstrap_servers=['localhost:9092'])\n\ntp = TopicPartition('events', 0)\n\nconsumer.assign([tp])\n\nbeginning = consumer.beginning_offsets([tp])[tp]\nend = consumer.end_offsets([tp])[tp]\n\nprint(f'Lag: {end - beginning} messages')\n",
+      "testCases": [
+        {
+          "id": "tc1",
+          "description": "Вывод содержит 'Lag:'",
+          "input": "",
+          "expectedOutput": "Lag:",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc2",
+          "description": "Вывод содержит 'messages'",
+          "input": "",
+          "expectedOutput": "messages",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc3",
+          "description": "Lag — неотрицательное число",
+          "input": "",
+          "expectedOutput": "Lag: -",
+          "matchMode": "not_contains",
+          "hidden": true
+        }
+      ],
+      "correctAnswer": "code",
+      "explanation": "beginning_offsets() возвращает самый ранний доступный offset (начало лога с учётом retention). end_offsets() возвращает LEO (Log End Offset) — следующий offset для записи. Разница end - beginning показывает количество сообщений, хранящихся в партиции. Перед вызовом beginning_offsets/end_offsets необходимо назначить партицию через assign() — иначе метод не знает, для какой партиции запрашивать офсеты. Consumer без group_id полезен для инспекции офсетов без участия в группе балансировки.",
+      "bloomLevel": "applied"
+    }
+  ]
+}

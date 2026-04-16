@@ -1,0 +1,147 @@
+---
+title: "Итоги модуля: Kafka Internals"
+description: "Обзор ключевых концепций модуля — сегменты, LEO/HW, log compaction, tiered storage и их взаимосвязи"
+order: 5
+difficulty: "intermediate"
+estimatedTime: 10
+topics: ["Summary", "Review", "Log Segments", "LEO", "High Watermark", "Log Compaction", "Tiered Storage"]
+---
+
+# Итоги модуля: Kafka Internals
+
+Модуль 04 раскрыл внутреннее устройство Kafka — то, что скрыто за простым API `producer.send()` и `consumer.poll()`. Понимание этих механизмов критически важно для правильного конфигурирования, диагностики проблем и принятия архитектурных решений.
+
+---
+
+## Что мы изучили
+
+### Лог-сегменты (Урок 01)
+
+Каждая партиция Kafka — это директория с группами файлов-сегментов. Каждый сегмент состоит из трёх файлов:
+
+<DiagramContainer title="Анатомия сегмента" color="slate">
+  <FlowRow>
+    <DataBox
+      label=".log"
+      tooltip=".log файл: append-only последовательность записей. Каждая запись содержит timestamp, offset delta, key, value, headers и CRC контрольную сумму."
+    >
+      Сами сообщения (append-only)
+    </DataBox>
+    <DataBox
+      label=".index"
+      tooltip=".index файл: разреженное отображение offset -> byte_position. Используется для быстрого поиска: бинарный поиск по индексу, затем линейное чтение .log файла."
+    >
+      Sparse offset-to-byte индекс
+    </DataBox>
+    <DataBox
+      label=".timeindex"
+      tooltip=".timeindex файл: отображение timestamp -> offset. Используется при seek по времени (--reset-offsets --to-datetime или seekToBeginningByTime API)."
+    >
+      Timestamp-to-offset индекс
+    </DataBox>
+  </FlowRow>
+</DiagramContainer>
+
+Ключевые концепции:
+- **Активный сегмент** — единственный, открытый для записи. Именуется базовым офсетом первой записи.
+- **Роллинг** — срабатывает при достижении `log.segment.bytes` (1 ГБ) или `log.roll.ms` (7 дней).
+- **Retention** удаляет целые сегменты, не отдельные записи.
+
+### LEO и High Watermark (Урок 02)
+
+Два механизма управляют видимостью данных для потребителей:
+
+- **LEO (Log End Offset)** — per-replica, следующий офсет для записи
+- **High Watermark** — per-partition, `min(LEO всех ISR реплик)`
+- Потребители читают только до HW — гарантия, что прочитанные данные присутствуют на всех ISR-репликах
+
+Consumer lag = `end_offset - committed_offset`. Рост lag — сигнал, что потребитель не справляется с throughput.
+
+### Log Compaction (Урок 03)
+
+Альтернативная политика retention для changelog-топиков:
+- `cleanup.policy=compact` — cleaner thread сохраняет только последнюю запись для каждого ключа
+- **Head** (грязная часть) и **Tail** (чистая часть)
+- `min.cleanable.dirty.ratio=0.5` — threshold для запуска компактирования
+- **Tombstone** (`value=null`) — удаление ключа. Хранится `delete.retention.ms` перед полным удалением.
+
+### Tiered Storage (Урок 04)
+
+Разделение данных на два уровня:
+- **Local tier** (брокерские диски): горячие данные, малая задержка, высокая стоимость
+- **Remote tier** (S3/GCS/Azure): исторические данные, большая задержка, низкая стоимость
+- Remote Log Manager прозрачно обслуживает fetch-запросы из обоих тиров
+- Production-ready с Kafka 3.6, улучшен в Kafka 4.0+
+
+---
+
+## Взаимосвязи концепций
+
+<DiagramContainer title="Как концепции связаны между собой" color="emerald">
+  <FlowColumn>
+    <FlowRow>
+      <DataBox
+        label="Producer пишет"
+        tooltip="Producer записывает RecordBatch в активный сегмент лидера. LEO лидера увеличивается на количество записей в batch."
+      >
+        RecordBatch → активный сегмент
+      </DataBox>
+    </FlowRow>
+    <Arrow direction="down" label="LEO лидера растёт" />
+    <FlowRow>
+      <DataBox
+        label="Репликация"
+        tooltip="Фолловеры периодически делают fetch у лидера. LEO фолловеров догоняет LEO лидера. HW = min(LEO всех ISR) продвигается после синхронизации."
+      >
+        Фолловеры: LEO догоняет лидера
+      </DataBox>
+    </FlowRow>
+    <Arrow direction="down" label="HW продвигается" />
+    <FlowRow>
+      <DataBox
+        label="Consumer читает"
+        tooltip="Consumer читает до HW. Если это compacted топик, он видит только последние версии ключей. Если данные в remote tier — задержка fetch увеличивается."
+      >
+        Чтение до HW | compacted | tiered
+      </DataBox>
+    </FlowRow>
+    <Arrow direction="down" label="Retention / compaction" />
+    <FlowRow>
+      <DataBox
+        label="Управление данными"
+        tooltip="Политика cleanup.policy=delete удаляет сегменты по возрасту/объёму. cleanup.policy=compact дедуплицирует по ключу. Tiered storage переносит холодные сегменты в remote."
+      >
+        delete / compact / tiered offload
+      </DataBox>
+    </FlowRow>
+  </FlowColumn>
+</DiagramContainer>
+
+---
+
+## Советы по подготовке к экзамену
+
+**Числа, которые нужно знать:**
+- `log.segment.bytes` = 1 ГБ (по умолчанию)
+- `log.retention.hours` = 168 (7 дней)
+- `replica.lag.time.max.ms` = 30 000 мс (30 секунд)
+- `min.cleanable.dirty.ratio` = 0.5
+- `delete.retention.ms` = 86 400 000 мс (24 часа)
+- `log.index.interval.bytes` = 4096 байт
+
+**Типичные сценарные вопросы:**
+- «Сколько сегментов в партиции, если 50 ГБ данных при log.segment.bytes=1 ГБ?» — около 50
+- «Какой HW если LEO лидера=200, фолловер-1=198, фолловер-2=195?» — 195
+- «Что происходит с HW при исключении реплики из ISR?» — HW начинает следовать за LEO лидера
+
+**Распространённые заблуждения:**
+- Retention удаляет отдельные сообщения — **неверно**, удаляются целые сегменты
+- Compaction меняет офсеты оставшихся записей — **неверно**, офсеты сохраняются
+- Consumer может читать данные между HW и LEO лидера — **неверно**, ограничен HW
+
+---
+
+<KnowledgeCheck
+  question="В партиции 3 сегмента: S1 (offset 0-999), S2 (offset 1000-1999), S3 активный (offset 2000+, LEO=2150). ISR состоит из лидера (LEO=2150) и одного фолловера (LEO=2100). Что видит потребитель и до какого офсета он может читать?"
+  answer="High Watermark = min(LEO лидера, LEO фолловера) = min(2150, 2100) = 2100. Потребитель может читать сообщения с offset 0 до 2099 включительно. Сообщения с offset 2100-2149 существуют в активном сегменте лидера, но недоступны потребителю — они ещё не реплицированы на фолловера и не вошли в HW. Когда фолловер получит эти записи (через следующий fetch-цикл) и его LEO станет 2150, HW продвинется до 2150 и потребитель сможет прочитать оставшиеся 50 сообщений."
+/>

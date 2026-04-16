@@ -1,0 +1,176 @@
+---
+title: "Tiered Storage"
+description: "Remote log manager, local vs remote storage, cost-latency tradeoff — масштабирование хранения Kafka без роста broker-дисков"
+order: 4
+difficulty: "advanced"
+estimatedTime: 20
+topics: ["Tiered Storage", "Remote Log Manager", "Cost Optimization", "local.log.retention.ms", "S3", "Kafka 3.6"]
+---
+
+# Tiered Storage
+
+Традиционный Kafka-кластер хранит все данные локально на дисках брокеров. Это простое решение, но оно создаёт критическое ограничение: объём данных в кластере прямо пропорционален числу брокеров и размеру их дисков. Если вы хотите хранить месяц данных — нужны большие диски. Если хотите хранить год — нужно значительно масштабировать кластер.
+
+**Tiered Storage** решает эту проблему, разделяя данные на горячий (local) и холодный (remote) уровни.
+
+---
+
+## Проблема традиционного хранения
+
+Рассмотрим типичный сценарий: production-кластер с топиком `events`, 10 ТБ данных за месяц, retention = 30 дней. При replication factor = 3:
+
+```
+Общий объём дисков = 10 ТБ * 3 реплики = 30 ТБ
+Стоимость NVMe SSD (i3.8xlarge): ~$7.5/час * 3 брокера = $22.5/час
+Годовая стоимость: ~$200 000
+```
+
+Большинство consumer-трафика приходится на последние часы или дни — «горячие» данные. Данные недельной давности читаются значительно реже. Тем не менее вы платите за хранение всех 30 ТБ на дорогостоящих SSD.
+
+---
+
+## Архитектура Tiered Storage
+
+Tiered Storage разделяет данные на два уровня:
+
+<DiagramContainer title="Архитектура Tiered Storage" color="blue">
+  <FlowColumn>
+    <FlowRow>
+      <DataBox
+        label="Producer"
+        tooltip="Producer записывает в Kafka обычным образом — никаких изменений в producer-коде не требуется. Tiered Storage полностью прозрачен для производителей."
+      >
+        Новые сообщения
+      </DataBox>
+    </FlowRow>
+    <Arrow direction="down" />
+    <FlowRow>
+      <DataBox
+        label="Local Tier (брокерские диски)"
+        tooltip="Local tier: горячие данные на локальных SSD/HDD брокеров. Хранит последние local.log.retention.ms данных (например, 12 часов). Быстрое чтение — данные рядом."
+      >
+        Последние 12 ч — offset N-K ... N
+      </DataBox>
+    </FlowRow>
+    <FlowRow>
+      <Arrow direction="right" label="Remote Log Manager offloads" dashed />
+      <DataBox
+        label="Remote Tier (S3/GCS/Azure Blob)"
+        tooltip="Remote tier: холодные данные в объектном хранилище. Стоимость хранения в 10-50x ниже. Читаются реже — допустима большая задержка (сотни миллисекунд вместо единиц миллисекунд)."
+      >
+        Старые данные — offset 0 ... N-K
+      </DataBox>
+    </FlowRow>
+    <Arrow direction="down" />
+    <FlowRow>
+      <DataBox
+        label="Consumer"
+        tooltip="Consumer прозрачно читает данные с любого offset. Если offset в local tier — ответ приходит быстро. Если offset в remote tier — брокер скачивает данные из объектного хранилища (дольше, но автоматически)."
+      >
+        Читает любой offset прозрачно
+      </DataBox>
+    </FlowRow>
+  </FlowColumn>
+</DiagramContainer>
+
+---
+
+## Remote Log Manager
+
+**Remote Log Manager (RLM)** — это компонент брокера, отвечающий за:
+
+1. **Offloading:** перенос закрытых сегментов из local tier в remote tier
+2. **Metadata tracking:** отслеживание, какие офсеты хранятся в remote tier (метаданные хранятся в internal Kafka топиках)
+3. **Fetch routing:** при запросе consumer на offset в remote tier — скачивание сегмента из объектного хранилища и обслуживание запроса
+
+RLM — это плагин-интерфейс (`RemoteLogManagerPlugin`). Confluent, AWS MSK и другие managed-решения предоставляют реализации для S3, GCS и Azure Blob Storage.
+
+---
+
+## local.log.retention.ms и local.log.retention.bytes
+
+Ключевые параметры tiered storage:
+
+| Параметр | Описание |
+|----------|----------|
+| `remote.log.storage.enable` | Включить tiered storage для топика |
+| `local.log.retention.ms` | Как долго хранить данные локально. Старше — переносятся в remote |
+| `local.log.retention.bytes` | Максимальный локальный объём партиции. При превышении — offload |
+| `remote.log.delete.on.disable` | Удалять ли данные из remote tier при отключении tiered storage |
+
+Пример конфигурации для топика с 7-дневной глобальной retention и 12-часовой локальной:
+
+```bash
+kafka-configs.sh --bootstrap-server localhost:9092 \
+  --entity-type topics \
+  --entity-name events \
+  --alter \
+  --add-config \
+  "remote.log.storage.enable=true,\
+   local.log.retention.ms=43200000,\
+   log.retention.ms=604800000"
+```
+
+Данные старше 12 часов автоматически переносятся в S3 (или другое remote хранилище). Глобальный retention 7 дней контролирует, когда данные удаляются из remote tier.
+
+---
+
+## Путь чтения (Fetch Path)
+
+Когда consumer запрашивает данные:
+
+1. Брокер определяет, в каком tier находится запрошенный offset
+2. Если offset в **local tier** → обычное чтение с диска (задержка: единицы миллисекунд)
+3. Если offset в **remote tier** → RLM скачивает нужный сегмент из объектного хранилища, буферизует и возвращает данные (задержка: 100-500 мс в зависимости от размера сегмента и сети)
+
+<Callout type="note">
+Consumer-код не меняется — он делает обычные FetchRequest. Брокер сам определяет, где лежат данные, и прозрачно обслуживает запрос. Клиенту не нужно знать, что часть данных хранится в S3.
+</Callout>
+
+---
+
+## Cost vs Latency Trade-off
+
+Tiered Storage — это компромисс:
+
+<DiagramContainer title="Local vs Remote: стоимость и задержка" color="slate">
+  <FlowRow>
+    <DataBox
+      label="Local Tier"
+      tooltip="Local Tier: SSD/HDD брокеров. Задержка чтения: 1-5 мс. Стоимость хранения: ~$0.10/GB-месяц (EBS gp3). Подходит для горячих данных, которые часто читаются."
+    >
+      Задержка: 1-5 мс / Стоимость: высокая
+    </DataBox>
+    <DataBox
+      label="Remote Tier (S3)"
+      tooltip="Remote Tier: объектное хранилище (S3, GCS, Azure Blob). Задержка чтения: 100-500 мс. Стоимость хранения: ~$0.023/GB-месяц (S3 Standard). В 4-5x дешевле EBS для хранения."
+    >
+      Задержка: 100-500 мс / Стоимость: в 4-5x ниже
+    </DataBox>
+  </FlowRow>
+</DiagramContainer>
+
+Для большинства production-сценариев:
+- **Local retention = 2-24 часа** — достаточно для большинства consumer lag'ов
+- **Remote retention = 7-90 дней** — полная история в объектном хранилище
+- **Экономия** = 60-80% стоимости брокерских дисков при сохранении полной истории
+
+---
+
+## Статус: production с Kafka 3.6
+
+Tiered Storage стало production-ready в **Kafka 3.6** (2023-10). В Kafka 4.0 (2025-03) feature получил значительные улучшения:
+- Поддержка KRaft без ZooKeeper (ZK-режим не поддерживался в tiered storage)
+- Улучшенное восстановление брокера с remote tier
+- Пониженная задержка fetch для remote segments
+
+На 2026-04, Kafka 4.2 (latest stable) включает полностью зрелый tiered storage. Managed-решения: AWS MSK с S3, Confluent Cloud с встроенным tiered storage, Aiven for Apache Kafka.
+
+<Callout type="tip">
+Не используйте tiered storage для compacted топиков — compaction и tiered storage имеют сложное взаимодействие, особенно в части tombstone retention. По состоянию на Kafka 4.2 это ограничение постепенно снимается, но в production рекомендуется проверить release notes своей версии.
+</Callout>
+
+<KnowledgeCheck
+  question="Команда хочет уменьшить local.log.retention.ms с 24 часов до 1 часа для экономии на дисках. Какой риск это создаёт для consumer-ов с типичным lag в 30 минут?"
+  answer="При local.log.retention.ms=1 час данные старше 1 часа перемещаются в remote tier. Consumer с lag 30 минут обычно находится в пределах local tier — чтения быстрые. Однако при увеличении lag сверх 1 часа (из-за инцидента, перезагрузки, пиковой нагрузки) consumer начнёт читать из remote tier. Задержка fetch вырастет с единиц миллисекунд до 100-500 мс. Это может привести к каскадному эффекту: slow fetch → дальнейшее накопление lag → consumer не успевает сократить отставание. Рекомендация: устанавливать local.log.retention.ms как минимум в 2-3x от допустимого максимального consumer lag."
+/>

@@ -1,0 +1,184 @@
+---
+title: "Log Compaction"
+description: "log.cleanup.policy=compact, head/tail, tombstones, min.cleanable.dirty.ratio — дедупликация по ключу для changelog-топиков"
+order: 3
+difficulty: "advanced"
+estimatedTime: 25
+topics: ["Log Compaction", "Tombstones", "min.cleanable.dirty.ratio", "delete.retention.ms", "Deduplication", "Changelog"]
+---
+
+# Log Compaction
+
+Стандартная политика retention в Kafka удаляет данные по времени или объёму. Но что если вам нужно хранить не историю всех событий, а только **последнее известное состояние** по каждому ключу? Именно это обеспечивает **log compaction** — механизм дедупликации по ключу.
+
+---
+
+## Когда нужен compaction
+
+Log compaction предназначен для топиков, используемых как **changelog** — журнал изменений состояния. Примеры:
+
+- **User profiles:** каждое обновление профиля пользователя публикуется с ключом `user_id`. Важно только последнее состояние — история промежуточных изменений не нужна потребителям, которые строят кэш.
+- **Account balances:** текущий баланс по `account_id`. Каждая транзакция обновляет баланс, но downstream-система нуждается только в актуальном значении.
+- **Device shadow:** IoT-устройство периодически публикует своё состояние. Важно последнее известное состояние.
+- **Kafka Streams state stores:** Kafka Streams сохраняет changelog state stores в compacted топиках для восстановления после рестарта.
+
+Без compaction такой топик будет расти бесконечно — каждое обновление добавляет запись, и старые версии накапливаются. С compaction гарантируется, что для каждого ключа хранится хотя бы одна запись с последним значением.
+
+---
+
+## Как работает compaction: head и tail
+
+Kafka разделяет лог на две части:
+
+<DiagramContainer title="Head и Tail в compacted топике" color="blue">
+  <FlowColumn>
+    <FlowRow>
+      <DataBox
+        label="Tail (чистая часть)"
+        tooltip="Tail — уже скомпактированная часть лога. Каждый ключ встречается не более одного раза. Cleaner thread уже обработал эту область."
+      >
+        key1=C | key2=E | key3=D
+      </DataBox>
+      <DataBox
+        label="Head (грязная часть)"
+        tooltip="Head — новые записи, ещё не обработанные компактором. Содержит дубли: один ключ может встречаться несколько раз. Cleaner thread пока не дошёл до этой области."
+      >
+        key1=F | key4=A | key2=G | key1=H
+      </DataBox>
+    </FlowRow>
+    <Arrow direction="right" label="порядок офсетов (старые слева, новые справа)" />
+  </FlowColumn>
+</DiagramContainer>
+
+**Tail** — скомпактированная часть. Здесь каждый ключ присутствует не более одного раза. Cleaner thread уже обработал эту область, оставив только последнюю на момент compaction запись для каждого ключа.
+
+**Head** — неуплотнённая часть. Это недавние записи, которые ещё не прошли через compaction. Здесь один и тот же ключ может встречаться несколько раз.
+
+---
+
+## Процесс compaction
+
+**Cleaner thread** (log.cleaner.threads, по умолчанию 1) выполняет следующую работу:
+
+1. Сканирует head лога, строит в памяти хэш-карту `{key → offset}` — для каждого ключа запоминает офсет последней записи
+2. Сканирует tail: записи, для которых существует более новая версия в head, помечаются как удалённые
+3. Создаёт новые сегменты без удалённых записей
+4. Atomically заменяет старые сегменты новыми
+
+<Callout type="note">
+Compaction не изменяет офсеты оставшихся записей. Если запись имела offset=100 и прошла через compaction, она сохраняет offset=100. Это важно: consumers, работающие с compacted топиком, могут видеть «дыры» в офсетах (например, 10, 50, 100), потому что промежуточные записи были удалены.
+</Callout>
+
+---
+
+## До и после compaction
+
+<DiagramContainer title="Compaction: до и после" color="slate">
+  <FlowColumn>
+    <div className="text-sm text-slate-400 text-center">До compaction</div>
+    <FlowRow>
+      <DataBox label="offset=10" tooltip="Первое значение для key1. Будет удалено — есть более новые записи с тем же ключом.">
+        key1=A
+      </DataBox>
+      <DataBox label="offset=20" tooltip="Первое значение для key2. Будет удалено.">
+        key2=B
+      </DataBox>
+      <DataBox label="offset=50" tooltip="Второе значение для key1. Будет удалено — есть запись на offset=100.">
+        key1=C
+      </DataBox>
+      <DataBox label="offset=70" tooltip="Единственное значение для key3. Сохранится после compaction.">
+        key3=D
+      </DataBox>
+      <DataBox label="offset=85" tooltip="Второе значение для key2. Будет удалено — есть запись на offset=95.">
+        key2=E
+      </DataBox>
+      <DataBox label="offset=95" tooltip="Третье значение для key2. Сохранится — это последнее значение.">
+        key2=G
+      </DataBox>
+      <DataBox label="offset=100" tooltip="Третье значение для key1. Сохранится — это последнее значение для key1.">
+        key1=F
+      </DataBox>
+    </FlowRow>
+    <Arrow direction="down" label="cleaner thread" />
+    <div className="text-sm text-slate-400 text-center">После compaction</div>
+    <FlowRow>
+      <DataBox label="offset=70" tooltip="Единственная запись для key3 — сохранена.">
+        key3=D
+      </DataBox>
+      <DataBox label="offset=95" tooltip="Последнее значение для key2 — сохранено.">
+        key2=G
+      </DataBox>
+      <DataBox label="offset=100" tooltip="Последнее значение для key1 — сохранено.">
+        key1=F
+      </DataBox>
+    </FlowRow>
+  </FlowColumn>
+</DiagramContainer>
+
+---
+
+## min.cleanable.dirty.ratio
+
+Параметр `min.cleanable.dirty.ratio` (по умолчанию 0.5) определяет, при каком соотношении «грязных» (head) данных к общему объёму лога запускается compaction.
+
+```
+dirty ratio = bytes_in_head / (bytes_in_head + bytes_in_tail)
+```
+
+При значении 0.5 compaction запускается, когда не менее 50% лога — это неуплотнённые данные. Меньшее значение (например, 0.2) означает более агрессивное и частое компактирование — лог чище, но потребляет больше ресурсов cleaner thread.
+
+| `min.cleanable.dirty.ratio` | Поведение |
+|-----------------------------|-----------|
+| 0.1 | Очень агрессивное компактирование. Лог всегда чистый, но CPU нагрузка высокая. |
+| 0.5 | Умеренное. Компактор запускается, когда половина лога — новые неуплотнённые данные. |
+| 0.9 | Редкое компактирование. Экономит CPU, но лог может быть менее уплотнённым. |
+
+---
+
+## Tombstone: удаление ключа
+
+Как удалить ключ из compacted топика? Обычные записи только обновляют значение — они никогда не удаляют ключ полностью. Для удаления используются **tombstones** (надгробные камни).
+
+**Tombstone** — это запись с заданным ключом и `value=null`. После того как cleaner thread видит tombstone, ключ помечается для полного удаления.
+
+```
+producer.send(topic="user-profiles", key="user-42", value=None)
+```
+
+<Callout type="warning">
+Tombstone удаляется не мгновенно. После compaction tombstone-запись сохраняется в течение `delete.retention.ms` (по умолчанию 86400000 мс = 24 часа). Это время необходимо, чтобы consumer группы успели прочитать tombstone и обновить свои состояния. Если потребитель обработает логовый сегмент только после истечения `delete.retention.ms`, он никогда не узнает об удалении ключа — данные в его кэше останутся устаревшими.
+</Callout>
+
+После истечения `delete.retention.ms` tombstone полностью удаляется. Ключ больше не появляется в логе — потребитель, читающий с начала, не найдёт никаких записей для этого ключа.
+
+---
+
+## max.compaction.lag.ms
+
+Параметр `max.compaction.lag.ms` гарантирует, что запись в head лога не будет ждать compaction дольше заданного времени. Это временной верхний предел для cleaner thread.
+
+Без этого параметра в случае низкого трафика (dirty ratio никогда не достигает `min.cleanable.dirty.ratio`) compaction может не запускаться долгое время.
+
+---
+
+## Конфигурация compacted топика
+
+```bash
+# Создание compacted топика
+kafka-topics.sh --bootstrap-server localhost:9092 \
+  --create \
+  --topic user-profiles \
+  --partitions 3 \
+  --replication-factor 3 \
+  --config cleanup.policy=compact \
+  --config min.cleanable.dirty.ratio=0.3 \
+  --config delete.retention.ms=3600000 \
+  --config max.compaction.lag.ms=3600000
+```
+
+Для топика с одновременной retention по времени и compaction используется `cleanup.policy=compact,delete` — сначала удаляются записи старше retention, затем compaction убирает дубли.
+
+<KnowledgeCheck
+  question="Producer публикует tombstone (value=null) для ключа 'order-999' в compacted топик. Параметр delete.retention.ms=86400000 (24 часа). Что произойдёт с ключом после 25 часов?"
+  answer="После первой итерации compaction tombstone для 'order-999' будет перемещён из head в tail. Cleaner thread сохраняет tombstone в tail в течение delete.retention.ms=24 часов, чтобы consumers успели его прочитать. Через 25 часов после публикации tombstone истекает delete.retention.ms — cleaner thread при следующей итерации полностью удалит tombstone. Ключ 'order-999' исчезнет из лога. Consumer, читающий с начала после 25 часов, не найдёт никаких записей для этого ключа — как будто он никогда не существовал."
+/>

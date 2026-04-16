@@ -1,0 +1,99 @@
+{
+  "lessonSlug": "04-kafka-internals/05-module-summary",
+  "moduleId": "04-kafka-internals",
+  "_meta": {
+    "idPrefix": "kafka-m04-05",
+    "description": "Use IDs: kafka-m04-05-q1, kafka-m04-05-q2, ..."
+  },
+  "questions": [
+    {
+      "id": "kafka-m04-05-q1",
+      "type": "multiple-choice",
+      "question": "Брокер упал, пока активный сегмент содержал записи, ещё не отражённые в .index файле (log.index.interval.bytes не достигнут). Что произойдёт с этими записями при перезапуске брокера?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Записи потеряются — .index файл является основным хранилищем данных"
+        },
+        {
+          "id": "b",
+          "text": "Брокер восстановит индекс, пересканировав .log файл с последней известной позиции в .index файле"
+        },
+        {
+          "id": "c",
+          "text": "Записи будут помечены как corrupted и автоматически удалены"
+        },
+        {
+          "id": "d",
+          "text": "Брокер запросит эти записи у лидера через механизм ISR recovery"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Данные хранятся в .log файле, а не в .index. При рестарте Kafka обнаруживает несоответствие между .log и .index файлами (последняя запись в .log новее последней записи в .index). Брокер пересканирует .log файл начиная с последней индексированной позиции и перестраивает .index и .timeindex файлы. Это процесс восстановления (recovery), который может занять время при больших сегментах — ещё одна причина не делать log.segment.bytes слишком большим.",
+      "studyHint": "Повторите урок 01: Лог-сегменты — раздел '.index — индекс смещений'",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m04-05-q2",
+      "type": "multiple-choice",
+      "question": "Топик с cleanup.policy=compact, delete.retention.ms=86400000. В 10:00 producer публикует tombstone для key='order-42'. В 12:00 consumer-A (lag=1 час) читает tombstone и удаляет key из своего state. В 11:00 следующего дня запускается новый consumer-B, который начинает читать с начала топика. Увидит ли он tombstone для key='order-42'?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Да — tombstone хранится навсегда в compacted топике"
+        },
+        {
+          "id": "b",
+          "text": "Нет — tombstone удалён через 24 часа после публикации; consumer-B не получит сигнал об удалении"
+        },
+        {
+          "id": "c",
+          "text": "Да — tombstone виден в течение 48 часов для новых consumers"
+        },
+        {
+          "id": "d",
+          "text": "Consumer-B получит ошибку 'tombstone expired' при попытке прочитать удалённую запись"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Tombstone хранится delete.retention.ms=24 часа после публикации. Tombstone опубликован в 10:00, срок истекает в 10:00 следующего дня. Consumer-B запускается в 11:00 следующего дня — через 25 часов после публикации tombstone. Cleaner thread уже удалил tombstone. Consumer-B читает лог с начала, не находит ни tombstone, ни значения для key='order-42' — ключ просто отсутствует. Если consumer-B строит кэш из этого топика, он не узнает, что key='order-42' когда-либо существовал.",
+      "studyHint": "Повторите урок 03: Log Compaction — раздел 'Tombstone: удаление ключа'",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m04-05-q3",
+      "type": "multiple-choice",
+      "question": "Партиция настроена с local.log.retention.ms=3600000 (1 час) и log.retention.ms=2592000000 (30 дней). ISR содержит лидера (LEO=50000) и одного фолловера (LEO=49900). Данные с offset 30000-49900 находятся в local tier, offset 0-29999 в remote tier. Consumer читает с offset=15000. Какие две задержки добавляются к стандартной latency чтения?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Только задержка remote fetch — offset 15000 находится в remote tier"
+        },
+        {
+          "id": "b",
+          "text": "Задержка remote fetch (offset 15000 в remote tier) и consumer видит данные до HW=49900, а не до LEO=50000"
+        },
+        {
+          "id": "c",
+          "text": "Никаких дополнительных задержек — local.log.retention.ms не влияет на latency"
+        },
+        {
+          "id": "d",
+          "text": "Задержка remote fetch, плюс задержка ISR replication, плюс задержка compaction"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Два механизма добавляют задержку: (1) Tiered Storage: offset=15000 находится в remote tier (данные старше 1 часа). RLM скачивает сегмент из S3/GCS — дополнительные 100-500 мс. (2) High Watermark: HW = min(LEO лидера, LEO фолловера) = min(50000, 49900) = 49900. Записи 49900-49999 существуют у лидера, но недоступны consumer-у. Consumer видит данные только до offset 49899. Оба механизма независимы и оба влияют на поведение consumer-а.",
+      "studyHint": "Повторите урок 02 (LEO и HW) и урок 04 (Tiered Storage) и их взаимодействие",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m04-05-q4",
+      "type": "true-false",
+      "question": "Kafka гарантирует, что если HW партиции равен 1000, то любой потребитель, прочитавший сообщение с offset 999, получит одинаковые данные независимо от того, к какому брокеру-лидеру он обращается.",
+      "correctAnswer": true,
+      "explanation": "HW гарантирует, что сообщения с offset строго меньше HW реплицированы на все реплики в ISR. Если HW=1000, значит, offset 999 реплицирован на все ISR-реплики. При смене лидера новый лидер (бывший фолловер из ISR) гарантированно имеет offset 999 с тем же содержимым. Это фундаментальная гарантия консистентности Kafka: read-your-writes в пределах HW. Consumer не увидит разные данные для одного offset при смене лидера — именно для этого и нужен HW.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

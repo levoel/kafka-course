@@ -1,0 +1,99 @@
+{
+  "lessonSlug": "04-kafka-internals/03-log-compaction",
+  "moduleId": "04-kafka-internals",
+  "_meta": {
+    "idPrefix": "kafka-m04-03",
+    "description": "Use IDs: kafka-m04-03-q1, kafka-m04-03-q2, ..."
+  },
+  "questions": [
+    {
+      "id": "kafka-m04-03-q1",
+      "type": "multiple-choice",
+      "question": "Compacted топик 'user-profiles' содержит следующие записи по порядку: (key='u1', val='A'), (key='u2', val='B'), (key='u1', val='C'), (key='u3', val='D'), (key='u2', val='E'). После полного цикла compaction, какие записи останутся?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Все 5 записей — compaction сохраняет полную историю"
+        },
+        {
+          "id": "b",
+          "text": "(u1=A), (u2=B), (u3=D) — compaction сохраняет первые версии"
+        },
+        {
+          "id": "c",
+          "text": "(u1=C), (u3=D), (u2=E) — compaction оставляет только последнюю запись для каждого ключа"
+        },
+        {
+          "id": "d",
+          "text": "(u1=C), (u2=E) — u3 удаляется как самый старый ключ"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Log compaction сохраняет только последнюю запись для каждого уникального ключа. Для u1 последняя запись — u1=C (offset 3). Для u2 последняя — u2=E (offset 5). Для u3 только одна запись — u3=D (offset 4), она и остаётся. Compaction не удаляет ключи (только tombstone value=null это делает), не сохраняет историю изменений, и не меняет порядок оставшихся записей по офсету.",
+      "studyHint": "Повторите урок 03: Log Compaction — раздел 'До и после compaction'",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m04-03-q2",
+      "type": "multiple-choice",
+      "question": "Команда настраивает compacted топик для системы инвентаризации. Сейчас head лога занимает 8 ГБ, tail — 12 ГБ. min.cleanable.dirty.ratio=0.5. Запустится ли cleaner thread?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Да — head (8 ГБ) составляет 40% от общего (20 ГБ), что меньше 0.5"
+        },
+        {
+          "id": "b",
+          "text": "Нет — head (8 ГБ) составляет 40% от общего объёма (20 ГБ), что меньше порога 0.5 (50%)"
+        },
+        {
+          "id": "c",
+          "text": "Да — head всегда больше tail при активной записи"
+        },
+        {
+          "id": "d",
+          "text": "Нет — cleaner thread требует head > tail по объёму"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "dirty ratio = bytes_in_head / (bytes_in_head + bytes_in_tail) = 8 / (8 + 12) = 8 / 20 = 0.4. Это меньше min.cleanable.dirty.ratio=0.5 (50%). Cleaner thread не запустится. Чтобы запустить компактирование при текущем соотношении, нужно либо дождаться, пока head вырастет до 12 ГБ (тогда dirty ratio = 12/24 = 0.5), либо снизить min.cleanable.dirty.ratio до значения меньше 0.4 (например, 0.3).",
+      "studyHint": "Повторите урок 03: Log Compaction — раздел 'min.cleanable.dirty.ratio'",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m04-03-q3",
+      "type": "multiple-choice",
+      "question": "Downstream-consumer читает из compacted топика и использует данные для построения локального кэша. Producer публикует tombstone для ключа 'session-X'. delete.retention.ms=3600000 (1 час). Consumer перезапускается через 2 часа после публикации tombstone. Что произойдёт с ключом 'session-X' в кэше consumer-а?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Consumer увидит tombstone и удалит 'session-X' из кэша"
+        },
+        {
+          "id": "b",
+          "text": "Consumer не увидит tombstone (он уже удалён через 2 часа) и не удалит 'session-X' из кэша — кэш будет содержать устаревшие данные"
+        },
+        {
+          "id": "c",
+          "text": "Consumer получит ошибку при попытке прочитать удалённый ключ"
+        },
+        {
+          "id": "d",
+          "text": "Tombstone хранится бесконечно — consumer всегда увидит удаление"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Tombstone хранится только в течение delete.retention.ms=1 час. Через 2 часа tombstone уже удалён cleaner thread-ом. Consumer, читающий с начала лога, не встретит tombstone для 'session-X' — как будто этого ключа никогда не было. Если до перезапуска consumer кэшировал значение session-X, оно останется в кэше, потому что consumer не получил сигнал об удалении. Это фундаментальная проблема tombstone-based deletion: downstream-системы должны обработать tombstone до истечения delete.retention.ms.",
+      "studyHint": "Повторите урок 03: Log Compaction — раздел 'Tombstone: удаление ключа'",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m04-03-q4",
+      "type": "true-false",
+      "question": "После прохождения log compaction оставшиеся записи получают новые последовательные офсеты (0, 1, 2, ...), чтобы заполнить 'дыры', образовавшиеся после удаления дублей.",
+      "correctAnswer": false,
+      "explanation": "Compaction НЕ изменяет офсеты оставшихся записей. Если запись имела offset=100 до compaction, она сохраняет offset=100 после. Это принципиально важно: consumers используют офсеты для позиционирования, и изменение офсетов сломало бы все existing consumer groups. Вместо этого в compacted логе появляются 'дыры' — офсеты удалённых записей (например, 10, 50, 100 вместо 0, 1, 2). Consumer, видящий такой лог, получает нормальный ответ — Kafka гарантирует порядок только по существующим офсетам.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}
