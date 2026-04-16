@@ -1,0 +1,376 @@
+{
+  "lessonSlug": "12-design-patterns/_exam",
+  "moduleId": "12-design-patterns",
+  "examTitle": "Экзамен: Design Patterns с Kafka",
+  "passThreshold": 70,
+  "_meta": {
+    "idPrefix": "kafka-12-exam",
+    "description": "14 questions covering all 6 lessons of Module 12. Bloom distribution: 3 conceptual (21%), 5 applied (36%), 6 analytical (43%). Scenario-based: e-commerce, banking, IoT fleet. No duplication with lesson quizzes."
+  },
+  "questions": [
+    {
+      "id": "kafka-12-exam-q1",
+      "type": "multiple-choice",
+      "question": "IoT-платформа управления автопарком хранит телеметрию 50,000 транспортных средств. Исторически система использовала CRUD подход — таблица vehicles с текущим состоянием. Появилось требование: аудит каждого изменения маршрута для страховых компаний и возможность 'перемотать' маршрут в прошлое для разбора аварий. Какой паттерн решает обе задачи и почему CRUD система не справляется?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Saga Pattern — координирует обновление нескольких сервисов атомарно"
+        },
+        {
+          "id": "b",
+          "text": "Event Sourcing — хранит полную историю событий телеметрии. CRUD хранит только текущее состояние: при UPDATE строки предыдущее значение теряется. Event Sourcing: каждое изменение маршрута = событие в Kafka (ключ = vehicleId). Аудит: все события доступны с offset 0. Temporal query: replay событий до timestamp X = состояние транспортного средства в момент аварии."
+        },
+        {
+          "id": "c",
+          "text": "CQRS — разделение запросов и команд решает аудит"
+        },
+        {
+          "id": "d",
+          "text": "Transactional Outbox — надёжная публикация телеметрии"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Event Sourcing идеально для IoT-аудита: каждая точка телеметрии (GPS координаты, скорость, статус) — неизменяемое событие в Kafka. Ключ = vehicleId -> partition affinity -> порядок событий по транспортному средству гарантирован. Temporal queries: потребляем события до нужного timestamp -> получаем точное состояние в любой момент времени. Для страхового аудита: полная трассировка маршрута в порядке от начала смены. CRUD система не справляется: UPDATE перезаписывает строку, история теряется. Добавить таблицу history — можно, но это ручная реализация Event Sourcing без преимуществ Kafka (replay, масштабирование, CDC).",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-12-exam-q2",
+      "type": "multiple-choice",
+      "question": "Event-sourced система использует Kafka топик vehicle.telemetry с log.retention.ms=-1 (бесконечная retention). После 2 лет работы в топике накопилось 5 миллиардов событий. Загрузка телеметрии транспортного средства (50,000 событий) занимает 8 секунд. Какая архитектурная мера правильно сокращает время загрузки агрегата?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Изменить log.retention.ms на 30 дней — удалить старые события"
+        },
+        {
+          "id": "b",
+          "text": "Увеличить число партиций с 12 до 120"
+        },
+        {
+          "id": "c",
+          "text": "Ввести снапшоты: vehicle.snapshots топик с cleanup.policy=compact. При каждой смене (shift-end) создавать снапшот: state + lastEventOffset. Загрузка: читаем снапшот (state на конец последней смены) + только события текущей смены. Вместо 50,000 событий — несколько сотен."
+        },
+        {
+          "id": "d",
+          "text": "Перейти на PostgreSQL как event store — Kafka не оптимизирован для агрегата с 50,000 событиями"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Снапшоты — правильное решение. vehicle.snapshots с cleanup.policy=compact хранит только последний снапшот per vehicleId (ключ = vehicleId). Снапшот содержит: {state, lastEventOffset, snapshotTimestamp}. Загрузка агрегата: (1) Читаем снапшот из vehicle.snapshots -> получаем state на конец последней смены + offset последнего processed события. (2) Читаем vehicle.telemetry только начиная с lastEventOffset + 1 -> только события текущей смены (200-1000, не 50,000). Вариант A (уменьшить retention) — катастрофа: уничтожает аудит-требования. Вариант B (больше партиций) — не уменьшает число событий per aggregate. Вариант D (PostgreSQL как event store) — неверная диагностика: проблема в загрузке агрегата, не в выборе event store.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-12-exam-q3",
+      "type": "multiple-choice",
+      "question": "Что гарантирует Schema Registry при настройке режима BACKWARD_TRANSITIVE для события schema версии N?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Версия N читает данные, написанные версией N+1 (forward compatible)"
+        },
+        {
+          "id": "b",
+          "text": "Версия N может быть прочитана любым consumer, написанным для любой предыдущей версии схемы (N-1, N-2, ..., 1). Все предыдущие versions совместимы с текущей."
+        },
+        {
+          "id": "c",
+          "text": "Версия N совместима только с версией N-1"
+        },
+        {
+          "id": "d",
+          "text": "Все версии полностью совместимы в обоих направлениях"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "BACKWARD — новая схема может быть читана consumers, которые используют предыдущую версию (N-1). BACKWARD_TRANSITIVE — расширяет это: новая схема совместима со ВСЕМИ предыдущими версиями (N-1, N-2, ... до версии 1). Это критично для event sourcing: события в Kafka написаны годами разными версиями схемы. Consumer с текущей схемой должен уметь читать события, написанные 2 года назад (версия 1). BACKWARD_TRANSITIVE гарантирует это. Вариант A (forward) — это FORWARD: old consumer reads new data. Вариант C (только N-1) — это просто BACKWARD без TRANSITIVE. Вариант D — это FULL_TRANSITIVE (обе стороны).",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-12-exam-q4",
+      "type": "multiple-choice",
+      "question": "E-commerce платформа: команда Order создаёт заказ (POST /api/orders), сразу делает GET /api/orders/{id} и получает 404. Через 2 секунды GET возвращает 200. В системе используется CQRS: Write API -> Kafka -> Kafka Streams KTable (Read API). Диагностируйте причину 404 и предложите решение без отказа от eventual consistency модели.",
+      "options": [
+        {
+          "id": "a",
+          "text": "Ошибка в KTable конфигурации — нужно уменьшить commit.interval.ms"
+        },
+        {
+          "id": "b",
+          "text": "Это read-after-write проблема: KTable consumer не успел обработать событие OrderCreated за 0мс. Решение без отказа от eventual consistency: Write API возвращает данные заказа прямо в 202 Accepted response (из данных команды) — клиент показывает UI без ожидания KTable. Или: version polling — клиент запрашивает GET /api/orders/{id}?minVersion=1 и ждёт пока KTable projection достигнет version >= 1."
+        },
+        {
+          "id": "c",
+          "text": "KTable нужно заменить на synchronous PostgreSQL write — CQRS без eventual consistency"
+        },
+        {
+          "id": "d",
+          "text": "Проблема в Kafka consumer poll interval — нужно уменьшить max.poll.interval.ms"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Read-after-write — ожидаемое поведение eventual consistency. POST /api/orders: Write API публикует OrderCreated в Kafka (занимает 5-50мс). KTable consumer poll interval: 100-500мс по умолчанию. Projection update: ещё 10-100мс. GET /api/orders/{id} через 0мс: KTable ещё не обработал событие -> 404. Через 2с: KTable обработал -> 200. Два решения без отказа от eventual consistency: (1) 202 Accepted с данными — Write API знает что было создано (из команды), возвращает оптимистичный ответ без обращения к KTable. (2) Version polling — надёжнее, позволяет знать когда projection реально обновлён. Вариант A (commit.interval) — уменьшает batch commit latency, не устраняет проблему. Вариант C (synchronous write) — отказ от CQRS.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-12-exam-q5",
+      "type": "multiple-choice",
+      "question": "Банковское приложение: Transfer Service должен списать деньги со счёта A И зачислить на счёт B. Оба счёта в разных микросервисах (AccountA Service и AccountB Service). Сервис также должен опубликовать событие TransferCompleted в Kafka. Какая комбинация паттернов необходима?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Только Transactional Outbox — для надёжной публикации TransferCompleted"
+        },
+        {
+          "id": "b",
+          "text": "Только Saga — для координации двух сервисов"
+        },
+        {
+          "id": "c",
+          "text": "Saga (для координации DebitAccountA + CreditAccountB как распределённая транзакция с компенсацией) + Transactional Outbox (в каждом сервисе: атомарная запись бизнес-данных + события в outbox таблицу)."
+        },
+        {
+          "id": "d",
+          "text": "Event Sourcing + CQRS — банкинг требует полного audit trail"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Задача требует двух разных паттернов для разных проблем: (1) Координация двух сервисов — это Saga. DebitAccountA и CreditAccountB — локальные транзакции в разных сервисах. Если CreditAccountB упал — Saga запускает компенсацию: CreditAccountA (возврат списанной суммы). (2) Внутри каждого сервиса: AccountA Service должен атомарно обновить баланс в БД И опубликовать событие AccountDebited в Kafka. Это Transactional Outbox: INSERT в outbox таблицу в той же транзакции, Debezium публикует в Kafka. Оба паттерна решают разные уровни задачи: Saga — cross-service coordination, Outbox — intra-service reliable publishing. Вариант D (Event Sourcing + CQRS) — дополнительный слой, но не решает атомарность и координацию.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-12-exam-q6",
+      "type": "multiple-choice",
+      "question": "Outbox таблица Order Service содержит 10,000 необработанных записей. Debezium connector показывает статус RUNNING, но события не публикуются в Kafka. PostgreSQL replication slot показывает: confirmed_flush_lsn = 0/3000000, restart_lsn = 0/2FF0000. Kafka топик orders.events не получал новых сообщений 15 минут. Что вероятно произошло?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Debezium connector перегружен — нужно увеличить tasks.max"
+        },
+        {
+          "id": "b",
+          "text": "Outbox таблица переполнена — нужно удалить записи вручную"
+        },
+        {
+          "id": "c",
+          "text": "Debezium connector потерял соединение с Kafka broker или Kafka producer buffer заполнен (producer.max.block.ms exceeded). Connector показывает RUNNING, но реально не может publish: в WAL новые события накапливаются, LSN не продвигается. Диагностика: connector REST API /connectors/outbox-connector/status, kafka producer metrics, broker availability."
+        },
+        {
+          "id": "d",
+          "text": "PostgreSQL WAL очищен — события потеряны навсегда"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Симптомы: 10,000 необработанных outbox записей, connector RUNNING (не FAILED), Kafka молчит 15 минут, LSN не продвигается значительно. Наиболее вероятная причина: Debezium не может опубликовать в Kafka. Возможные причины: (1) Kafka broker недоступен (network partition, broker restart). (2) Producer buffer заполнен (producer.buffer.memory) — backpressure. (3) Kafka topic orders.events не существует или ACL запрещает write. Connector показывает RUNNING, потому что он всё ещё читает WAL, но не может produce. WAL LSN не продвигается: Debezium не подтверждает обработку, пока не получит successful produce acknowledgment. Диагностика: REST API /connectors/{name}/status, JMX metrics kafka-connector-task-metrics, broker availability check.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-12-exam-q7",
+      "type": "multiple-choice",
+      "question": "Choreography-based saga для e-commerce: OrderCreated -> PaymentCharged -> InventoryReserved -> NotificationSent -> OrderConfirmed. Payment Service упал после публикации PaymentCharged, но до того как Inventory Service получил событие. Payment Service перезапустился. Что произойдёт без idempotency и что произойдёт с idempotency?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Без idempotency и с idempotency — результат одинаков, Kafka гарантирует exactly-once"
+        },
+        {
+          "id": "b",
+          "text": "Без idempotency: Payment Service при перезапуске обработает OrderCreated повторно (at-least-once), попытается списать деньги ещё раз — двойное списание. С idempotency: Payment Service проверяет orderId в processed_events таблице, видит что уже обработан, пропускает. Kafka redelivery безопасна."
+        },
+        {
+          "id": "c",
+          "text": "Kafka гарантирует exactly-once delivery — Payment Service получит OrderCreated только один раз"
+        },
+        {
+          "id": "d",
+          "text": "Inventory Service не получит PaymentCharged — Kafka удаляет сообщение при redelivery"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Kafka доставляет события at-least-once для большинства consumer конфигураций. При crash Payment Service перед auto-commit offset: после перезапуска consumer group rebalance произойдёт. Kafka redelivers с последнего committed offset — Payment Service снова получит OrderCreated (или PaymentCharged для обработки). Без idempotency: повторная обработка OrderCreated -> повторный вызов платёжного шлюза -> двойное списание. Это критическая ошибка для финансовой операции. С idempotency: Payment Service хранит processed orderId. При повторном получении OrderCreated -> orderId уже есть в processed_events -> skip. Или conditional: 'charge only if not already charged for this orderId'. Inventory Service получит PaymentCharged (опубликовано до crash Payment Service и уже в Kafka — Kafka retained) — Inventory processing не затронуто.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-12-exam-q8",
+      "type": "multiple-choice",
+      "question": "Команда рассматривает два подхода для e-commerce системы с 50 сервисами: (A) Choreography saga — каждый сервис публикует domain events. (B) Orchestration saga — центральный Saga Orchestrator. Главное требование: возможность мониторинга статуса каждой транзакции (заказ #12345: на каком шаге?) и добавление новых шагов без изменения существующих сервисов. Какой подход выбрать?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Хореография — слабая связность позволяет добавлять сервисы без изменений"
+        },
+        {
+          "id": "b",
+          "text": "Оркестрация — Orchestrator хранит состояние саги в saga.state topic (compact), прямой query по sagaId даёт текущий статус. Новый шаг = изменение только Orchestrator state machine, существующие сервисы не меняются. При 50 сервисах хореография создаёт паутину event подписок, трудночитаемую."
+        },
+        {
+          "id": "c",
+          "text": "Хореография с distributed tracing (OpenTelemetry) решает проблему мониторинга"
+        },
+        {
+          "id": "d",
+          "text": "Оба подхода равноценны при 50 сервисах"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "При 50 сервисах и требованиях к мониторингу — Orchestration. Аргументы: (1) Мониторинг: Orchestrator хранит всё состояние в saga.state topic. Вопрос 'где сейчас заказ #12345' = query saga.state по ключу '12345' -> PAYMENT_PENDING. В хореографии нет единого view: нужно агрегировать события из 50+ топиков через distributed tracing (Jaeger + correlation ID) — сложно и медленно. (2) Добавление шага: в оркестрации меняем только Orchestrator state machine (один сервис). В хореографии: нужно найти сервисы, которые публикуют входящее событие, добавить subscription в новом сервисе, убедиться что существующие сервисы публикуют нужные события — потенциально N изменений. При 50 сервисах хореография = неуправляемая паутина зависимостей. Оркестрация = централизованное управление с компромиссом в виде coordination point.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-12-exam-q9",
+      "type": "multiple-choice",
+      "question": "Какая конфигурация Kafka producer необходима Saga Orchestrator для атомарной публикации команды в saga.commands.payments И обновления состояния в saga.state (два разных топика в одной атомарной операции)?",
+      "options": [
+        {
+          "id": "a",
+          "text": "acks=all + enable.idempotence=true"
+        },
+        {
+          "id": "b",
+          "text": "transactional.id=saga-orchestrator-1 (уникальный per producer instance). Consumers: isolation.level=read_committed. Orchestrator: beginTransaction() -> send(saga.commands.payments) -> send(saga.state) -> commitTransaction()."
+        },
+        {
+          "id": "c",
+          "text": "max.in.flight.requests.per.connection=1"
+        },
+        {
+          "id": "d",
+          "text": "linger.ms=0 + batch.size=1 для немедленной отправки"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Для атомарности между несколькими топиками нужны Kafka transactions. transactional.id — уникальный идентификатор producer instance. При задании transactional.id Kafka автоматически включает idempotence. Поток: producer.initTransactions() при старте. Для каждой saga step: beginTransaction() -> send(commands) -> send(state) -> commitTransaction(). При crash между begin и commit: Kafka автоматически откатывает незавершённую транзакцию при следующем initTransactions(). Consumers с isolation.level=read_committed видят только записи из committed транзакций — не видят partial state. Вариант A (acks=all + idempotence) — гарантия durability одной записи, не atomicity нескольких. Вариант C (max.in.flight=1) — для порядка, не для atomicity. Вариант D (linger.ms) — для latency, не для atomicity.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-12-exam-q10",
+      "type": "multiple-choice",
+      "question": "Production Kafka кластер: разработчик случайно опечатался в имени топика: producer.send('payment.events', event) вместо 'payments.events'. Оба топика существуют. Как предотвратить подобные ошибки архитектурно?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Включить auto.create.topics.enable=true — тогда опечатка создаст новый топик, что явно видно"
+        },
+        {
+          "id": "b",
+          "text": "Настроить auto.create.topics.enable=false + ACL: payment-service имеет WRITE только на 'payments.events'. Попытка write в 'payment.events' (без ACL) немедленно выбросит исключение AuthorizationException в тестах/деплое."
+        },
+        {
+          "id": "c",
+          "text": "Проверять имена топиков в code review"
+        },
+        {
+          "id": "d",
+          "text": "Хранить имена топиков в environment variables"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Комбинация auto.create.topics.enable=false + ACL обеспечивает двухуровневую защиту. Уровень 1 — auto.create=false: если разработчик опечатается в новом (несуществующем) имени, Kafka не создаст топик автоматически -> UnknownTopicOrPartitionException при первом produce. Уровень 2 — ACL per service: payment-service имеет WRITE только на 'payments.events'. Попытка записать в 'payment.events' (существующий топик другого сервиса) -> AuthorizationException: 'Not authorized to access topic payment.events'. Эта ошибка возникает при интеграционном тестировании, не в production. Code review (вариант C) — human-error prone, не систематично. Environment variables (вариант D) — снижает риск, но не устраняет: переменная может содержать опечатку.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-12-exam-q11",
+      "type": "multiple-choice",
+      "question": "Команда выбирает retention для трёх топиков: (A) payments.invoice.charged — финансовые события для аудита ЦБ, (B) saga.commands.payments — команды Saga Orchestrator для Payment Service, (C) vehicle.snapshots — последнее состояние транспортных средств. Какой набор конфигураций правильный?",
+      "options": [
+        {
+          "id": "a",
+          "text": "A: 7 дней. B: 7 дней. C: 7 дней — единая политика для простоты"
+        },
+        {
+          "id": "b",
+          "text": "A: retention.ms=-1 (бесконечно, delete policy) — аудит требует полной истории. B: retention.ms=86400000 (1 день, delete) — команды обрабатываются быстро, долго не нужны. C: cleanup.policy=compact — только последнее состояние per vehicle, никаких временных ограничений."
+        },
+        {
+          "id": "c",
+          "text": "A: cleanup.policy=compact. B: retention.ms=-1. C: retention.ms=7 дней"
+        },
+        {
+          "id": "d",
+          "text": "A: 90 дней. B: 90 дней. C: 90 дней — всем одинаковый retention"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Каждый тип топика требует своей retention стратегии: (A) payments.invoice.charged — Event топик для аудита. ЦБ требует хранения финансовых транзакций 5+ лет. log.retention.ms=-1 (бесконечно) + delete policy. Компактирование недопустимо: потеряем историю повторных зачислений/возвратов с одним ключом. (B) saga.commands.payments — Command топик. Команды обрабатываются в течение секунд-минут после publish. Неотработанная команда через 24 часа — симптом проблемы, а не нормальная ситуация. Короткая retention 1-3 дня достаточна. (C) vehicle.snapshots — Snapshot топик. Нужно только текущее состояние per vehicle: cleanup.policy=compact. Старые снапшоты удаляются compaction, только последний на ключ остаётся. Единая политика (вариант A/D) — неверна: одинаковые настройки для принципиально разных топиков приводят к либо потере данных, либо избыточным затратам на хранение.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-12-exam-q12",
+      "type": "multiple-choice",
+      "question": "Какая Kafka-фича является ключевой для реализации CQRS read model с возможностью полного перестроения (rebuild) при повреждении или добавлении нового read model?",
+      "options": [
+        {
+          "id": "a",
+          "text": "log.retention.ms=-1 на events topic. Любой consumer group с auto.offset.reset=earliest прочитает все события с начала и перестроит read model детерминированно."
+        },
+        {
+          "id": "b",
+          "text": "Schema Registry с backward compatibility"
+        },
+        {
+          "id": "c",
+          "text": "Kafka transactions для атомарного rebuild"
+        },
+        {
+          "id": "d",
+          "text": "log.cleanup.policy=compact для хранения только текущего состояния"
+        }
+      ],
+      "correctAnswer": "a",
+      "explanation": "Возможность rebuild read model — ключевое преимущество CQRS + Kafka. Механизм: events topic с бесконечной retention (log.retention.ms=-1) хранит все события с начала истории. Любой consumer group с auto.offset.reset=earliest начинает с offset 0 и обрабатывает каждое событие. Rebuild: остановить connector/consumer, удалить/очистить целевое хранилище (Elasticsearch индекс, PostgreSQL таблица), перезапустить consumer с earliest. Результат детерминирован: те же события + тот же projection код = то же состояние read model. Compact (вариант D) — уничтожает историю, rebuild даст только текущее состояние без промежуточных событий. Schema Registry (вариант B) — нужен для совместимости, но не для rebuild. Transactions (вариант C) — для atomicity produce, не для rebuild.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-12-exam-q13",
+      "type": "multiple-choice",
+      "question": "Выберите правильное имя топика для события 'пользователь добавил товар в корзину' (домен: checkout, сущность: cart, команда: item-added) согласно domain-based naming convention {domain}.{entity}.{event-type}:",
+      "options": [
+        {
+          "id": "a",
+          "text": "CheckoutCartItemAdded"
+        },
+        {
+          "id": "b",
+          "text": "checkout_cart_item_added"
+        },
+        {
+          "id": "c",
+          "text": "checkout.cart.item-added"
+        },
+        {
+          "id": "d",
+          "text": "checkout/cart/item_added"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Правильный формат: checkout.cart.item-added. Разбор: checkout (домен — бизнес-область корзины и оформления заказа), cart (сущность — корзина), item-added (тип события — товар добавлен, дефис допустим и предпочтителен внутри сегмента). Точка — разделитель между уровнями иерархии. Правила именования Kafka топиков: только строчные буквы, цифры, дефис (-) и точка (.). Вариант A (CamelCase) — нарушает lowercase конвенцию. Вариант B (подчёркивания) — подчёркивания зарезервированы для internal Kafka топиков (__ prefix), лучшая практика — избегать. Вариант D (слеш) — недопустимый символ, Kafka отклонит создание топика.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-12-exam-q14",
+      "type": "multiple-choice",
+      "question": "Системный дизайн: вы строите streaming платформу для интернет-магазина с требованиями: (1) полный аудит истории заказов, (2) поиск заказов по содержимому, (3) надёжная публикация событий при обновлении заказа, (4) координация оплаты, склада и доставки без 2PC. Какая комбинация паттернов покрывает все 4 требования и какой паттерн для какого требования?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Только Event Sourcing покрывает все 4 требования"
+        },
+        {
+          "id": "b",
+          "text": "Event Sourcing (req 1: полный аудит, append-only events) + CQRS (req 2: Elasticsearch read model для поиска, отдельная read model для аудит-запросов) + Transactional Outbox (req 3: надёжная публикация через Debezium CDC) + Saga (req 4: координация 3 сервисов без 2PC, с компенсирующими транзакциями)."
+        },
+        {
+          "id": "c",
+          "text": "CQRS + Saga достаточно для всех 4 требований"
+        },
+        {
+          "id": "d",
+          "text": "Outbox + Event Sourcing покрывают все требования"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Каждое требование требует своего паттерна: (1) Полный аудит истории -> Event Sourcing: orders.events с retention.ms=-1, каждое изменение = неизменяемое событие. Temporal queries: replay до любого timestamp. (2) Поиск по содержимому -> CQRS: Elasticsearch read model как separate projection. Write side (Kafka events) не меняется, добавляем ES Sink connector в новый consumer group. (3) Надёжная публикация -> Transactional Outbox: атомарная запись в outbox таблицу + Debezium CDC устраняет dual-write. (4) Координация сервисов -> Saga: DebitAccount + ReserveInventory + BookDelivery как цепочка локальных транзакций, без 2PC. Ни один паттерн не покрывает все 4 задачи одновременно. Правильная архитектура = комбинация 4 паттернов, каждый на своём уровне ответственности.",
+      "bloomLevel": "analytical"
+    }
+  ]
+}
