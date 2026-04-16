@@ -1,0 +1,336 @@
+{
+  "lessonSlug": "06-schema-registry/_exam",
+  "moduleId": "06-schema-registry",
+  "examTitle": "Экзамен: Schema Registry",
+  "passThreshold": 70,
+  "_meta": {
+    "idPrefix": "kafka-m06-exam",
+    "description": "12 applied/analytical scenario-based questions covering Avro, Protobuf, JSON Schema, compatibility modes, subject naming, and wire format"
+  },
+  "questions": [
+    {
+      "id": "kafka-m06-exam-q1",
+      "type": "multiple-choice",
+      "question": "Avro-схема V1 содержит поля {id: int, name: string}. Команда регистрирует V2, добавив поле {email: string} без default. Режим совместимости: BACKWARD. Что произойдёт при регистрации V2?",
+      "options": [
+        {
+          "id": "a",
+          "text": "V2 будет принята — добавление поля всегда разрешено при BACKWARD"
+        },
+        {
+          "id": "b",
+          "text": "V2 будет отклонена с HTTP 409 — новый reader не может прочитать старые данные без поля email"
+        },
+        {
+          "id": "c",
+          "text": "V2 будет принята с предупреждением — Schema Registry автоматически добавит default null"
+        },
+        {
+          "id": "d",
+          "text": "V2 будет принята только если одновременно удалить одно из существующих полей"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "BACKWARD требует, чтобы новый reader (V2) мог читать данные, написанные старым writer (V1). Старые данные V1 не содержат поля email. Без default-значения новый reader не знает, что подставить для email при чтении старых данных. BACKWARD нарушен. Schema Registry вернёт HTTP 409 Conflict. Правильное исправление: добавить email как {\"name\": \"email\", \"type\": [\"null\", \"string\"], \"default\": null}.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 02: Avro Deep-Dive — раздел 'Правила эволюции Avro'"
+    },
+    {
+      "id": "kafka-m06-exam-q2",
+      "type": "multiple-choice",
+      "question": "Schema Registry возвращает ошибку 409 при попытке зарегистрировать новую версию схемы. Как диагностировать причину несовместимости до регистрации?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Проверить логи Schema Registry через kafka-console-consumer на топике _schemas"
+        },
+        {
+          "id": "b",
+          "text": "Использовать POST /compatibility/subjects/{subject}/versions/latest с новой схемой — вернёт is_compatible и сообщения об ошибках"
+        },
+        {
+          "id": "c",
+          "text": "Временно переключить режим совместимости на NONE, зарегистрировать и вернуть режим обратно"
+        },
+        {
+          "id": "d",
+          "text": "Запросить GET /subjects/{subject}/versions/latest и вручную сравнить схемы"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Endpoint POST /compatibility/subjects/{subject}/versions/{version} тестирует совместимость без регистрации. При версии 'latest' — проверка против последней зарегистрированной. Ответ содержит {is_compatible: true/false} и при несовместимости — messages с описанием конкретных нарушений. Это стандартный инструмент CI/CD: перед деплоем новой схемы автоматически запускается тест совместимости; при failure — deploy блокируется.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 04: Режимы совместимости — раздел 'Настройка режима совместимости'"
+    },
+    {
+      "id": "kafka-m06-exam-q3",
+      "type": "multiple-choice",
+      "question": "Kafka Connect pipeline использует AvroConverter. Schema Registry находится на хосте sr.internal:8081, но Connect worker настроен с value.converter.schema.registry.url=http://localhost:8081. Connector запускается, задачи переходят в FAILED. Какая конфигурация должна быть исправлена?",
+      "options": [
+        {
+          "id": "a",
+          "text": "bootstrap.servers на worker должен указывать на тот же хост, что и Schema Registry"
+        },
+        {
+          "id": "b",
+          "text": "value.converter.schema.registry.url должен указывать на http://sr.internal:8081"
+        },
+        {
+          "id": "c",
+          "text": "key.converter.schema.registry.url должен быть настроен вместо value.converter"
+        },
+        {
+          "id": "d",
+          "text": "schema.registry.url должен быть указан в connector config, а не в worker config"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "AvroConverter использует value.converter.schema.registry.url для обращения к Schema Registry при сериализации/десериализации. Если URL указывает на localhost:8081, но Schema Registry работает на sr.internal:8081, Connect worker не может достучаться до SR — каждая попытка зарегистрировать или получить схему завершается ошибкой соединения. Задачи переходят в FAILED. Исправление: установить value.converter.schema.registry.url=http://sr.internal:8081 в connect-distributed.properties.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 01: Зачем управлять схемами — раздел 'Интеграция с экосистемой Kafka'"
+    },
+    {
+      "id": "kafka-m06-exam-q4",
+      "type": "multiple-choice",
+      "question": "TopicNameStrategy настроена. Продюсер записывает тип com.example.Order в топик orders и в топик archive-orders. Сколько subjects создаётся в Schema Registry (учитывая только value-сериализатор)?",
+      "options": [
+        {
+          "id": "a",
+          "text": "1 subject: com.example.Order — один тип = один subject"
+        },
+        {
+          "id": "b",
+          "text": "2 subjects: orders-value и archive-orders-value"
+        },
+        {
+          "id": "c",
+          "text": "4 subjects: orders-key, orders-value, archive-orders-key, archive-orders-value"
+        },
+        {
+          "id": "d",
+          "text": "Зависит от количества версий схемы Order"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "TopicNameStrategy формирует subject как {topic}-value для каждого топика независимо. Топик orders → subject orders-value. Топик archive-orders → subject archive-orders-value. Итого 2 value-subjects. Схема Order дублируется в двух subjects — изменение нужно регистрировать дважды. Именно для устранения этого дублирования используется RecordNameStrategy: один subject com.example.Order для обоих топиков.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 05: Subject Naming Strategies — раздел 'TopicNameStrategy (по умолчанию)'"
+    },
+    {
+      "id": "kafka-m06-exam-q5",
+      "type": "multiple-choice",
+      "question": "RecordNameStrategy настроена для обоих топиков из предыдущего сценария (orders и archive-orders, тип com.example.Order). Сколько subjects создаётся в Schema Registry (только value)?",
+      "options": [
+        {
+          "id": "a",
+          "text": "2 subjects: orders-com.example.Order и archive-orders-com.example.Order"
+        },
+        {
+          "id": "b",
+          "text": "1 subject: com.example.Order — разделяется между обоими топиками"
+        },
+        {
+          "id": "c",
+          "text": "1 subject: Order (только short name, без namespace)"
+        },
+        {
+          "id": "d",
+          "text": "0 subjects — RecordNameStrategy не использует subjects"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "RecordNameStrategy формирует subject из полного квалифицированного имени типа записи (fully qualified name): com.example.Order. Оба топика (orders и archive-orders) используют один и тот же subject com.example.Order. При регистрации схемы продюсером в любой из топиков — создаётся одна запись в Schema Registry. Изменение схемы Order регистрируется один раз и немедленно доступно всем topics.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 05: Subject Naming Strategies — раздел 'RecordNameStrategy'"
+    },
+    {
+      "id": "kafka-m06-exam-q6",
+      "type": "multiple-choice",
+      "question": "Режим совместимости BACKWARD (не transitive). Схемы: V1={A,B}, V2={A,B,C(default)}, V3={A,C(default)}. V3 удаляет B (без default в V2 для B). Schema Registry проверяет V3 только против V2. Что произойдёт при регистрации V3?",
+      "options": [
+        {
+          "id": "a",
+          "text": "V3 принята — удаление поля разрешено при BACKWARD"
+        },
+        {
+          "id": "b",
+          "text": "V3 отклонена — удаление B нарушает BACKWARD между V3 и V2"
+        },
+        {
+          "id": "c",
+          "text": "V3 принята — BACKWARD проверяет V3 vs V2, и в V2 поле B существует (новый reader V3 может прочитать данные V2)"
+        },
+        {
+          "id": "d",
+          "text": "V3 принята — Schema Registry автоматически добавит B в V3 с default"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "BACKWARD требует: новый reader (V3) может читать данные, написанные старым writer (V2). Данные V2 содержат поле B. Но V3-схема не имеет поля B — reader V3 не знает как обработать B при чтении данных V2. Нарушение BACKWARD. Schema Registry отклонит V3. Для успешного удаления B нужно было изначально определить B с default в V1 и V2 — тогда reader V3 мог бы игнорировать B в данных V2. Примечание: при BACKWARD_TRANSITIVE V3 также проверялась бы против V1.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 04: Режимы совместимости — раздел 'BACKWARD (режим по умолчанию)'"
+    },
+    {
+      "id": "kafka-m06-exam-q7",
+      "type": "multiple-choice",
+      "question": "Consumer читает сообщение из топика orders с schema_id = 42 в wire format. Для данного schema_id в Schema Registry существуют версии V1 (schema_id=42) и V3 (schema_id=95) — текущая. Какую схему получит consumer при запросе GET /schemas/ids/42?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Схему V3 (schema_id=95) — Schema Registry возвращает последнюю актуальную версию"
+        },
+        {
+          "id": "b",
+          "text": "Ошибку 404 — schema_id=42 устарел и деактивирован"
+        },
+        {
+          "id": "c",
+          "text": "Схему V1 (schema_id=42) — schema_id иммутабельны, GET /schemas/ids/42 всегда возвращает схему ID=42"
+        },
+        {
+          "id": "d",
+          "text": "Схему с применением migration от V1 к V3 — Schema Registry автоматически апгрейдит"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Schema ID в Schema Registry иммутабельны. GET /schemas/ids/{id} всегда возвращает схему, зарегистрированную под данным ID — независимо от текущей версии subject. Это фундаментальный принцип: сообщение закодировано с конкретной схемой, десериализатор должен использовать ровно ту же схему. Если бы Schema Registry возвращал последнюю версию, исторические сообщения могли бы некорректно декодироваться при значительной эволюции схемы.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 02: Avro Deep-Dive — раздел 'Confluent Wire Format'"
+    },
+    {
+      "id": "kafka-m06-exam-q8",
+      "type": "multiple-choice",
+      "question": "Архитектор замеряет overhead Confluent Wire Format. Топик получает 10 миллионов сообщений в день. Какой суммарный дополнительный объём данных создаёт wire format overhead?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Около 10 MB — 1 байт magic byte на сообщение"
+        },
+        {
+          "id": "b",
+          "text": "Около 50 MB — 5 байт на каждое сообщение"
+        },
+        {
+          "id": "c",
+          "text": "Около 40 MB — только 4 байта schema_id, magic byte не записывается отдельно"
+        },
+        {
+          "id": "d",
+          "text": "Около 500 MB — схема сериализуется в каждое сообщение"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Confluent Wire Format добавляет ровно 5 байт на каждое сообщение: 1 magic byte + 4 байта schema_id. При 10 миллионов сообщений: 10,000,000 × 5 = 50,000,000 байт = ~47.7 MB в день. Для сравнения: без Schema Registry, включая полную схему в каждое сообщение, overhead составил бы сотни байт на сообщение. 5 байт — минимально возможный overhead для schema-aware системы.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 02: Avro Deep-Dive — раздел 'Confluent Wire Format'"
+    },
+    {
+      "id": "kafka-m06-exam-q9",
+      "type": "multiple-choice",
+      "question": "Команда строит Kafka-продюсер для gRPC-микросервиса, который уже использует Protobuf. Они хотят публиковать события в Schema Registry. Какой класс сериализатора Confluent следует использовать?",
+      "options": [
+        {
+          "id": "a",
+          "text": "io.confluent.kafka.serializers.KafkaAvroSerializer"
+        },
+        {
+          "id": "b",
+          "text": "io.confluent.kafka.serializers.protobuf.KafkaProtobufSerializer"
+        },
+        {
+          "id": "c",
+          "text": "io.confluent.kafka.serializers.json.KafkaJsonSchemaSerializer"
+        },
+        {
+          "id": "d",
+          "text": "org.apache.kafka.common.serialization.ByteArraySerializer с ручным добавлением wire format"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Для Protobuf-формата в Schema Registry Confluent предоставляет io.confluent.kafka.serializers.protobuf.KafkaProtobufSerializer. Он регистрирует .proto дескриптор в Schema Registry, добавляет Confluent wire format заголовок (тот же 5-байтный формат: magic byte + schema_id) и сериализует Protobuf-сообщение в binary формат. На стороне consumer — KafkaProtobufDeserializer. Это позволяет переиспользовать те же .proto файлы из gRPC-контрактов.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 03: Protobuf и JSON Schema — раздел 'Protocol Buffers в Schema Registry'"
+    },
+    {
+      "id": "kafka-m06-exam-q10",
+      "type": "multiple-choice",
+      "question": "JSON Schema для топика events сконфигурирована с additionalProperties: false. Продюсер отправляет документ с полем user_id, которого нет в схеме. Что произойдёт на стороне producer?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Сообщение будет отправлено, user_id будет проигнорировано при десериализации потребителем"
+        },
+        {
+          "id": "b",
+          "text": "KafkaJsonSchemaSerializer выбросит исключение — валидация данных против схемы происходит на стороне producer до отправки"
+        },
+        {
+          "id": "c",
+          "text": "Schema Registry добавит user_id в схему как новую версию автоматически"
+        },
+        {
+          "id": "d",
+          "text": "Сообщение будет отправлено в DLQ для дополнительной обработки"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "KafkaJsonSchemaSerializer выполняет валидацию данных против JSON Schema перед сериализацией. При additionalProperties: false любое поле вне объявленных properties является нарушением схемы. Сериализатор выбросит исключение, сообщение не отправится в Kafka. Это отличает JSON Schema от Avro: в Avro extra fields в writer-данных просто игнорируются при reader/writer resolution (поле без соответствия в reader-схеме отбрасывается).",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 03: Protobuf и JSON Schema — раздел 'JSON Schema в Schema Registry'"
+    },
+    {
+      "id": "kafka-m06-exam-q11",
+      "type": "multiple-choice",
+      "question": "Avro-схема имеет поле {name: amount, type: [null, int]}. Команда хочет изменить тип на [null, long] (BACKWARD режим). Является ли это совместимым изменением?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Нет — изменение любого типа в union запрещено при BACKWARD"
+        },
+        {
+          "id": "b",
+          "text": "Да — int→long является допустимым type promotion в Avro, совместимо при BACKWARD"
+        },
+        {
+          "id": "c",
+          "text": "Нет — изменение внутри union требует режима FULL"
+        },
+        {
+          "id": "d",
+          "text": "Да, но только если добавить default для long"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Avro поддерживает type promotion — расширяющее преобразование типов, которое сохраняет совместимость. Допустимые promotions: int→long, int→float, int→double, long→float, long→double, float→double. Изменение [null, int] на [null, long] в union является допустимым BACKWARD-совместимым изменением: новый reader (с long) читает старые данные (с int) и корректно расширяет значение. Schema Registry примет V2 при BACKWARD режиме.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 02: Avro Deep-Dive — раздел 'Правила эволюции Avro'"
+    },
+    {
+      "id": "kafka-m06-exam-q12",
+      "type": "multiple-choice",
+      "question": "Subject настроен с FULL_TRANSITIVE. Схемы: V1={A, B, C(default)}, V2={A, B, C(default), D(default)}. V3 хочет удалить B (у B нет default в V1). Может ли V3 быть зарегистрирована?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Да — FULL_TRANSITIVE разрешает удаление любых полей"
+        },
+        {
+          "id": "b",
+          "text": "Да — B можно удалить, если в V3 добавить B с default"
+        },
+        {
+          "id": "c",
+          "text": "Нет — FULL_TRANSITIVE проверяет V3 против V1 и V2. При FULL B в V1 не имеет default — удаление нарушает FORWARD: V1-reader читает V3-данные, но B отсутствует, и default нет в V1"
+        },
+        {
+          "id": "d",
+          "text": "Да, потому что V2 содержит D с default — компенсирует удаление B"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "FULL_TRANSITIVE требует FULL-совместимости V3 с КАЖДОЙ предыдущей версией (V1 и V2). FULL = BACKWARD + FORWARD. Проверка FORWARD V3 против V1: старый reader (V1) читает новые данные (V3). V3 не содержит B. V1-reader пытается читать B из V3-данных — B отсутствует, default в V1 нет. FORWARD нарушен. V3 не может быть зарегистрирована. Для корректного удаления B: B должно иметь default в V1 (самой старой версии), что позволило бы V1-reader подставить default при чтении V3-данных без B.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 04: Режимы совместимости — раздел 'TRANSITIVE варианты'"
+    }
+  ]
+}

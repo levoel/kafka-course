@@ -1,0 +1,184 @@
+---
+title: "Subject Naming Strategies и паттерны эволюции схем"
+description: "TopicNameStrategy, RecordNameStrategy, TopicRecordNameStrategy — как организовать схемы в Schema Registry"
+order: 5
+difficulty: "advanced"
+estimatedTime: 20
+topics: ["Subject Naming", "TopicNameStrategy", "RecordNameStrategy", "TopicRecordNameStrategy", "Schema Evolution Patterns"]
+---
+
+# Subject Naming Strategies и паттерны эволюции схем
+
+Когда продюсер регистрирует схему в Schema Registry, она сохраняется под именем **subject**. Выбор стратегии именования subject — это архитектурное решение, которое определяет, как схемы организованы, повторно используются и как для них применяются режимы совместимости.
+
+---
+
+## Что такое subject
+
+**Subject** — логическая группа версий одной схемы в Schema Registry. Когда вы регистрируете первую версию схемы — создаётся subject. Каждая следующая версия добавляется в тот же subject. Совместимость проверяется внутри subject.
+
+Subject имеет:
+- **Имя** — строка, определяемая стратегией именования.
+- **Список версий** — целые числа от 1 до N, монотонно возрастающие.
+- **Режим совместимости** — наследуется глобально или задаётся явно через `PUT /config/{subject}`.
+
+Разные subjects — разные линии версий, разные проверки совместимости. Это позволяет одну и ту же схему иметь разные гарантии совместимости для разных контекстов (топиков).
+
+---
+
+## TopicNameStrategy (по умолчанию)
+
+**Формат subject:** `{topic}-key` и `{topic}-value`
+
+Это стратегия по умолчанию. При отправке в топик `orders`, key-сериализатор создаёт subject `orders-key`, value-сериализатор — `orders-value`.
+
+**Преимущества:**
+- Простота и предсказуемость. Вы точно знаете, какой subject соответствует какому топику.
+- Один топик — один контракт. Subject жёстко привязан к топику.
+
+**Ограничения:**
+- Если два топика (`orders` и `fulfillment-orders`) несут один и тот же тип записи `Order`, схема дублируется в двух subjects: `orders-value` и `fulfillment-orders-value`. Изменение схемы надо регистрировать дважды.
+- Нет возможности переиспользовать одну линию версий для нескольких топиков.
+
+**Когда использовать:** Для большинства случаев. Если каждый топик имеет уникальный тип данных — TopicNameStrategy идеален.
+
+---
+
+## RecordNameStrategy
+
+**Формат subject:** Полное квалифицированное имя типа записи (например, `com.example.kafka.Order`)
+
+С RecordNameStrategy subject определяется не топиком, а типом записи. Все топики, которые несут `com.example.kafka.Order`, используют один и тот же subject.
+
+**Преимущества:**
+- Единый source of truth для схемы типа. Изменение схемы `Order` регистрируется один раз — все топики, использующие этот тип, автоматически получают новую версию.
+- Схема-центричная архитектура. Subject соответствует доменной модели, а не топологии топиков.
+
+**Ограничения:**
+- Совместимость проверяется для всех топиков сразу. Если вы хотите иметь более строгий контракт для одного топика и более мягкий для другого — невозможно.
+- Переиспользование subject накладывает общие ограничения эволюции. Если один потребитель не может перейти на новую схему, это блокирует всех.
+
+**Конфигурация продюсера:**
+
+```properties
+value.subject.name.strategy=io.confluent.kafka.serializers.subject.RecordNameStrategy
+```
+
+---
+
+## TopicRecordNameStrategy
+
+**Формат subject:** `{topic}-{fully.qualified.record.name}`
+
+Пример: топик `orders`, запись `com.example.kafka.Order` → subject `orders-com.example.kafka.Order`.
+
+TopicRecordNameStrategy комбинирует оба измерения: топик и тип записи. Это максимально гибкая стратегия.
+
+**Преимущества:**
+- Один топик может нести несколько типов записей, каждый со своей линией версий и режимом совместимости. Это единственная стратегия, позволяющая такое.
+- Разные топики с одним типом записи имеют независимые субъекты — можно иметь разные режимы совместимости на разных топиках для одного типа.
+
+**Ограничения:**
+- Большее число subjects в Schema Registry. При большом числе топиков и типов — тысячи subjects.
+- Сложнее управлять. Требует понимания двух измерений (топик + тип).
+
+**Конфигурация продюсера:**
+
+```properties
+value.subject.name.strategy=io.confluent.kafka.serializers.subject.TopicRecordNameStrategy
+```
+
+**Когда использовать:** Когда топик намеренно несёт события нескольких типов (например, Envelope-паттерн с полиморфными payload), или когда нужны разные режимы совместимости для одного типа данных на разных топиках.
+
+---
+
+## Наглядное сравнение стратегий
+
+<DiagramContainer title="Subject Naming Strategies: как формируются имена subjects" color="violet">
+  <div className="space-y-6 p-2">
+    <FlowColumn>
+      <FlowNode
+        variant="service"
+        size="lg"
+        tooltip="TopicNameStrategy (по умолчанию): subject = topic + '-key' или topic + '-value'. Простейшая стратегия. Каждый топик имеет ровно два subjects."
+      >
+        TopicNameStrategy: topic=orders → subject=orders-value
+      </FlowNode>
+      <FlowNode
+        variant="service"
+        size="lg"
+        tooltip="RecordNameStrategy: subject = полное имя типа записи. Один subject для всех топиков с данным типом. Схема-центричная архитектура."
+      >
+        RecordNameStrategy: record=com.example.Order → subject=com.example.Order
+      </FlowNode>
+      <FlowNode
+        variant="service"
+        size="lg"
+        tooltip="TopicRecordNameStrategy: subject = topic + '-' + record name. Максимальная гибкость: разные subjects для одного типа на разных топиках."
+      >
+        TopicRecordNameStrategy: topic=orders + record=Order → subject=orders-com.example.Order
+      </FlowNode>
+    </FlowColumn>
+  </div>
+</DiagramContainer>
+
+---
+
+## Паттерны эволюции схем
+
+Стратегия именования определяет организацию схем, но эволюция схем требует отдельных архитектурных паттернов.
+
+**Паттерн 1: Аддитивная эволюция (Additive-only evolution)**
+
+Единственная безопасная долгосрочная стратегия: только добавлять опциональные поля с default. Никогда не удалять, не переименовывать, не менять тип.
+
+Достоинства: совместима со всеми режимами, включая FULL_TRANSITIVE. Простота: разработчики знают одно правило.
+
+Ограничение: со временем схема накапливает устаревшие поля. Решение — версионирование через ветвление топиков.
+
+**Паттерн 2: Ветвление топиков (Topic branching)**
+
+При необходимости breaking change: создаётся новый топик (`orders-v2`). Producer переключается на запись в новый топик. Consumers мигрируют постепенно. Dual-write (запись в оба топика) на переходный период.
+
+Достоинства: полная свобода в новом топике, никакого воздействия на потребителей старого.
+
+Ограничение: операционная сложность переходного периода.
+
+**Паттерн 3: Schema aliasing**
+
+Avro поддерживает aliases для переименования полей без breaking change:
+
+```json
+{"name": "newFieldName", "type": "string", "aliases": ["oldFieldName"]}
+```
+
+При reader/writer schema resolution Avro сопоставляет `oldFieldName` (writer) с `newFieldName` (reader) через alias.
+
+**Паттерн 4: Envelope-паттерн**
+
+Оборачиваем payload в универсальный конверт с полем-версией:
+
+```json
+{
+  "type": "record",
+  "name": "Envelope",
+  "fields": [
+    {"name": "eventType", "type": "string"},
+    {"name": "version", "type": "int", "default": 1},
+    {"name": "payload", "type": "bytes"}
+  ]
+}
+```
+
+Consumer читает `eventType` и `version`, десериализует `payload` нужным декодером. Конверт редко меняется — payload может эволюционировать независимо.
+
+Ограничение: теряется типизация на уровне Schema Registry — payload — это `bytes`, без схемной проверки.
+
+<Callout type="note">
+Выбор subject naming strategy — это решение при создании producer и consumer. Изменить стратегию без migration невозможно: существующие subjects останутся под старыми именами. Планируйте стратегию заранее, исходя из архитектуры: если у вас schema-centric домен (одна модель данных реиспользуется в многих топиках) — RecordNameStrategy; если topic-centric (каждый топик = уникальный тип) — TopicNameStrategy.
+</Callout>
+
+<KnowledgeCheck
+  question="Команда хочет, чтобы схема типа com.example.Order была shared между топиками orders и archive-orders — изменение схемы регистрируется один раз и применяется к обоим топикам. Какую Subject Naming Strategy следует использовать?"
+  answer="RecordNameStrategy. При этой стратегии subject определяется полным квалифицированным именем типа (com.example.Order), а не именем топика. Оба топика (orders и archive-orders) будут использовать один subject com.example.Order. Регистрация новой версии схемы происходит один раз в этот subject, и оба топика автоматически используют новую версию. Важный побочный эффект: режим совместимости применяется одинаково к обоим топикам — нельзя иметь разные режимы для разных топиков при RecordNameStrategy."
+/>

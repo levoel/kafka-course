@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "06-schema-registry/06-module-summary",
+  "moduleId": "06-schema-registry",
+  "_meta": {
+    "idPrefix": "kafka-m06-06",
+    "description": "Use IDs: kafka-m06-06-q1, q2, q3 for MC; kafka-m06-06-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m06-06-q1",
+      "type": "multiple-choice",
+      "question": "Команда строит production Kafka-систему с rolling deployment: producer и consumer обновляются независимо, без синхронизации. Топик имеет долгий retention (30 дней), consumer-группы могут отставать на несколько версий схемы. Какую комбинацию выбрать?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Avro, BACKWARD, TopicNameStrategy"
+        },
+        {
+          "id": "b",
+          "text": "JSON Schema, FULL, RecordNameStrategy"
+        },
+        {
+          "id": "c",
+          "text": "Avro, FULL_TRANSITIVE, TopicNameStrategy"
+        },
+        {
+          "id": "d",
+          "text": "Protobuf, NONE, TopicRecordNameStrategy"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Rolling deployment с долгим retention требует: (1) Avro — строгие гарантии совместимости, компактный формат, стандарт де-факто; (2) FULL_TRANSITIVE — rolling upgrade означает одновременную работу старых и новых версий (нужен FULL), долгий retention и отставание consumer-групп означает, что они могут читать данные, написанные несколькими версиями назад (нужен TRANSITIVE); (3) TopicNameStrategy — в отсутствие особых требований (один тип = один топик) это стандартный выбор. NONE запрещён в production. JSON Schema неэффективен для high-throughput.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m06-06-q2",
+      "type": "multiple-choice",
+      "question": "Schema Registry хранит схему под schema_id = 42. Через 3 месяца была зарегистрирована V2 схемы (schema_id = 87). Consumer читает старое сообщение с schema_id = 42 в wire format. Какую схему он получит от Schema Registry?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Схему V2 (schema_id = 87) — Schema Registry всегда возвращает последнюю версию"
+        },
+        {
+          "id": "b",
+          "text": "Схему V1 (schema_id = 42) — Schema Registry возвращает схему точно по ID"
+        },
+        {
+          "id": "c",
+          "text": "Схему V2 с применением V1 для backward compatibility resolution"
+        },
+        {
+          "id": "d",
+          "text": "Ошибку — старые schema_id деактивируются при регистрации новой версии"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Schema IDs в Schema Registry иммутабельны и постоянны. GET /schemas/ids/42 всегда возвращает схему, зарегистрированную под ID 42 — независимо от того, сколько новых версий было добавлено после. Consumer читает schema_id из wire format каждого конкретного сообщения и запрашивает ровно ту схему, с которой это сообщение было написано. Это гарантирует корректную десериализацию исторических данных даже при значительной эволюции схемы.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m06-06-q3",
+      "type": "multiple-choice",
+      "question": "Kafka Connect worker настроен с AvroConverter для топика orders. Schema Registry недоступен. Что произойдёт с новым source connector, который пытается начать запись?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Connector переключится на JsonConverter автоматически"
+        },
+        {
+          "id": "b",
+          "text": "Connector запишет данные без схемы, wire format заголовок будет пропущен"
+        },
+        {
+          "id": "c",
+          "text": "AvroConverter не сможет зарегистрировать схему — connector упадёт с ошибкой, задачи перейдут в FAILED состояние"
+        },
+        {
+          "id": "d",
+          "text": "Connector продолжит работу, кэшируя схемы локально без Schema Registry"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "AvroConverter обязательно взаимодействует с Schema Registry при каждой новой схеме: регистрирует схему (source connector) или запрашивает схему по ID (sink connector). Если Schema Registry недоступен при попытке регистрации новой схемы, AvroConverter выбросит исключение, Connect task получит ошибку и перейдёт в FAILED состояние. Connector.status покажет ERROR. Это жёсткая зависимость: без Schema Registry AvroConverter не работает.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m06-06-q4",
+      "type": "true-false",
+      "question": "При использовании TopicNameStrategy добавление новой записи типа com.example.Payment в топик orders (где уже используется com.example.Order) автоматически создаёт новый subject в Schema Registry.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. При TopicNameStrategy subject определяется именем топика, а не типом записи. Subject для топика orders — всегда orders-value, независимо от того, какой тип записи отправляется. Если producer отправит com.example.Payment в топик orders, AvroSerializer попытается зарегистрировать Payment-схему в subject orders-value. Schema Registry проверит совместимость Payment с уже зарегистрированной Order-схемой — и скорее всего отклонит (разные структуры несовместимы). Для нескольких типов в одном топике нужен TopicRecordNameStrategy.",
+      "bloomLevel": "analytical"
+    }
+  ]
+}

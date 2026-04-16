@@ -1,0 +1,120 @@
+---
+title: "Итоги модуля: Schema Registry"
+description: "Обзор ключевых концепций модуля — форматы, совместимость, стратегии именования, эволюция"
+order: 6
+difficulty: "intermediate"
+estimatedTime: 10
+topics: ["Summary", "Review"]
+---
+
+# Итоги модуля: Schema Registry
+
+Модуль 06 охватил Schema Registry как инфраструктурный слой контрактного управления между producer и consumer. Вот ключевые концепции, которые необходимо закрепить.
+
+---
+
+## Ключевые концепции
+
+**Зачем Schema Registry** (Урок 01)
+
+- Без Schema Registry нет механизма, предотвращающего публикацию несовместимой схемы. Breaking change обнаруживается только при падении потребителей.
+- Schema Registry — centralized HTTP-сервис, хранящий схемы в Kafka-топике `_schemas`. Stateless и перезапускаем без потери данных.
+- Schema ID в wire format позволяет потребителю получить схему без встраивания её в каждое сообщение.
+- KafkaAvroSerializer → Schema Registry → KafkaAvroDeserializer — полная цепочка контракта.
+
+**Confluent Wire Format** (Урок 02)
+
+- Ровно 5 байт заголовка: magic byte `0x00` + schema ID (4 байта, big-endian int32) + payload.
+- Схема не хранится в каждом сообщении — только ID. Это делает Avro компактным без жертв типизацией.
+- Десериализатор кэширует схемы по ID — HTTP-запрос к Schema Registry только при первой встрече с данным ID.
+
+**Avro** (Урок 02)
+
+- Самый зрелый формат для Kafka. Строгие правила эволюции через reader/writer schema resolution.
+- Добавление поля с default = BACKWARD-совместимо. Добавление без default = нарушение BACKWARD.
+- Логические типы: `timestamp-millis`, `date`, `decimal`, `uuid` — семантика поверх примитивов.
+- GenericRecord (динамический, не требует codegen) vs SpecificRecord (типизированный, требует codegen).
+
+**Protobuf и JSON Schema** (Урок 03)
+
+- Protobuf: наименьший payload для сложных структур, gRPC-нативный, обязательна codegen, номера полей — ключ к совместимости.
+- JSON Schema: читаемый payload, нет бинарного кодирования, слабые гарантии эволюции.
+- По умолчанию выбирайте Avro. Protobuf — при gRPC-интеграции. JSON Schema — для отладки/web-native.
+
+**Режимы совместимости** (Урок 04)
+
+- BACKWARD (default): новый reader читает старые данные. Потребители обновляются первыми.
+- FORWARD: старый reader читает новые данные. Продюсеры обновляются первыми.
+- FULL: оба направления. Rolling upgrade без координации порядка.
+- NONE: нет проверок. Только для development.
+- TRANSITIVE-варианты проверяют совместимость со ВСЕМИ предыдущими версиями, а не только с последней.
+
+**Subject Naming Strategies** (Урок 05)
+
+- TopicNameStrategy (default): `{topic}-key`, `{topic}-value`. Проще всего.
+- RecordNameStrategy: один subject на тип записи. Schema-centric архитектура.
+- TopicRecordNameStrategy: `{topic}-{record.name}`. Максимальная гибкость, наибольшее число subjects.
+- Стратегия задаётся на producer/consumer, а не на Schema Registry.
+
+**Паттерны эволюции:** аддитивная эволюция (только добавлять опциональные поля), ветвление топиков при breaking change, schema aliasing для переименования в Avro, Envelope-паттерн для полиморфных событий.
+
+---
+
+## Интеграция с Kafka Connect
+
+Schema Registry является обязательным компонентом при использовании AvroConverter в Kafka Connect. Воркер Kafka Connect должен быть настроен с адресом Schema Registry:
+
+```properties
+value.converter=io.confluent.connect.avro.AvroConverter
+value.converter.schema.registry.url=http://schema-registry:8081
+```
+
+Source connector регистрирует схему при первой записи. Sink connector получает схему по ID из wire format. Schema Registry и Kafka Connect — взаимозависимые компоненты production-стека (подробно — Модуль 05, Урок 01).
+
+---
+
+## Руководство по принятию решений
+
+**Выбор формата:**
+
+| Ситуация | Рекомендация |
+|----------|-------------|
+| Новый Kafka-проект без специфических требований | Avro |
+| Существующие gRPC-контракты на Protobuf | Protobuf |
+| Команда без Java/Scala опыта, отладка важнее производительности | JSON Schema |
+| High-throughput, требования к минимальному размеру | Avro или Protobuf |
+
+**Выбор режима совместимости:**
+
+| Ситуация | Рекомендация |
+|----------|-------------|
+| Production: обновление Consumer перед Producer | BACKWARD |
+| Production: обновление Producer перед Consumer | FORWARD |
+| Production: rolling upgrade, нет гарантии порядка | FULL |
+| Production, долгий retention, потребители могут отставать | FULL_TRANSITIVE |
+| Development/sandbox | NONE |
+
+**Выбор Subject Naming Strategy:**
+
+| Ситуация | Рекомендация |
+|----------|-------------|
+| Каждый топик = уникальный тип данных | TopicNameStrategy |
+| Один тип реиспользуется на нескольких топиках | RecordNameStrategy |
+| Один топик несёт несколько типов | TopicRecordNameStrategy |
+
+<Callout type="tip">
+Schema Registry окупается не сразу — его ценность проявляется в момент, когда команда хочет изменить формат данных и обнаруживает, что Schema Registry не позволил им совершить ошибку. Инвестиция в правильную настройку (режим совместимости, стратегия именования) возвращается при первом же production-инциденте, который не случился.
+</Callout>
+
+---
+
+## Связи с другими модулями
+
+- **Модуль 05 (Kafka Connect):** AvroConverter требует Schema Registry. Без Schema Registry Avro-based коннекторы не работают.
+- **Модуль 02 (Producers):** Продюсер использует KafkaAvroSerializer — первая точка контакта со Schema Registry в цепочке данных.
+- **Модуль 03 (Consumers):** Потребитель использует KafkaAvroDeserializer — использует wire format для получения schema ID и запрашивает Schema Registry.
+
+<KnowledgeCheck
+  question="Ваша команда строит систему с rolling upgrades: в любой момент времени в production работают как старая, так и новая версия producer. Оба могут записывать данные одновременно. Потребители также обновляются постепенно. Какой режим совместимости и какую Subject Naming Strategy вы выберете для основного топика events с типом com.example.Event?"
+  answer="Режим совместимости: FULL_TRANSITIVE. Rolling upgrade означает, что старые и новые producer пишут одновременно. Потребители обновляются постепенно, то есть старые потребители могут читать новые данные (нужен FORWARD), новые потребители могут читать старые данные (нужен BACKWARD). FULL удовлетворяет обоим. TRANSITIVE — потому что потребители могут отставать на несколько версий, не только одну. Subject Naming Strategy: при типичном случае (один топик = один тип) — TopicNameStrategy. Если com.example.Event реиспользуется на нескольких топиках — RecordNameStrategy."
+/>

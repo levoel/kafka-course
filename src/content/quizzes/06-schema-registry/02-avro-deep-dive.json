@@ -1,0 +1,126 @@
+{
+  "lessonSlug": "06-schema-registry/02-avro-deep-dive",
+  "moduleId": "06-schema-registry",
+  "_meta": {
+    "idPrefix": "kafka-m06-02",
+    "description": "Use IDs: kafka-m06-02-q1, q2, q3 for MC; kafka-m06-02-q4 for TF; kafka-m06-02-code-1 for code challenge"
+  },
+  "questions": [
+    {
+      "id": "kafka-m06-02-q1",
+      "type": "multiple-choice",
+      "question": "Avro-схема V1 содержит поля {id: int, name: string}. Команда хочет добавить поле email: string без default-значения. При режиме совместимости BACKWARD — что произойдёт при попытке зарегистрировать V2?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Schema Registry примет V2 — добавление любого поля разрешено при BACKWARD"
+        },
+        {
+          "id": "b",
+          "text": "Schema Registry отклонит V2 с HTTP 409 — новый reader не может прочитать старые данные без поля email"
+        },
+        {
+          "id": "c",
+          "text": "Schema Registry примет V2 — BACKWARD проверяет только удаление полей, не добавление"
+        },
+        {
+          "id": "d",
+          "text": "Schema Registry примет V2 и автоматически добавит default null для email"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "BACKWARD-совместимость требует, чтобы новый reader (использующий V2) мог прочитать данные, написанные со старой схемой (V1). Старые данные не содержат поля email. Если email не имеет default-значения, новый reader не знает что подставить — BACKWARD нарушен. Schema Registry вернёт HTTP 409. Правильное решение: добавить email через union с null: {\"name\": \"email\", \"type\": [\"null\", \"string\"], \"default\": null}.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m06-02-q2",
+      "type": "multiple-choice",
+      "question": "Confluent Wire Format добавляет к каждому сообщению заголовок. Сколько байт составляет этот заголовок и что в нём содержится?",
+      "options": [
+        {
+          "id": "a",
+          "text": "1 байт: только magic byte 0x00"
+        },
+        {
+          "id": "b",
+          "text": "4 байта: schema_id в big-endian формате"
+        },
+        {
+          "id": "c",
+          "text": "5 байт: 1 magic byte (0x00) + 4 байта schema_id (int32, big-endian)"
+        },
+        {
+          "id": "d",
+          "text": "Переменная длина: magic byte + varint-encoded schema_id"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Confluent Wire Format использует фиксированный 5-байтный заголовок: байт 0 — magic byte (всегда 0x00, идентифицирует SR-encoded сообщение), байты 1-4 — schema_id в виде 4-байтного целого в big-endian формате (int32). Фиксированная длина важна: десериализатор всегда знает, что первые 5 байт — заголовок, остальное — payload. Varint-кодирование не используется, потому что fixed-length проще и быстрее разбирать.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m06-02-code-1",
+      "type": "code-challenge",
+      "question": "Напишите Avro-схему для записи 'Payment' с полями: id (int), amount (double), currency (string, по умолчанию 'USD'), description (опциональное, string или null, по умолчанию null). Схема должна быть BACKWARD-совместимой при добавлении нового опционального поля в будущем.",
+      "language": "json",
+      "starterCode": "{\n  \"type\": \"record\",\n  \"name\": \"Payment\",\n  \"namespace\": \"com.example.kafka\",\n  \"fields\": [\n    // TODO: добавьте поля id, amount, currency, description\n  ]\n}",
+      "solutionCode": "{\n  \"type\": \"record\",\n  \"name\": \"Payment\",\n  \"namespace\": \"com.example.kafka\",\n  \"fields\": [\n    {\"name\": \"id\", \"type\": \"int\"},\n    {\"name\": \"amount\", \"type\": \"double\"},\n    {\"name\": \"currency\", \"type\": \"string\", \"default\": \"USD\"},\n    {\"name\": \"description\", \"type\": [\"null\", \"string\"], \"default\": null}\n  ]\n}",
+      "testCases": [
+        {
+          "description": "Схема содержит имя типа Payment",
+          "check": "contains",
+          "value": "Payment",
+          "visible": true
+        },
+        {
+          "description": "Поле currency присутствует в схеме",
+          "check": "contains",
+          "value": "currency",
+          "visible": true
+        },
+        {
+          "description": "Опциональные поля имеют default-значение",
+          "check": "contains",
+          "value": "default",
+          "visible": false
+        }
+      ],
+      "explanation": "BACKWARD-совместимая схема требует, чтобы все поля либо были обязательными (присутствуют в старых данных), либо имели default-значение (для подстановки при чтении старых данных). Поле currency с default 'USD' — корректный паттерн: старые данные без этого поля получат значение USD при чтении новым reader. Поле description через union [null, string] с default null — стандартный паттерн опционального поля в Avro. При добавлении нового опционального поля в будущем — тот же паттерн гарантирует BACKWARD-совместимость.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m06-02-q3",
+      "type": "multiple-choice",
+      "question": "Разработчик хочет изменить тип поля amount с int на long в существующей Avro-схеме при режиме BACKWARD. Это допустимое изменение?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Нет — любое изменение типа запрещено при BACKWARD"
+        },
+        {
+          "id": "b",
+          "text": "Да — int→long является допустимым type promotion в Avro и совместимо при BACKWARD"
+        },
+        {
+          "id": "c",
+          "text": "Нет — int и long имеют разные binary encodings, что нарушает wire format"
+        },
+        {
+          "id": "d",
+          "text": "Да, но только если long имеет default-значение 0"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Avro поддерживает type promotion — определённые расширяющие преобразования типов, при которых старые данные могут быть прочитаны новым reader. Допустимые promotions: int→long, int→float, int→double, long→float, long→double, float→double. При чтении старых данных (где amount закодирован как int) новый reader (где amount — long) корректно расширяет значение. Это разрешено при BACKWARD. Обратное (long→int) — не допускается.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m06-02-q4",
+      "type": "true-false",
+      "question": "GenericRecord — единственный способ десериализовать Avro-сообщения в Kafka-consumer. SpecificRecord не поддерживается в Kafka экосистеме.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. Kafka поддерживает оба подхода. SpecificRecord — это Avro-сгенерированные Java-классы с типизированными геттерами (генерируются через avro-tools или avro-maven-plugin). SpecificAvroSerde в Kafka Streams и SpecificRecord в стандартном consumer работают через KafkaAvroDeserializer с параметром specific.avro.reader=true. GenericRecord используется для динамической работы с любой схемой без codegen. Выбор зависит от контекста: SpecificRecord для type-safety в producer/Kafka Streams; GenericRecord для consumer, не знающего заранее конкретные схемы.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

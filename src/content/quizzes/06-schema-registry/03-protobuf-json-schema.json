@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "06-schema-registry/03-protobuf-json-schema",
+  "moduleId": "06-schema-registry",
+  "_meta": {
+    "idPrefix": "kafka-m06-03",
+    "description": "Use IDs: kafka-m06-03-q1, q2, q3 for MC; kafka-m06-03-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m06-03-q1",
+      "type": "multiple-choice",
+      "question": "В Protobuf-схеме было поле `string metadata = 5`. Команда удалила это поле из схемы и хочет добавить новое поле `string notes` под тем же номером 5. Что произойдёт при чтении старых данных новым decoder?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Всё в порядке — Protobuf идентифицирует поля по имени, а не по номеру"
+        },
+        {
+          "id": "b",
+          "text": "Данные под номером 5 будут интерпретированы как string notes — тип совпадает, проблем нет"
+        },
+        {
+          "id": "c",
+          "text": "Decoder прочитает байты под номером 5 как notes, хотя это данные metadata. При совпадении wire type значения могут быть некорректны семантически, но не вызовут крэша"
+        },
+        {
+          "id": "d",
+          "text": "Schema Registry отклонит новую схему с таким же номером поля — это проверяется автоматически"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Protobuf идентифицирует поля по номеру (field number), а не имени. Переиспользование номера 5 для нового поля notes означает: при чтении старых данных, где байты под номером 5 — это значение metadata, decoder будет интерпретировать их как notes. Если wire type совпадает (оба string = wire type 2: length-delimited), decoder не упадёт, но прочитает семантически неверные данные. Правильное решение: использовать `reserved 5; reserved \"metadata\";` чтобы запретить переиспользование.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m06-03-q2",
+      "type": "multiple-choice",
+      "question": "Команда строит микросервисы на gRPC и хочет публиковать те же события в Kafka без конвертации схем. Какой формат сериализации Schema Registry оптимален?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Avro — стандарт де-факто для Kafka, лучшая интеграция со Schema Registry"
+        },
+        {
+          "id": "b",
+          "text": "Protobuf — нативный формат gRPC, одни .proto файлы используются и для gRPC, и для Kafka"
+        },
+        {
+          "id": "c",
+          "text": "JSON Schema — удобен для отладки, читаем без инструментов"
+        },
+        {
+          "id": "d",
+          "text": "Любой формат одинаково интегрируется с gRPC через Schema Registry"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Protobuf является нативным форматом для gRPC. Если .proto файлы уже определяют gRPC-контракты, использование тех же файлов для Schema Registry позволяет избежать дублирования определений схем. Команда использует единый codegen pipeline: protoc генерирует классы и для gRPC-вызовов, и для Kafka-сериализации. KafkaProtobufSerializer/Deserializer в Confluent Schema Registry поддерживает полный .proto стек. Avro потребует параллельного ведения схем в другом формате.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m06-03-q3",
+      "type": "multiple-choice",
+      "question": "JSON Schema сконфигурирован с additionalProperties: false для топика events. Продюсер отправляет запись с полем extra_field, которого нет в схеме. Что произойдёт?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Сообщение будет принято, extra_field будет проигнорировано при десериализации"
+        },
+        {
+          "id": "b",
+          "text": "Schema Registry примет сообщение, но consumer получит ошибку при валидации"
+        },
+        {
+          "id": "c",
+          "text": "KafkaJsonSchemaSerializer выбросит исключение на стороне producer — валидация происходит до отправки"
+        },
+        {
+          "id": "d",
+          "text": "extra_field будет добавлен в схему автоматически как новая версия"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "KafkaJsonSchemaSerializer выполняет валидацию данных против схемы до сериализации. При additionalProperties: false любое поле, не объявленное в properties, является нарушением схемы. Сериализатор выбросит исключение, сообщение не попадёт в Kafka. Это принципиально отличает JSON Schema (с additionalProperties: false) от Avro: Avro writer не валидирует наличие неизвестных полей в writer-данных — в Avro лишние поля просто игнорируются при reader/writer resolution.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m06-03-q4",
+      "type": "true-false",
+      "question": "Protobuf-сообщения являются самоописывающими: получатель может десериализовать сообщение без .proto файла, используя только бинарные данные.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. Protobuf-сообщения НЕ являются самоописывающими. Бинарный формат Protobuf кодирует данные как пары (field_number, wire_type, value) — без имён полей, без описания типов. Без .proto файла (или дескриптора) невозможно знать, что означает field_number 1, какой тип у field_number 2 и т.д. Именно поэтому Schema Registry хранит .proto файлы как схемы — они необходимы для корректной десериализации. Это аналогично Avro: без схемы Avro-байты тоже бессмысленны.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

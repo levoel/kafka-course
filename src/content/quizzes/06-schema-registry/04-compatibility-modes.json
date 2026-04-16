@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "06-schema-registry/04-compatibility-modes",
+  "moduleId": "06-schema-registry",
+  "_meta": {
+    "idPrefix": "kafka-m06-04",
+    "description": "Use IDs: kafka-m06-04-q1, q2, q3 for MC; kafka-m06-04-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m06-04-q1",
+      "type": "multiple-choice",
+      "question": "В чём ключевое различие между BACKWARD и FORWARD режимами совместимости с точки зрения порядка обновления компонентов?",
+      "options": [
+        {
+          "id": "a",
+          "text": "BACKWARD: продюсер обновляется первым. FORWARD: потребитель обновляется первым"
+        },
+        {
+          "id": "b",
+          "text": "BACKWARD: потребитель обновляется первым. FORWARD: продюсер обновляется первым"
+        },
+        {
+          "id": "c",
+          "text": "Оба режима не накладывают ограничений на порядок обновления"
+        },
+        {
+          "id": "d",
+          "text": "BACKWARD: Schema Registry обновляется первым. FORWARD: Kafka-брокеры обновляются первым"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "BACKWARD означает: новая схема может читать данные, написанные старой схемой. Consumer с новой схемой может обработать старые данные продюсера. Значит — consumer безопасно обновить первым, до обновления producer. FORWARD означает: старая схема может читать данные, написанные новой схемой. Старый consumer может обработать новые данные producer. Значит — producer безопасно обновить первым. FULL = нет обязательного порядка (rolling upgrade).",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m06-04-q2",
+      "type": "multiple-choice",
+      "question": "Schema V1 содержит поля A (required) и B (с default). V2 добавляет C (с default) и удаляет B. Режим совместимости: BACKWARD (не transitive). V3 хочет удалить A. Что произойдёт при регистрации V3?",
+      "options": [
+        {
+          "id": "a",
+          "text": "V3 будет принята — BACKWARD проверяет только V3 vs V2, а в V2 поле A есть"
+        },
+        {
+          "id": "b",
+          "text": "V3 будет отклонена — удаление обязательного поля A запрещено при BACKWARD"
+        },
+        {
+          "id": "c",
+          "text": "V3 будет принята — BACKWARD разрешает удаление любых полей"
+        },
+        {
+          "id": "d",
+          "text": "V3 будет принята только если A имеет default в V3"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "BACKWARD проверяет V3 против V2 (только latest при non-transitive). В V2 поле A присутствует как required (без default). V3 пытается его удалить. Новый reader (использующий V3) будет читать старые данные (написанные с V2). Данные V2 содержат поле A — но reader V3 его не знает и не обработает корректно. BACKWARD нарушен. Schema Registry отклонит V3. Если бы A имело default в V2 — удаление было бы разрешено при FULL, но не при BACKWARD (которому важно, что reader V3 может обработать данные V2).",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m06-04-q3",
+      "type": "multiple-choice",
+      "question": "Команда хочет провести rolling upgrade: в любой момент в production может работать как старая (V1), так и новая (V2) версия producer и consumer. Какой минимальный режим совместимости обеспечивает безопасность такого сценария?",
+      "options": [
+        {
+          "id": "a",
+          "text": "BACKWARD — достаточно для rolling upgrade"
+        },
+        {
+          "id": "b",
+          "text": "FORWARD — достаточно для rolling upgrade"
+        },
+        {
+          "id": "c",
+          "text": "FULL — требуется, так как и старые reader читают новые данные, и новые reader читают старые данные"
+        },
+        {
+          "id": "d",
+          "text": "NONE — rolling upgrade не требует проверки совместимости"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Rolling upgrade означает: одновременно работают старые и новые версии. Старый consumer (V1 reader) может получить данные нового producer (V2 writer) — нужен FORWARD. Новый consumer (V2 reader) может получить данные старого producer (V1 writer) — нужен BACKWARD. Только FULL гарантирует оба направления одновременно. BACKWARD или FORWARD по отдельности не покрывают оба сценария.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m06-04-q4",
+      "type": "true-false",
+      "question": "Режим совместимости NONE является безопасным выбором для production-топиков, если команда следит за изменениями схем через code review.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. NONE полностью отключает механическую защиту Schema Registry. Code review — это социальный контроль, который пропускает ошибки (спешка, невнимательность, параллельные PR). NONE позволяет зарегистрировать любую схему, включая полностью несовместимую с существующими потребителями. В production минимальный рекомендуемый режим — BACKWARD. NONE допустим только в development/sandbox окружениях, где инциденты не имеют production-последствий.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

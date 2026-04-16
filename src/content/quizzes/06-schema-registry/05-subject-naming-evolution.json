@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "06-schema-registry/05-subject-naming-strategies",
+  "moduleId": "06-schema-registry",
+  "_meta": {
+    "idPrefix": "kafka-m06-05",
+    "description": "Use IDs: kafka-m06-05-q1, q2, q3 for MC; kafka-m06-05-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m06-05-q1",
+      "type": "multiple-choice",
+      "question": "Продюсер настроен с TopicNameStrategy (по умолчанию) и отправляет сообщения в топик payments. Как будет называться subject в Schema Registry для value-схемы?",
+      "options": [
+        {
+          "id": "a",
+          "text": "payments"
+        },
+        {
+          "id": "b",
+          "text": "payments-value"
+        },
+        {
+          "id": "c",
+          "text": "com.example.Payment (полное имя записи)"
+        },
+        {
+          "id": "d",
+          "text": "payments-com.example.Payment"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "TopicNameStrategy (стратегия по умолчанию) формирует имя subject как {topic}-key для ключей и {topic}-value для значений. Для топика payments value-сериализатор создаст subject payments-value. Это простейшая стратегия: имя subject всегда предсказуемо по имени топика, без знания типа записи.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m06-05-q2",
+      "type": "multiple-choice",
+      "question": "Команда хочет использовать RecordNameStrategy, чтобы схема com.example.Order была shared между топиками orders и archive-orders. Где именно нужно настроить эту стратегию?",
+      "options": [
+        {
+          "id": "a",
+          "text": "В конфигурации Schema Registry — глобальная настройка для всех subjects"
+        },
+        {
+          "id": "b",
+          "text": "В конфигурации Kafka-брокера — broker определяет, какой subject использовать"
+        },
+        {
+          "id": "c",
+          "text": "В конфигурации producer и consumer через параметр value.subject.name.strategy"
+        },
+        {
+          "id": "d",
+          "text": "Автоматически при использовании KafkaAvroSerializer — стратегия определяется по типу записи"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Subject naming strategy задаётся на стороне client (producer/consumer), а не в Schema Registry. Параметр: value.subject.name.strategy=io.confluent.kafka.serializers.subject.RecordNameStrategy (для value) и key.subject.name.strategy для key. Важно настроить оба: producer при регистрации схемы и consumer при поиске схемы. Schema Registry не знает о стратегии — он просто принимает схему под тем именем subject, которое прислал client.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m06-05-q3",
+      "type": "multiple-choice",
+      "question": "Архитектор выбирает между RecordNameStrategy и TopicRecordNameStrategy. Какой сценарий однозначно требует TopicRecordNameStrategy, а не RecordNameStrategy?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Один тип записи (com.example.Order) используется в 10 разных топиках"
+        },
+        {
+          "id": "b",
+          "text": "Один топик events содержит события разных типов (OrderCreated, PaymentProcessed, ShipmentSent) с разными режимами совместимости"
+        },
+        {
+          "id": "c",
+          "text": "Нужно минимизировать количество subjects в Schema Registry"
+        },
+        {
+          "id": "d",
+          "text": "Команда использует Kafka Streams для обработки событий"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "TopicRecordNameStrategy создаёт subject как {topic}-{record.name}, что позволяет одному топику нести несколько типов записей, каждый с независимым subject и режимом совместимости. Это единственная стратегия, позволяющая иметь в топике events subjects events-com.example.OrderCreated, events-com.example.PaymentProcessed и events-com.example.ShipmentSent с потенциально разными режимами совместимости. RecordNameStrategy создала бы общие subjects com.example.OrderCreated и т.д. — без привязки к топику, что не даёт разных режимов на разных топиках.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m06-05-q4",
+      "type": "true-false",
+      "question": "Subject naming strategy настраивается на стороне Schema Registry — администратор SR выбирает глобальную стратегию для всех clients.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. Subject naming strategy настраивается на стороне client (producer и consumer) через параметр value.subject.name.strategy (и key.subject.name.strategy) в конфигурации сериализатора. Schema Registry не участвует в выборе стратегии — он просто получает запрос с именем subject, которое client сформировал согласно своей стратегии. Это означает: если разные producers используют разные стратегии для одного типа данных, они создадут разные subjects в Schema Registry — возможна путаница. Стратегия должна быть согласована в команде.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

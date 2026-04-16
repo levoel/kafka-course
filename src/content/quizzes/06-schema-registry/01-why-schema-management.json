@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "06-schema-registry/01-why-schema-management",
+  "moduleId": "06-schema-registry",
+  "_meta": {
+    "idPrefix": "kafka-m06-01",
+    "description": "Use IDs: kafka-m06-01-q1, q2, q3 for MC; kafka-m06-01-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m06-01-q1",
+      "type": "multiple-choice",
+      "question": "Продюсер отправил сообщение в топик orders, используя схему, которую он попытался зарегистрировать в Schema Registry, но получил HTTP 409 Conflict. Какое действие предпримет KafkaAvroSerializer в этом случае?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Сообщение будет отправлено в Kafka без Schema Registry — сериализатор переключится на JSON fallback"
+        },
+        {
+          "id": "b",
+          "text": "Сериализатор выбросит исключение, сообщение не будет отправлено в Kafka"
+        },
+        {
+          "id": "c",
+          "text": "Сообщение будет отправлено с schema_id = 0, потребители смогут прочитать его без схемы"
+        },
+        {
+          "id": "d",
+          "text": "Сериализатор использует предыдущую совместимую версию схемы автоматически"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "KafkaAvroSerializer регистрирует схему (или получает существующий ID) в Schema Registry перед сериализацией. Если Schema Registry возвращает HTTP 409 (несовместимая схема) или любую другую ошибку, сериализатор выбрасывает исключение и сообщение НЕ попадает в Kafka. Это ключевой механизм защиты: ошибка обнаруживается на стороне продюсера, до публикации, а не на стороне потребителей после факта.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m06-01-q2",
+      "type": "multiple-choice",
+      "question": "Архитектор планирует размещение Schema Registry в мультирегиональной системе с двумя дата-центрами (DC-West и DC-East), каждый со своим Kafka-кластером. Какой подход наиболее корректен?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Развернуть Schema Registry только в DC-West — оба Kafka-кластера обращаются к нему через WAN"
+        },
+        {
+          "id": "b",
+          "text": "Развернуть отдельный Schema Registry в каждом DC, синхронизировать схемы через Kafka MirrorMaker 2 или Confluent Replicator"
+        },
+        {
+          "id": "c",
+          "text": "Schema Registry является частью Kafka-брокера и автоматически реплицируется вместе с топиками"
+        },
+        {
+          "id": "d",
+          "text": "Развернуть Schema Registry в каждом DC независимо без синхронизации — schema_id будут разными для одних схем"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "В мультирегиональной архитектуре рекомендуется развернуть Schema Registry в каждом DC для низкой latency и fault isolation. Schema Registry хранит состояние в Kafka-топике _schemas — синхронизация достигается через репликацию этого топика между DC (Confluent Replicator или MirrorMaker 2). Вариант A создаёт единую точку отказа и WAN-зависимость для каждого сообщения. Вариант D недопустим: разные schema_id для одних схем сломает десериализацию при чтении данных из другого DC.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m06-01-q3",
+      "type": "multiple-choice",
+      "question": "Schema Registry возвращает schema_id при регистрации. Consumer читает сообщение и получает schema_id из wire format. Что произойдёт, если Schema Registry недоступен в момент десериализации?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Consumer прочитает payload как raw bytes и пропустит схемную валидацию"
+        },
+        {
+          "id": "b",
+          "text": "Consumer запросит схему из Kafka топика _schemas напрямую, минуя Schema Registry"
+        },
+        {
+          "id": "c",
+          "text": "Consumer использует кэш схем — если схема была получена ранее по данному schema_id, десериализация пройдёт успешно; для нового schema_id — исключение"
+        },
+        {
+          "id": "d",
+          "text": "Consumer повторит попытку получить schema бесконечно до восстановления Schema Registry"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "KafkaAvroDeserializer кэширует схемы локально по schema_id. Если схема для данного ID уже была получена ранее — кэш используется независимо от доступности Schema Registry. Это важная характеристика устойчивости: запущенный consumer продолжает работу при временном недоступности SR, если все встречаемые schema_id уже кэшированы. Для нового (некэшированного) schema_id — десериализатор выбросит исключение, так как не может получить схему.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m06-01-q4",
+      "type": "true-false",
+      "question": "Schema Registry хранит все зарегистрированные схемы в специальном Kafka-топике с именем _schemas.",
+      "correctAnswer": "true",
+      "explanation": "Верно. Schema Registry является stateless HTTP-сервисом: всё его состояние (схемы, версии, конфигурация совместимости) хранится в compacted Kafka-топике _schemas. При перезапуске Schema Registry восстанавливает состояние из этого топика. Это означает, что Schema Registry требует работающего Kafka-кластера и что его данные надёжны ровно настолько, насколько надёжен топик _schemas (replication factor, rack awareness и т.д.).",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}
