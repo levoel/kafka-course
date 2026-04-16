@@ -1,0 +1,142 @@
+---
+title: "Итоги модуля: Безопасность"
+description: "Обзор ключевых концепций безопасности Kafka -- checklist для production-кластера"
+order: 6
+difficulty: "advanced"
+estimatedTime: 10
+topics: ["Security Summary", "Production Checklist"]
+---
+
+# Итоги модуля: Безопасность
+
+Модуль 09 охватил все три уровня безопасности Kafka: аутентификацию, авторизацию и дополнительные механизмы защиты (квоты и аудит). Этот урок систематизирует ключевые концепции и даёт production checklist.
+
+---
+
+## Слои безопасности Kafka
+
+<DiagramContainer title="Слои безопасности Kafka: от транспорта до аудита" color="blue">
+  <div className="space-y-3 p-2">
+    <div className="text-center text-sm text-slate-400 mb-2">Каждый слой добавляет защиту. Все вместе — defence in depth.</div>
+    <FlowNode
+      variant="process"
+      tooltip="Мониторинг: JMX метрики ThrottleTimeMs, UnderReplicatedPartitions, RequestHandlerAvgIdlePercent. Алертинг на аномалии в quota utilization и ACL DENIED операции. Grafana + Prometheus + kafka-exporter."
+    >
+      Мониторинг (JMX метрики, Grafana)
+    </FlowNode>
+    <FlowNode
+      variant="process"
+      tooltip="Аудит: kafka.authorizer.logger логирует каждое ACL решение (ALLOW/DENY). Экспорт в SIEM для compliance (PCI DSS, HIPAA, SOC 2). Алертинг на DENIED операции и доступ к sensitive данным."
+    >
+      Аудит (Authorizer Log, SIEM export)
+    </FlowNode>
+    <FlowNode
+      variant="process"
+      tooltip="Квоты: producer_byte_rate, consumer_byte_rate, request_percentage. Защита multi-tenant кластера от noisy neighbor. Динамическая настройка через kafka-configs.sh без перезапуска."
+    >
+      Rate Limiting (Quotas: byte rate, request percentage)
+    </FlowNode>
+    <FlowNode
+      variant="process"
+      tooltip="Авторизация: StandardAuthorizer + ACL. allow.everyone.if.no.acl.found=false (deny by default). Namespace-based PREFIXED ACL per service. Принцип минимальных привилегий."
+    >
+      Авторизация (ACL: StandardAuthorizer, PREFIXED rules)
+    </FlowNode>
+    <FlowNode
+      variant="process"
+      tooltip="Аутентификация: SASL механизм определяет principal. SCRAM-SHA-256 для username/password. OAUTHBEARER для JWT/IdP integration. GSSAPI для Kerberos enterprise. Credentials в JAAS config."
+    >
+      Аутентификация (SASL: SCRAM / OAUTHBEARER / GSSAPI)
+    </FlowNode>
+    <FlowNode
+      variant="sink"
+      tooltip="Сеть: TLS 1.2/1.3 шифрование канала. security.protocol=SASL_SSL. ssl.endpoint.identification.algorithm=https для защиты от MITM. Keystore (сертификат) + Truststore (CA) на каждой стороне."
+    >
+      Сеть (TLS: SASL_SSL, endpoint identification)
+    </FlowNode>
+  </div>
+</DiagramContainer>
+
+---
+
+## Production Security Checklist
+
+### Сеть и шифрование
+
+| Параметр | Рекомендуемое значение | Зачем |
+|----------|----------------------|-------|
+| `security.protocol` | `SASL_SSL` | SASL аутентификация + TLS шифрование |
+| `ssl.enabled.protocols` | `TLSv1.3,TLSv1.2` | Запрет устаревших TLS версий |
+| `ssl.endpoint.identification.algorithm` | `https` | Защита от MITM (hostname verification) |
+| `ssl.client.auth` | `required` (mTLS) или `none` (one-way TLS) | mTLS добавляет аутентификацию по сертификату |
+| `security.inter.broker.protocol` | `SASL_SSL` | Шифрование inter-broker трафика |
+
+### Аутентификация
+
+| Параметр | Рекомендуемое значение | Зачем |
+|----------|----------------------|-------|
+| `sasl.mechanism.inter.broker.protocol` | `SCRAM-SHA-256` | Безопасная inter-broker аутентификация |
+| `listener.name.*.sasl.enabled.mechanisms` | `SCRAM-SHA-256` (или `OAUTHBEARER`) | Запрет слабых механизмов (PLAIN только в dev) |
+| Управление users (SCRAM) | `kafka-configs.sh` | Динамически, без перезапуска |
+
+### Авторизация
+
+| Параметр | Рекомендуемое значение | Зачем |
+|----------|----------------------|-------|
+| `authorizer.class.name` | `org.apache.kafka.metadata.authorizer.StandardAuthorizer` | KRaft-нативный authorizer (Kafka 4.0) |
+| `allow.everyone.if.no.acl.found` | `false` | Deny by default — без ACL = запрет |
+| `super.users` | `User:admin;User:kafka-broker` | Минимум super users — только admin и broker |
+| ACL стратегия | PREFIXED per-service namespace | Один ACL для всех топиков сервиса |
+
+### Квоты и аудит
+
+| Параметр | Рекомендуемое значение | Зачем |
+|----------|----------------------|-------|
+| `producer_byte_rate` (default) | Исходя из суммарного I/O / n клиентов | Защита от noisy neighbor by default |
+| `consumer_byte_rate` (default) | Исходя из суммарного I/O / n клиентов | Равномерное распределение fetch bandwidth |
+| `kafka.authorizer.logger` level | `INFO` | Каждое ACL решение в log |
+| Audit log destination | `/var/log/kafka/kafka-authorizer.log` + SIEM | Compliance и incident response |
+
+---
+
+## Типичные ошибки в production
+
+**"Consumer получает TopicAuthorizationException, но ACL на топик есть"**
+Забыт ACL на consumer group. Consumer требует: Topic:Read + Topic:Describe + Group:Read.
+
+**"Transactional producer получает ClusterAuthorizationException"**
+Забыт Cluster:IdempotentWrite. Transactional producers всегда idempotent — нужен этот ACL.
+
+**"allow.everyone.if.no.acl.found=true в production"**
+Это разрешает всё всем. Нужно `false` с явными ACL per-service.
+
+**"SASL/PLAIN без SSL"**
+SASL/PLAIN через незашифрованный канал = credentials в plaintext. Всегда `security.protocol=SASL_SSL`.
+
+**"Нет default quota"**
+Новый сервис без квоты может захватить весь I/O. Всегда устанавливайте разумный default для `producer_byte_rate` и `consumer_byte_rate`.
+
+---
+
+## Связь с другими модулями
+
+- **Модуль 01 (Архитектура)**: `listeners`, `advertised.listeners`, `listener.security.protocol.map` — фундамент для security конфигурации.
+- **Модуль 02 (Producers)**: `transactional.id`, `enable.idempotence` — требуют специфических ACL (TransactionalId:Write, Cluster:IdempotentWrite).
+- **Модуль 03 (Consumers)**: consumer groups требуют Group:Read ACL.
+- **Модуль 10 (Production Ops)**: JMX метрики quota throttling, мониторинг security аномалий через Grafana.
+
+---
+
+## Ключевые выводы модуля
+
+1. **Security protocol**: PLAINTEXT (dev), SSL (шифрование), SASL_PLAINTEXT (SASL без TLS), SASL_SSL (production standard).
+2. **SSL/TLS**: keystore (ваш сертификат) + truststore (доверенные CA). mTLS при `ssl.client.auth=required`.
+3. **SASL**: PLAIN (dev, статические credentials), SCRAM (production username/password), OAUTHBEARER (JWT + IdP), GSSAPI (Kerberos).
+4. **ACL**: StandardAuthorizer (Kafka 4.0 KRaft). Deny by default. PREFIXED для service namespace. Минимальные привилегии.
+5. **Квоты**: `producer_byte_rate`, `consumer_byte_rate`, `request_percentage`. Динамические. Default для all.
+6. **Аудит**: `kafka.authorizer.logger` — каждое решение авторизации. Экспорт в SIEM для compliance.
+
+<KnowledgeCheck
+  question="Ваш новый Kafka-кластер запущен в production. Команда безопасности проводит аудит и находит следующее: (1) security.protocol=SASL_PLAINTEXT, (2) allow.everyone.if.no.acl.found=true, (3) нет default quota на producer_byte_rate, (4) kafka.authorizer.logger отключён. Какие риски несёт каждый пункт и какие конфигурационные изменения нужны?"
+  answer="(1) SASL_PLAINTEXT: SASL credentials (username/password) передаются по незашифрованному каналу. Любой в сети может перехватить traffic и извлечь credentials. Исправление: security.protocol=SASL_SSL + SSL keystore/truststore конфигурация на брокерах и клиентах. (2) allow.everyone.if.no.acl.found=true: любой аутентифицированный пользователь имеет полный доступ ко всем топикам при отсутствии ACL. Один скомпрометированный сервис-аккаунт = полный доступ ко всем данным. Исправление: allow.everyone.if.no.acl.found=false + explicit ACL per service (минимальные привилегии). (3) Нет default quota: новый сервис или скомпрометированный producer может занять всю I/O bandwidth кластера, вызвав деградацию для всех клиентов. Исправление: kafka-configs.sh --alter --add-config 'producer_byte_rate=10485760' --entity-type users --entity-default. (4) Authorizer logger отключён: нет записей о том, кто и когда обращался к данным. Невозможно расследовать инциденты или выполнить compliance аудит. Исправление: log4j2.xml с Logger name=kafka.authorizer.logger level=INFO + RollingFile appender в отдельный файл + Filebeat/Fluentd для экспорта в SIEM."
+/>

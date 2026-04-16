@@ -1,0 +1,377 @@
+---
+title: "Авторизация с ACL"
+description: "Kafka ACL -- ресурсы, операции, principals, pattern matching. От простых правил к production-стратегии авторизации"
+order: 4
+difficulty: "advanced"
+estimatedTime: 30
+topics: ["ACL", "Authorization", "StandardAuthorizer", "Resource Types", "Operations", "LITERAL", "PREFIXED", "kafka-acls.sh"]
+---
+
+# Авторизация с ACL
+
+Аутентификация отвечает на вопрос "кто вы?". Авторизация отвечает на вопрос "что вам разрешено?". В Kafka авторизация реализована через ACL (Access Control Lists) — явные правила, определяющие, какой principal может выполнять какие операции с какими ресурсами.
+
+---
+
+## Authorizer в Kafka 4.0 (KRaft)
+
+В Kafka 4.0 используется `StandardAuthorizer` — KRaft-нативный authorizer. Его предшественник `AclAuthorizer` хранил ACL в ZooKeeper и полностью удалён вместе с ZooKeeper.
+
+```properties
+# ВАЖНО: только StandardAuthorizer в Kafka 4.0
+# AclAuthorizer (kafka.security.authorizer.AclAuthorizer) — УДАЛЁН
+authorizer.class.name=org.apache.kafka.metadata.authorizer.StandardAuthorizer
+
+# Deny by default: если для операции нет ACL — ЗАПРЕТ
+allow.everyone.if.no.acl.found=false
+
+# Super users: обходят все ACL-проверки
+super.users=User:admin;User:kafka-controller
+
+# Разрешить старт брокера до загрузки всех ACL из metadata log
+early.start.listeners=CONTROLLER
+```
+
+<Callout type="warning">
+allow.everyone.if.no.acl.found=true (default в dev-конфигурациях) разрешает ВСЕ операции ВСЕМ пользователям при отсутствии ACL. В production ОБЯЗАТЕЛЬНО false. Одна неправильная настройка = полный доступ ко всем данным.
+</Callout>
+
+ACL в Kafka 4.0 хранятся в `__cluster_metadata` internal topic (KRaft log контроллера). Изменения ACL применяются через `kafka-acls.sh` и реплицируются на все брокеры через KRaft consensus.
+
+---
+
+## ACL Resource Hierarchy
+
+<AclHierarchyDiagram client:visible />
+
+Диаграмма выше показывает иерархию ресурсов и матрицу операций. Каждый ACL определяет: **principal** (кому), **operation** (что разрешено), **resource type + name** (на каком ресурсе), **permission type** (ALLOW или DENY).
+
+---
+
+## Resource Types: пять типов ресурсов
+
+### Topic
+
+Самый частый тип. ACL на топик контролирует produce и consume.
+
+<DiagramContainer title="Topic: операции" color="blue">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <DataBox
+        label="Read"
+        tooltip="Consume из топика. Читать сообщения через FetchRequest. ВАЖНО: для consume нужны ОБА — Read на Topic И Read на Group (для commit offsets). Только Read на Topic без Group ACL — consumer не сможет присоединиться к consumer group."
+      >
+        Consume из топика. Требует также Read на Group.
+      </DataBox>
+      <DataBox
+        label="Write"
+        tooltip="Produce в топик. Отправлять ProduceRequest. Для транзакционного producer дополнительно нужен Write на TransactionalId и IdempotentWrite на Cluster."
+      >
+        Produce в топик. Для транзакций — также Write на TransactionalId.
+      </DataBox>
+      <DataBox
+        label="Create"
+        tooltip="Авто-создание топика при первом produce. Если auto.create.topics.enable=true на брокере и producer пишет в несуществующий топик — нужен Create на Cluster или Create на Topic. В production обычно auto.create.topics.enable=false."
+      >
+        Авто-создание топика. Или явное создание через AdminClient.
+      </DataBox>
+      <DataBox
+        label="Describe"
+        tooltip="Получение метаданных топика: количество партиций, replica assignment, leader. Без Describe consumer не может выполнить metadata refresh и не знает, к какому брокеру обращаться. Часто забывают — и получают 'TopicAuthorizationException' при metadata запросе."
+      >
+        Metadata: партиции, лидер. Обязателен для producer и consumer.
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+### Group
+
+Consumer Group ACL контролирует участие в consumer group.
+
+<DiagramContainer title="Group: операции" color="emerald">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <DataBox
+        label="Read"
+        tooltip="Присоединиться к consumer group (JoinGroup request), commit offsets (OffsetCommit request), fetch committed offsets (OffsetFetch). Это самый важный ACL для consumer: без Read на Group consumer не может использовать consumer group."
+      >
+        Join group. Commit offsets. OffsetFetch.
+      </DataBox>
+      <DataBox
+        label="Describe"
+        tooltip="Описать consumer group: список членов, их partition assignment, committed offsets, group lag. Используется kafka-consumer-groups.sh --describe и AdminClient.describeConsumerGroups(). Нужен для мониторинга и диагностики lag без участия в группе."
+      >
+        Описать группу: члены, lag, offsets. Мониторинг без участия в группе.
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+### Cluster
+
+Cluster-level операции: AdminClient действия и inter-broker.
+
+<DiagramContainer title="Cluster: операции" color="violet">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <DataBox
+        label="Create"
+        tooltip="Создание топиков через AdminClient.createTopics(). Отличается от Topic:Create: здесь это операция на уровне кластера через AdminClient, не авто-создание через produce. В production: только admin service имеет Cluster:Create."
+      >
+        Создание топиков через AdminClient.
+      </DataBox>
+      <DataBox
+        label="IdempotentWrite"
+        tooltip="Включить idempotent producer (enable.idempotence=true). Idempotent producer получает Producer ID от брокера. Без Cluster:IdempotentWrite idempotent producer получит ClusterAuthorizationException. Требуется для любого producer с enable.idempotence=true или acks=all."
+      >
+        Idempotent producer (enable.idempotence=true). Обязателен для transactional.
+      </DataBox>
+      <DataBox
+        label="ClusterAction"
+        tooltip="Внутренние broker-to-broker операции: репликация (LeaderAndIsr, StopReplica), controller действия. Эту операцию должны иметь только брокеры (kafka-broker principal). Клиентские приложения никогда не нуждаются в ClusterAction."
+      >
+        Inter-broker репликация и controller действия. Только для брокеров.
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+### TransactionalId
+
+Transactional producer использует `transactional.id` для гарантии exactly-once. ACL на TransactionalId контролирует, кто может использовать конкретный transactional.id.
+
+```
+Write on TransactionalId: инициализировать транзакцию (initTransactions)
+Describe on TransactionalId: описать транзакционное состояние
+```
+
+### DelegationToken
+
+Delegation tokens позволяют сервисам делегировать аутентификацию другим компонентам без передачи credentials.
+
+---
+
+## PatternType: LITERAL vs PREFIXED
+
+PatternType определяет, как имя ресурса в ACL сопоставляется с реальными ресурсами.
+
+<DiagramContainer title="LITERAL vs PREFIXED Pattern Matching" color="blue">
+  <div className="space-y-4 p-2">
+    <div className="text-center text-sm text-slate-400 mb-2">PatternType определяет область применения ACL</div>
+    <FlowRow>
+      <DataBox
+        label="LITERAL (точное совпадение)"
+        tooltip="ACL применяется только к ресурсу с точно таким именем. --topic orders применяется только к топику 'orders'. Топики 'orders-created', 'orders-archive' — НЕ покрываются. Используйте LITERAL когда сервис работает с конкретным топиком."
+      >
+        --topic orders → только топик 'orders'. Точное совпадение имени.
+      </DataBox>
+      <DataBox
+        label="PREFIXED (по префиксу)"
+        tooltip="ACL применяется ко всем ресурсам, начинающихся с указанного префикса. --topic 'orders.' --resource-pattern-type prefixed применяется к 'orders.created', 'orders.updated', 'orders.archived' и любому другому топику с prefix 'orders.'. Идеально для service namespace ownership."
+      >
+        --topic 'orders.' --resource-pattern-type prefixed → все топики начиная с 'orders.'
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+---
+
+## kafka-acls.sh: команды
+
+### Выдать права producer
+
+```bash
+# Producer: Write + Describe на топик (минимум для produce)
+kafka-acls.sh --bootstrap-server localhost:9092 \
+  --command-config admin.properties \
+  --add \
+  --allow-principal User:producer-app \
+  --operation Write \
+  --operation Describe \
+  --topic orders
+```
+
+### Выдать права consumer
+
+```bash
+# Consumer: Read на топик + Read на consumer group
+kafka-acls.sh --bootstrap-server localhost:9092 \
+  --command-config admin.properties \
+  --add \
+  --allow-principal User:consumer-app \
+  --operation Read \
+  --operation Describe \
+  --topic orders
+
+kafka-acls.sh --bootstrap-server localhost:9092 \
+  --command-config admin.properties \
+  --add \
+  --allow-principal User:consumer-app \
+  --operation Read \
+  --group consumer-group-1
+```
+
+### Transactional producer (минимальный набор ACL)
+
+```bash
+# 1. Write + Describe на топик
+kafka-acls.sh --add --allow-principal User:txn-producer \
+  --operation Write --operation Describe --topic orders
+
+# 2. Write на TransactionalId
+kafka-acls.sh --add --allow-principal User:txn-producer \
+  --operation Write \
+  --transactional-id txn-orders
+
+# 3. Idempotent write на кластере
+kafka-acls.sh --add --allow-principal User:txn-producer \
+  --operation IdempotentWrite \
+  --cluster
+
+# Если consumer group тоже нужна (transactional consumer):
+kafka-acls.sh --add --allow-principal User:txn-producer \
+  --operation Read --group txn-group
+```
+
+### PREFIXED ACL для service namespace
+
+```bash
+# Payments service: все топики с prefix 'payments.'
+kafka-acls.sh --bootstrap-server localhost:9092 \
+  --add \
+  --allow-principal User:payments-svc \
+  --operation Write --operation Read --operation Describe \
+  --topic 'payments.' \
+  --resource-pattern-type prefixed
+
+# Payments service: все consumer groups с prefix 'payments-'
+kafka-acls.sh --bootstrap-server localhost:9092 \
+  --add \
+  --allow-principal User:payments-svc \
+  --operation Read \
+  --group 'payments-' \
+  --resource-pattern-type prefixed
+```
+
+### Просмотр и удаление ACL
+
+```bash
+# Список всех ACL на топик 'orders'
+kafka-acls.sh --bootstrap-server localhost:9092 \
+  --command-config admin.properties \
+  --list --topic orders
+
+# Список всех ACL в кластере
+kafka-acls.sh --bootstrap-server localhost:9092 \
+  --command-config admin.properties \
+  --list
+
+# Удалить ACL
+kafka-acls.sh --bootstrap-server localhost:9092 \
+  --remove \
+  --allow-principal User:old-producer \
+  --operation Write --topic orders
+```
+
+---
+
+## ACL-стратегия для production
+
+### Namespace-based подход
+
+Каждый сервис владеет namespace (prefix) для своих ресурсов. Payments service создаёт топики `payments.transactions`, `payments.refunds`, `payments.events` — и получает PREFIXED ACL на `payments.`.
+
+```
+Сервис            Prefix          ACL pattern type
+payments-svc    → payments.     → PREFIXED Write на Topic
+orders-svc      → orders.       → PREFIXED Write на Topic
+notifications   → notify.       → PREFIXED Write на Topic
+```
+
+**Преимущества:**
+- Один ACL вместо N ACL при добавлении нового топика.
+- Сервис не может случайно записать в чужой namespace.
+- Понятная модель ownership.
+
+### Принцип минимальных привилегий
+
+<Callout type="tip">
+Начните с deny-by-default (allow.everyone.if.no.acl.found=false) и super.users для admin. Затем добавляйте ACL per-service по мере необходимости. Принцип минимальных привилегий: каждый сервис имеет ровно те права, которые нужны для его работы — не больше.
+</Callout>
+
+Отдельные principals для каждого приложения — никогда не делите credentials между сервисами. Если сервис A скомпрометирован — только его credentials отзываются, остальные в безопасности.
+
+### Deny ACL для инцидент-реагирования
+
+```bash
+# Немедленно заблокировать скомпрометированный сервис
+kafka-acls.sh --add \
+  --deny-principal User:compromised-app \
+  --operation All \
+  --topic '*' \
+  --resource-pattern-type prefixed \
+  --group '*' \
+  --resource-pattern-type prefixed
+```
+
+DENY ACL имеет приоритет над ALLOW ACL — даже если у principal есть разрешающее правило, DENY перекрывает его.
+
+---
+
+## ACL и SASL principal mapping
+
+Как Kafka формирует principal из SASL аутентификации:
+
+| SASL механизм | Principal формат | Пример |
+|--------------|-----------------|--------|
+| PLAIN | `User:<username>` | `User:alice` |
+| SCRAM | `User:<username>` | `User:producer-app` |
+| OAUTHBEARER | `User:<claim>` (по умолчанию `sub`) | `User:kafka-producer-client-id` |
+| GSSAPI | `User:<kerberos-principal>` | `User:alice@EXAMPLE.COM` |
+| mTLS | `User:<CN из сертификата>` | `User:payment-service` |
+
+Для OAUTHBEARER можно настроить, какой JWT claim использовать как principal:
+
+```properties
+# Использовать claim 'preferred_username' вместо 'sub'
+sasl.oauthbearer.sub.claim.name=preferred_username
+```
+
+Для полной кастомизации — `principal.builder.class` с реализацией `KafkaPrincipalBuilder`.
+
+---
+
+## Типичные ошибки с ACL
+
+**Consumer не может consume из топика:**
+- Забыли Group:Read ACL (consumer не может join/commit в consumer group).
+- Забыли Topic:Describe (metadata refresh failing).
+
+**Transactional producer получает ошибку:**
+- Забыли Cluster:IdempotentWrite.
+- Забыли TransactionalId:Write.
+
+**Service создаёт топики через AdminClient:**
+- Нужен Cluster:Create (не Topic:Create).
+
+**PREFIXED ACL не работает:**
+- Убедитесь, что указали `--resource-pattern-type prefixed` в kafka-acls.sh.
+- По умолчанию тип `LITERAL` — при отсутствии флага создаётся LITERAL ACL.
+
+---
+
+## Ключевые выводы
+
+1. Kafka 4.0 использует `StandardAuthorizer` — ACL в KRaft metadata log. `AclAuthorizer` удалён.
+2. `allow.everyone.if.no.acl.found=false` — обязательно в production. Deny by default.
+3. Consumer minimum: Topic:Read + Topic:Describe + Group:Read. Producer minimum: Topic:Write + Topic:Describe.
+4. Transactional producer дополнительно: TransactionalId:Write + Cluster:IdempotentWrite.
+5. PREFIXED ACL для service namespace ownership — один ACL для всех топиков сервиса.
+6. DENY ACL для инцидент-реагирования: перекрывает ALLOW ACL.
+
+<KnowledgeCheck
+  question="Сервис order-processor использует transactional producer (transactional.id=order-txn) для записи в топик orders-enriched и коммита offset-ов consumer group order-processor-group. Какие ACL (минимум) необходимы для этого сервиса?"
+  answer="Минимальный набор ACL для сервиса order-processor: 1. Topic:Write на 'orders-enriched' — produce в топик. 2. Topic:Describe на 'orders-enriched' — metadata refresh. 3. TransactionalId:Write на 'order-txn' — initTransactions для transactional producer. 4. Cluster:IdempotentWrite — для idempotent producer (transactional producer всегда idempotent). 5. Topic:Read на исходный топик (если сервис также читает, например 'orders-raw') + Topic:Describe. 6. Group:Read на 'order-processor-group' — join group + commit offsets. Если топик 'orders-raw' не нужен — минимум: 4 ACL (Topic:Write+Describe на orders-enriched, TransactionalId:Write на order-txn, Cluster:IdempotentWrite, Group:Read на order-processor-group)."
+/>
