@@ -1,0 +1,103 @@
+# Kafka (Confluent Platform 7.9) KRaft + Schema Registry 7.9 + ksqlDB 7.9 + ksqlDB CLI
+#
+# Примечание по выбору образа брокера:
+#   confluentinc/cp-kafka:7.9.0 (Kafka 3.9.x) используется вместо apache/kafka:4.0.0,
+#   так как confluentinc/cp-ksqldb-server:7.9.0 официально поддерживает
+#   Confluent Platform 7.9 / Kafka 3.9.x. Режим KRaft включён — ZooKeeper не нужен.
+#
+# Запуск: docker compose up -d
+# Проверка:
+#   curl http://localhost:8088/info          # ksqlDB info
+#   docker compose exec ksqldb-cli ksql http://ksqldb-server:8088
+# Остановка: docker compose down -v
+
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.9.0
+    container_name: kafka-streams-lab
+    ports:
+      - "9092:9092"
+    environment:
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      # PLAINTEXT — для клиентов (Schema Registry, ksqlDB)
+      # CONTROLLER — для внутренней KRaft-коммуникации
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      # Schema Registry и ksqlDB обращаются к брокеру по имени сервиса 'kafka'
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      # Единственный KRaft voter — этот же узел
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_DIRS: /var/kafka/logs
+    volumes:
+      - kafka-data:/var/kafka/logs
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.9.0
+    container_name: schema-registry-streams-lab
+    ports:
+      - "8081:8081"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      # Schema Registry хранит схемы в топике _schemas на брокере kafka:9092
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:9092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/subjects"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  ksqldb-server:
+    image: confluentinc/cp-ksqldb-server:7.9.0
+    container_name: ksqldb-server-lab
+    ports:
+      - "8088:8088"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    environment:
+      KSQL_BOOTSTRAP_SERVERS: kafka:9092
+      KSQL_LISTENERS: http://0.0.0.0:8088
+      # ksql.service.id — префикс для внутренних топиков ksqlDB (команды persistent queries)
+      KSQL_KSQL_SERVICE_ID: streams-lab
+      # Интеграция с Schema Registry для Avro/Protobuf value_format
+      KSQL_KSQL_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      # Автоматическое создание внутренних топиков для логирования обработки
+      KSQL_KSQL_LOGGING_PROCESSING_STREAM_AUTO_CREATE: "true"
+      KSQL_KSQL_LOGGING_PROCESSING_TOPIC_AUTO_CREATE: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/info"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  ksqldb-cli:
+    image: confluentinc/cp-ksqldb-cli:7.9.0
+    container_name: ksqldb-cli-lab
+    depends_on:
+      ksqldb-server:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    tty: true
+
+volumes:
+  kafka-data:
