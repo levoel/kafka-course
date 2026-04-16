@@ -1,3 +1,601 @@
 {
-  "categories": []
+  "categories": [
+    {
+      "id": "kafka-fundamentals",
+      "name": "Основы Kafka",
+      "terms": [
+        {
+          "term": "Распределённый журнал фиксации",
+          "termEn": "Distributed Commit Log",
+          "definition": "Фундаментальная абстракция Apache Kafka: упорядоченная, неизменяемая последовательность записей, реплицированная по нескольким брокерам. Каждая запись добавляется в конец лога и сохраняет своё смещение навсегда. Именно эта модель отличает Kafka от традиционных очередей сообщений: потребители читают лог независимо, не удаляя записи.",
+          "example": "# Kafka как commit log:\n# Запись добавляется в конец, offset монотонно растёт\n# offset: 0  1  2  3  4  5  6\n# data:   A  B  C  D  E  F  G\n#                          ^--- Log End Offset (LEO)\n# Consumer group A читает с offset 3\n# Consumer group B читает с offset 6\n# Записи не удаляются после чтения",
+          "relatedLessons": [
+            { "title": "Зачем нужна Kafka", "slug": "00-course-intro/01-why-kafka" },
+            { "title": "Архитектура Kafka", "slug": "01-kafka-architecture/01-core-concepts" }
+          ]
+        },
+        {
+          "term": "Брокер",
+          "termEn": "Broker",
+          "definition": "Отдельный процесс сервера Kafka, хранящий данные и обслуживающий запросы продюсеров и потребителей. Каждый брокер идентифицируется уникальным числом broker.id и обслуживает набор партиций. Брокеры образуют кластер, обмениваясь метаданными через протокол KRaft или (исторически) через ZooKeeper.",
+          "example": "# server.properties — базовая конфигурация брокера\nbroker.id=1\nlisteners=PLAINTEXT://0.0.0.0:9092\nadvertised.listeners=PLAINTEXT://kafka-1.example.com:9092\nlog.dirs=/var/kafka/data\nnum.partitions=3\ndefault.replication.factor=3\nmin.insync.replicas=2",
+          "relatedLessons": [
+            { "title": "Брокеры и кластер", "slug": "01-kafka-architecture/02-brokers-cluster" }
+          ]
+        },
+        {
+          "term": "Топик",
+          "termEn": "Topic",
+          "definition": "Именованный логический канал для организации потока событий в Kafka. Топик разбивается на партиции, каждая из которых является независимым упорядоченным логом. Топик не привязан к конкретному брокеру: его партиции могут быть распределены по всему кластеру. Retention-политика определяет, как долго хранятся записи.",
+          "example": "# Создание топика через CLI\nkafka-topics.sh --bootstrap-server localhost:9092 \\\n  --create \\\n  --topic orders \\\n  --partitions 12 \\\n  --replication-factor 3 \\\n  --config retention.ms=604800000 \\\n  --config cleanup.policy=delete",
+          "relatedLessons": [
+            { "title": "Топики и партиции", "slug": "01-kafka-architecture/03-topics-partitions" }
+          ]
+        },
+        {
+          "term": "Партиция",
+          "termEn": "Partition",
+          "definition": "Базовая единица параллелизма и хранения в Kafka. Партиция представляет собой упорядоченный, только-для-добавления лог записей. Каждая партиция хранится на одном брокере-лидере и реплицируется на несколько брокеров-фолловеров. Количество партиций определяет максимальный параллелизм чтения в потребительской группе.",
+          "example": "# Топик 'orders' с 3 партициями на кластере из 3 брокеров:\n# Partition 0: Leader=broker-1, Replicas=[1,2,3], ISR=[1,2,3]\n# Partition 1: Leader=broker-2, Replicas=[2,3,1], ISR=[2,3,1]\n# Partition 2: Leader=broker-3, Replicas=[3,1,2], ISR=[3,1,2]\n\nkafka-topics.sh --describe --topic orders --bootstrap-server localhost:9092",
+          "relatedLessons": [
+            { "title": "Топики и партиции", "slug": "01-kafka-architecture/03-topics-partitions" }
+          ]
+        },
+        {
+          "term": "Смещение",
+          "termEn": "Offset",
+          "definition": "Уникальный монотонно возрастающий целочисленный идентификатор записи внутри конкретной партиции. Смещение позволяет потребителям точно отслеживать позицию чтения: в случае перезапуска потребитель возобновляет чтение с последнего зафиксированного смещения. Смещения хранятся во внутреннем топике __consumer_offsets.",
+          "example": "# Фиксация смещения вручную в Java\nconsumer.poll(Duration.ofMillis(100)).forEach(record -> {\n    processRecord(record);\n    // Фиксация после обработки каждой записи\n    consumer.commitSync(Collections.singletonMap(\n        new TopicPartition(record.topic(), record.partition()),\n        new OffsetAndMetadata(record.offset() + 1)\n    ));\n});",
+          "relatedLessons": [
+            { "title": "Смещения и коммиты", "slug": "03-consumers/03-offsets-commits" }
+          ]
+        },
+        {
+          "term": "Сегмент лога",
+          "termEn": "Log Segment",
+          "definition": "Физический файл на диске, в котором хранится часть записей партиции. Каждая партиция состоит из одного активного и нескольких закрытых сегментов. Kafka создаёт новый сегмент при достижении порога log.segment.bytes или log.roll.ms. К каждому сегменту прилагаются индексные файлы (.index, .timeindex) для быстрого поиска по смещению и времени.",
+          "example": "# Структура файлов партиции на диске\n/var/kafka/data/orders-0/\n  00000000000000000000.log       # сегмент от offset 0\n  00000000000000000000.index     # индекс смещений\n  00000000000000000000.timeindex # индекс по времени\n  00000000000001048576.log       # следующий сегмент\n  00000000000001048576.index\n  00000000000001048576.timeindex",
+          "relatedLessons": [
+            { "title": "Хранение данных", "slug": "04-kafka-internals/01-storage" }
+          ]
+        },
+        {
+          "term": "Кластер Kafka",
+          "termEn": "Kafka Cluster",
+          "definition": "Совокупность брокеров Kafka, совместно обслуживающих топики и обеспечивающих высокую доступность. В режиме KRaft часть брокеров выполняет роль контроллеров, формируя кворум метаданных. Клиенты подключаются к любому брокеру через bootstrap-список и автоматически получают актуальные метаданные обо всём кластере.",
+          "example": "# Подключение клиента к кластеру\nbootstrap.servers=kafka-1:9092,kafka-2:9092,kafka-3:9092\n\n# Клиент запрашивает метаданные у первого доступного брокера\n# и узнаёт адреса всех брокеров и лидеров партиций\n# Последующие запросы идут напрямую к нужному брокеру",
+          "relatedLessons": [
+            { "title": "Брокеры и кластер", "slug": "01-kafka-architecture/02-brokers-cluster" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "replication-consensus",
+      "name": "Репликация и консенсус",
+      "terms": [
+        {
+          "term": "ISR (In-Sync Replicas)",
+          "termEn": "ISR (In-Sync Replicas)",
+          "definition": "Множество реплик партиции, которые отстают от лидера не более чем на replica.lag.time.max.ms миллисекунд. Только записи, подтверждённые всеми репликами из ISR, считаются зафиксированными (committed). Если реплика выходит из ISR, лидер может продолжить работу; если ISR сжимается ниже min.insync.replicas, лидер начинает отклонять записи продюсеров с acks=all.",
+          "example": "# Мониторинг ISR через CLI\nkafka-topics.sh --describe --topic orders --bootstrap-server localhost:9092\n# Topic: orders  Partition: 0  Leader: 1  Replicas: 1,2,3  ISR: 1,2  Offline: 3\n# ^ broker-3 выпал из ISR — под-реплицированная партиция!\n\n# JMX метрика: kafka.server:type=ReplicaManager,name=UnderReplicatedPartitions",
+          "relatedLessons": [
+            { "title": "Репликация", "slug": "01-kafka-architecture/04-replication" },
+            { "title": "Внутреннее устройство репликации", "slug": "04-kafka-internals/02-replication-internals" }
+          ]
+        },
+        {
+          "term": "High Watermark (HW)",
+          "termEn": "High Watermark (HW)",
+          "definition": "Максимальное смещение в партиции, которое подтверждено всеми репликами из ISR. Потребители не могут прочитать записи выше High Watermark: это гарантирует, что они видят только зафиксированные данные, которые не будут потеряны при сбое лидера. Лидер периодически сообщает фолловерам актуальное значение HW через ответы на Fetch-запросы.",
+          "example": "# Соотношение LEO и HW:\n# Leader LEO = 10, Follower-1 LEO = 10, Follower-2 LEO = 8\n# ISR = {Leader, Follower-1, Follower-2}\n# HW = min(LEO всех в ISR) = 8\n# Потребитель прочитает только offset 0..7\n# После репликации Follower-2: HW продвинется до 10\n\n# JMX: kafka.log:type=Log,name=LogEndOffset,topic=orders,partition=0",
+          "relatedLessons": [
+            { "title": "Репликация", "slug": "01-kafka-architecture/04-replication" },
+            { "title": "High Watermark и гарантии", "slug": "04-kafka-internals/02-replication-internals" }
+          ]
+        },
+        {
+          "term": "LEO (Log End Offset)",
+          "termEn": "LEO (Log End Offset)",
+          "definition": "Смещение следующей записи, которая будет добавлена в лог партиции на данной реплике. LEO на лидере всегда больше или равен LEO любого фолловера. Разница между LEO лидера и LEO фолловера определяет отставание реплики. Когда все реплики из ISR достигают одного LEO, High Watermark продвигается до этого значения.",
+          "example": "# Состояние реплик партиции\n# Запись смещений на каждой реплике:\n# Leader:     LEO=15  (принял все записи)\n# Follower-1: LEO=15  (в ISR, в синхронизации)\n# Follower-2: LEO=12  (отстаёт, ещё в ISR)\n# Follower-3: LEO=5   (выбыл из ISR)\n# HW = 12 (min LEO среди ISR)\n# Лаг Follower-2: 15 - 12 = 3 записи",
+          "relatedLessons": [
+            { "title": "Репликация", "slug": "01-kafka-architecture/04-replication" },
+            { "title": "High Watermark и гарантии", "slug": "04-kafka-internals/02-replication-internals" }
+          ]
+        },
+        {
+          "term": "Leader Epoch (эпоха лидера)",
+          "termEn": "Leader Epoch",
+          "definition": "Монотонно возрастающий счётчик, увеличивающийся при каждой смене лидера партиции. Epoch служит fencing-токеном: новый лидер использует epoch для обнаружения и отклонения устаревших запросов от бывшего лидера. Это предотвращает сценарий split-brain, когда два брокера одновременно считают себя лидером и могут записывать конфликтующие данные.",
+          "example": "# Формат ответа на Fetch-запрос фолловера\n# LeaderEpoch передаётся с каждым ответом\n# Фолловер проверяет: если epoch изменился, нужно усечь лог\n\n# Файл leader-epoch-checkpoint хранит историю\n# /var/kafka/data/orders-0/leader-epoch-checkpoint\n# 0\n# 3  (epoch=3 начался с offset=0)\n# 5  (epoch=5 начался с offset=200)\n# Epoch 5 — текущий лидер",
+          "relatedLessons": [
+            { "title": "Leader Election", "slug": "04-kafka-internals/03-leader-election" }
+          ]
+        },
+        {
+          "term": "KRaft (Kafka Raft)",
+          "termEn": "KRaft (Kafka Raft)",
+          "definition": "Встроенный протокол консенсуса Kafka (с версии 2.8, обязателен с 4.0), заменивший ZooKeeper. Метаданные кластера хранятся во внутреннем топике __cluster_metadata с фактором репликации, равным количеству контроллеров. Алгоритм Raft обеспечивает консенсус между контроллерами без внешних зависимостей, упрощая развёртывание и снижая задержку операций с метаданными.",
+          "example": "# KRaft-конфигурация для комбинированного узла\n# (брокер + контроллер)\nprocess.roles=broker,controller\nnode.id=1\ncontroller.quorum.voters=1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093\nlisteners=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093\ncontroller.listener.names=CONTROLLER\n\n# Инициализация кластера\nkafka-storage.sh format -t <cluster-id> -c server.properties",
+          "relatedLessons": [
+            { "title": "KRaft — Kafka без ZooKeeper", "slug": "01-kafka-architecture/05-kraft" }
+          ]
+        },
+        {
+          "term": "Controller Quorum (кворум контроллеров)",
+          "termEn": "Controller Quorum",
+          "definition": "Группа KRaft-контроллеров, которые через протокол Raft управляют метаданными кластера: списком брокеров, конфигурациями топиков, назначением лидеров партиций. Один контроллер является активным (active controller), остальные — резервными (standby). Топик __cluster_metadata хранит все изменения в виде event log.",
+          "example": "# Проверка статуса кворума контроллеров\nkafka-metadata-quorum.sh --bootstrap-server localhost:9092 describe --status\n# ClusterId:              abc123xyz\n# LeaderId:               1\n# LeaderEpoch:            5\n# HighWatermark:          1248\n# MaxFollowerLag:         0\n# MaxFollowerLagTimeMs:   120\n# CurrentVoters:          [1,2,3]\n# CurrentObservers:       []",
+          "relatedLessons": [
+            { "title": "KRaft — Kafka без ZooKeeper", "slug": "01-kafka-architecture/05-kraft" }
+          ]
+        },
+        {
+          "term": "Нечистые выборы лидера",
+          "termEn": "Unclean Leader Election",
+          "definition": "Выбор нового лидера партиции из реплик, не входящих в ISR, при отсутствии доступных синхронизированных реплик. Включается параметром unclean.leader.election.enable=true. Обеспечивает доступность ценой возможной потери данных: новый лидер не имеет всех зафиксированных записей и перезапишет часть лога. По умолчанию отключён для систем, требующих гарантий сохранности данных.",
+          "example": "# Параметр топика — включить только при критической необходимости\nkafka-configs.sh --bootstrap-server localhost:9092 \\\n  --entity-type topics \\\n  --entity-name orders \\\n  --alter \\\n  --add-config unclean.leader.election.enable=true\n\n# Риск: если было 5 незафиксированных записей,\n# после выборов нечистого лидера они будут потеряны\n# и потребитель увидит дыру или перечитает старые данные",
+          "relatedLessons": [
+            { "title": "Leader Election", "slug": "04-kafka-internals/03-leader-election" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "producers",
+      "name": "Producers",
+      "terms": [
+        {
+          "term": "Record Accumulator (аккумулятор записей)",
+          "termEn": "Record Accumulator",
+          "definition": "Буфер в памяти продюсера, группирующий записи в батчи перед отправкой на брокер. Для каждой пары (топик, партиция) поддерживается своя очередь ProducerBatch. Запись считается готовой к отправке, когда батч достиг batch.size байт или истёк linger.ms. Record Accumulator — главный механизм повышения пропускной способности продюсера.",
+          "example": "# Настройка аккумулятора для высокой пропускной способности\nProperties props = new Properties();\nprops.put(ProducerConfig.BATCH_SIZE_CONFIG, 65536);     // 64 KB\nprops.put(ProducerConfig.LINGER_MS_CONFIG, 10);         // ждать до 10 мс\nprops.put(ProducerConfig.BUFFER_MEMORY_CONFIG, 33554432); // 32 MB общий буфер\nprops.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, \"lz4\"); // сжатие батча\n// При linger.ms=10 продюсер агрегирует записи 10 мс,\n// затем отправляет один большой батч вместо многих мелких",
+          "relatedLessons": [
+            { "title": "Внутреннее устройство продюсера", "slug": "02-producers/02-producer-internals" }
+          ]
+        },
+        {
+          "term": "Идемпотентный продюсер",
+          "termEn": "Idempotent Producer",
+          "definition": "Режим работы продюсера, гарантирующий доставку каждой записи ровно один раз (exactly once) в одну партицию. Брокер присваивает продюсеру уникальный Producer ID (PID) и отслеживает порядковый номер (sequence number) каждой записи. Дублирующиеся записи с одинаковым PID и sequence отбрасываются. Включается параметром enable.idempotence=true (по умолчанию с Kafka 3.0).",
+          "example": "Properties props = new Properties();\nprops.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);\n// Автоматически устанавливает:\n// acks=all, retries=Integer.MAX_VALUE, max.in.flight=5\n\n// Брокер хранит: {PID=42, partition=0, lastSeq=100}\n// Запись с seq=100 при повторе будет отброшена\n// Запись с seq=101 будет принята как новая",
+          "relatedLessons": [
+            { "title": "Идемпотентность и транзакции", "slug": "02-producers/03-idempotence-transactions" }
+          ]
+        },
+        {
+          "term": "Транзакции Kafka",
+          "termEn": "Kafka Transactions",
+          "definition": "Механизм атомарной записи в несколько партиций и топиков в рамках одной транзакции. Используется для реализации exactly-once semantics (EOS) в сценариях consume-transform-produce. Продюсер с transactional.id взаимодействует с transaction coordinator — специальным брокером, хранящим состояние транзакции в топике __transaction_state.",
+          "example": "producer.initTransactions();\ntry {\n    producer.beginTransaction();\n    // Запись в несколько топиков атомарна\n    producer.send(new ProducerRecord<>(\"orders\", key, value));\n    producer.send(new ProducerRecord<>(\"audit-log\", key, audit));\n    // Фиксация смещений потребителя в рамках транзакции\n    producer.sendOffsetsToTransaction(offsets, consumerGroupMetadata);\n    producer.commitTransaction();\n} catch (Exception e) {\n    producer.abortTransaction();\n}",
+          "relatedLessons": [
+            { "title": "Идемпотентность и транзакции", "slug": "02-producers/03-idempotence-transactions" }
+          ]
+        },
+        {
+          "term": "Acks (подтверждения)",
+          "termEn": "Acks (Acknowledgments)",
+          "definition": "Параметр продюсера, определяющий, сколько реплик должны подтвердить получение записи, прежде чем брокер ответит продюсеру об успехе. Три значения: acks=0 — не ждать подтверждения (максимальная скорость, возможна потеря); acks=1 — ждать только лидера (риск потери при немедленном падении); acks=all (или -1) — ждать всех реплик из ISR (максимальная надёжность).",
+          "example": "# acks=all + min.insync.replicas=2 — золотой стандарт\n# server.properties (глобально)\ndefault.replication.factor=3\nmin.insync.replicas=2\n\n# producer.properties\nacks=all\n# Семантика: запись подтверждена, если 2 из 3 реплик\n# записали её на диск. При падении одного брокера\n# данные не потеряны — у двух других есть копия",
+          "relatedLessons": [
+            { "title": "Надёжность продюсера", "slug": "02-producers/01-producer-fundamentals" }
+          ]
+        },
+        {
+          "term": "Партиционирование по ключу",
+          "termEn": "Key-Based Partitioning",
+          "definition": "Стратегия выбора партиции для записи на основе ключа сообщения. DefaultPartitioner применяет алгоритм murmur2 к ключу и вычисляет номер партиции: partition = murmur2(key) % numPartitions. Записи с одинаковым ключом гарантированно попадают в одну партицию, что обеспечивает упорядоченность для конкретного ключа. При null-ключе используется sticky partitioner.",
+          "example": "// Запись с ключом — гарантия порядка для user_id\nProducerRecord<String, Order> record = new ProducerRecord<>(\n    \"orders\",\n    \"user-42\",  // ключ — всегда та же партиция\n    new Order(orderId, items)\n);\nproducer.send(record);\n\n// Кастомный партиционер для равномерного распределения\npublic class RoundRobinPartitioner implements Partitioner {\n    public int partition(String topic, Object key,\n        byte[] keyBytes, Object value, byte[] valueBytes, Cluster cluster) {\n        return (int)(counter.getAndIncrement() % cluster.partitionCountForTopic(topic));\n    }\n}",
+          "relatedLessons": [
+            { "title": "Партиционирование", "slug": "02-producers/04-partitioning" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "consumers",
+      "name": "Consumers",
+      "terms": [
+        {
+          "term": "Consumer Group (группа потребителей)",
+          "termEn": "Consumer Group",
+          "definition": "Логическая группа потребителей с общим group.id, совместно читающих топик. Каждая партиция назначается ровно одному потребителю внутри группы, обеспечивая параллельную обработку без дублирования. Несколько групп могут независимо читать один топик — каждая получает полную копию данных. Текущая позиция каждой группы в каждой партиции хранится в топике __consumer_offsets.",
+          "example": "Properties props = new Properties();\nprops.put(ConsumerConfig.GROUP_ID_CONFIG, \"order-processor\");\nprops.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, \"localhost:9092\");\nprops.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);\nprops.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);\nKafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);\nconsumer.subscribe(List.of(\"orders\"));\n// Все экземпляры с group.id=\"order-processor\" делят партиции",
+          "relatedLessons": [
+            { "title": "Consumer Groups", "slug": "03-consumers/01-consumer-groups" }
+          ]
+        },
+        {
+          "term": "Group Coordinator (координатор группы)",
+          "termEn": "Group Coordinator",
+          "definition": "Специальный брокер, ответственный за управление конкретной группой потребителей: отслеживание живых членов, инициирование ребалансировок и хранение зафиксированных смещений. Координатор определяется по hash(group.id) % numPartitions(__consumer_offsets). Каждый потребитель при старте регистрируется у своего координатора через запрос FindCoordinator.",
+          "example": "# Определение брокера-координатора для группы\nkafka-consumer-groups.sh \\\n  --bootstrap-server localhost:9092 \\\n  --describe \\\n  --group order-processor\n\n# Вывод: GROUP TOPIC PARTITION CURRENT-OFFSET LOG-END-OFFSET LAG\n# Coordinator находится на брокере, ответственном за\n# партицию hash(\"order-processor\") % 50 топика __consumer_offsets",
+          "relatedLessons": [
+            { "title": "Consumer Groups", "slug": "03-consumers/01-consumer-groups" },
+            { "title": "Ребалансировка", "slug": "03-consumers/02-rebalancing" }
+          ]
+        },
+        {
+          "term": "Ребалансировка",
+          "termEn": "Rebalancing",
+          "definition": "Процесс перераспределения партиций между потребителями в группе при изменении её состава (присоединение, выход, сбой) или количества партиций. Во время ребалансировки все потребители группы приостанавливают обработку. Eager rebalancing отзывает все назначения и перераспределяет заново. Cooperative Sticky rebalancing (ICKP) перераспределяет только изменившиеся партиции, минимизируя простой.",
+          "example": "# Настройка Cooperative Sticky Assignor (минимальный простой)\nprops.put(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG,\n    CooperativeStickyAssignor.class.getName());\n\n# Настройка таймаутов сессии\nprops.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, 45000); // 45 сек\nprops.put(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, 15000); // 15 сек\n# Потребитель должен отправлять heartbeat каждые 15 сек,\n# иначе через 45 сек координатор инициирует ребалансировку",
+          "relatedLessons": [
+            { "title": "Ребалансировка", "slug": "03-consumers/02-rebalancing" }
+          ]
+        },
+        {
+          "term": "Static Membership (статическое членство)",
+          "termEn": "Static Membership",
+          "definition": "Режим потребителя с фиксированным идентификатором group.instance.id, позволяющий избежать ребалансировки при кратковременных перезапусках. Потребитель со статическим ID сохраняет своё назначение партиций в течение session.timeout.ms после отключения. При перезапуске он присоединяется к группе с теми же партициями без полной ребалансировки. Полезно для stateful-потребителей.",
+          "example": "# Конфигурация статического членства\nprops.put(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, \"consumer-pod-3\");\nprops.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, 300000); // 5 минут\n# При рестарте пода consumer-pod-3 в течение 5 минут\n# он снова получит те же партиции без ребалансировки\n# Идеально для Kafka Streams и stateful обработчиков",
+          "relatedLessons": [
+            { "title": "Ребалансировка", "slug": "03-consumers/02-rebalancing" }
+          ]
+        },
+        {
+          "term": "Коммит смещения",
+          "termEn": "Offset Commit",
+          "definition": "Запись текущей позиции потребителя в партиции в топик __consumer_offsets. Автоматический коммит (enable.auto.commit=true) выполняется каждые auto.commit.interval.ms — прост, но может привести к дублированию при сбое. Ручной коммит (commitSync или commitAsync) даёт точный контроль над тем, когда запись считается обработанной. Зафиксированное смещение = следующая запись для чтения при перезапуске.",
+          "example": "// Ручной коммит после гарантированной обработки\nconsumer.poll(Duration.ofMillis(100)).forEach(record -> {\n    try {\n        processRecord(record);\n        // Асинхронный коммит для производительности\n        consumer.commitAsync((offsets, exception) -> {\n            if (exception != null) log.error(\"Commit failed\", exception);\n        });\n    } catch (Exception e) {\n        // Синхронный коммит при завершении для надёжности\n        consumer.commitSync();\n        throw e;\n    }\n});",
+          "relatedLessons": [
+            { "title": "Смещения и коммиты", "slug": "03-consumers/03-offsets-commits" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "internals",
+      "name": "Внутреннее устройство",
+      "terms": [
+        {
+          "term": "Уплотнение лога",
+          "termEn": "Log Compaction",
+          "definition": "Политика хранения, при которой Kafka сохраняет только последнюю запись для каждого уникального ключа. Cleaner-потоки брокера периодически объединяют сегменты лога, удаляя устаревшие версии ключей. Итоговый лог содержит полный снимок текущего состояния системы. Подходит для топиков с семантикой event-sourcing: топик изменений конфигурации, changelog Kafka Streams.",
+          "example": "# Создание топика с уплотнением лога\nkafka-topics.sh --bootstrap-server localhost:9092 \\\n  --create \\\n  --topic user-profiles \\\n  --config cleanup.policy=compact \\\n  --config min.cleanable.dirty.ratio=0.1 \\\n  --config delete.retention.ms=86400000\n\n# Запись с value=null (tombstone) удаляет ключ\nproducer.send(new ProducerRecord<>(\"user-profiles\", \"user-42\", null));",
+          "relatedLessons": [
+            { "title": "Хранение данных", "slug": "04-kafka-internals/01-storage" }
+          ]
+        },
+        {
+          "term": "Tiered Storage (многоуровневое хранение)",
+          "termEn": "Tiered Storage",
+          "definition": "Функция (с Kafka 3.6+), позволяющая переносить старые сегменты лога в объектное хранилище (S3, GCS, Azure Blob) при сохранении горячих данных на локальном диске брокера. Брокеры хранят только локальный кеш последних сегментов, обеспечивая прозрачный доступ к архивным данным. Снижает затраты на хранение и позволяет хранить данные практически неограниченно.",
+          "example": "# server.properties — включение tiered storage\nremote.log.storage.system.enable=true\nremote.log.manager.task.interval.ms=30000\n\n# Плагин для S3 (конкретная реализация зависит от провайдера)\nremote.log.storage.manager.class.name=org.apache.kafka.server.log.remote.storage.RemoteLogStorageManager\n\n# Конфигурация топика\nkafka-configs.sh --alter --topic events \\\n  --add-config remote.storage.enable=true,\\\n  local.retention.ms=86400000",
+          "relatedLessons": [
+            { "title": "Хранение данных", "slug": "04-kafka-internals/01-storage" }
+          ]
+        },
+        {
+          "term": "Zero-Copy Transfer",
+          "termEn": "Zero-Copy Transfer",
+          "definition": "Оптимизация передачи данных в ядре Linux, используемая Kafka при отправке данных потребителям. Вместо копирования данных из дискового кеша ОС в пространство пользователя и обратно, Kafka использует системный вызов sendfile(), который передаёт данные напрямую из кеша страниц в сетевой буфер. Это снижает нагрузку на CPU и увеличивает пропускную способность в разы.",
+          "example": "# Путь данных без zero-copy (4 копирования):\n# Диск -> OS Page Cache -> User Space Buffer -> Kernel Socket Buffer -> NIC\n\n# Путь данных с zero-copy (2 копирования, sendfile):\n# Диск -> OS Page Cache -> NIC\n\n# В Java: FileChannel.transferTo() использует sendfile()\n# Kafka автоматически применяет zero-copy для FileChannel\n# ВАЖНО: работает только без шифрования SSL на уровне брокера",
+          "relatedLessons": [
+            { "title": "Производительность хранения", "slug": "04-kafka-internals/04-performance" }
+          ]
+        },
+        {
+          "term": "Wire Protocol (протокол Kafka)",
+          "termEn": "Wire Protocol",
+          "definition": "Бинарный протокол запросов/ответов для взаимодействия клиентов с брокерами и брокеров между собой. Каждый запрос имеет 2-байтный API Key (например, Produce=0, Fetch=1), версию API и correlation ID для сопоставления ответов. Kafka поддерживает версионирование API: новые клиенты могут работать со старыми брокерами и наоборот через согласование версии.",
+          "example": "# Структура запроса Produce (упрощённо)\n# [4 байта] Length\n# [2 байта] API Key = 0 (Produce)\n# [2 байта] API Version = 9\n# [4 байта] Correlation ID\n# [2 байта] Client ID length + данные\n# [body]    Topic name, acks, timeout, records\n\n# Просмотр поддерживаемых API брокером\nkafka-broker-api-versions.sh --bootstrap-server localhost:9092",
+          "relatedLessons": [
+            { "title": "Сетевой уровень Kafka", "slug": "04-kafka-internals/05-network" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "connect-schemas",
+      "name": "Connect и Schema Registry",
+      "terms": [
+        {
+          "term": "Kafka Connect",
+          "termEn": "Kafka Connect",
+          "definition": "Фреймворк для масштабируемой и надёжной интеграции Kafka с внешними системами без написания кода. Source-коннекторы читают данные из внешних систем (базы данных, файловые системы) и публикуют в Kafka. Sink-коннекторы читают из Kafka и записывают во внешние системы (Elasticsearch, S3, PostgreSQL). Connect поддерживает горизонтальное масштабирование через воркеры.",
+          "example": "# Конфигурация JDBC Source коннектора\ncurl -X POST http://localhost:8083/connectors \\\n  -H 'Content-Type: application/json' \\\n  -d '{\n    \"name\": \"postgres-orders\",\n    \"config\": {\n      \"connector.class\": \"io.confluent.connect.jdbc.JdbcSourceConnector\",\n      \"connection.url\": \"jdbc:postgresql://localhost/shop\",\n      \"table.whitelist\": \"orders\",\n      \"mode\": \"timestamp+incrementing\",\n      \"timestamp.column.name\": \"updated_at\",\n      \"incrementing.column.name\": \"id\",\n      \"topic.prefix\": \"pg.\"\n    }\n  }'",
+          "relatedLessons": [
+            { "title": "Kafka Connect", "slug": "05-kafka-connect/01-connect-overview" }
+          ]
+        },
+        {
+          "term": "SMT (Single Message Transform)",
+          "termEn": "SMT (Single Message Transform)",
+          "definition": "Лёгкие преобразования, применяемые к каждой записи в конвейере Kafka Connect без написания кастомного коннектора. SMT работают непосредственно на воркере Connect и выполняются до/после коннектора. Примеры: ReplaceField (переименование полей), MaskField (маскирование данных), ExtractField (извлечение вложенного поля), InsertField (добавление метаданных). Для сложных преобразований рекомендуется Kafka Streams.",
+          "example": "# Конфигурация SMT в коннекторе\n# Маскировка PII + добавление топика как поля\ntransforms=maskPII,addTopic\ntransforms.maskPII.type=org.apache.kafka.connect.transforms.MaskField$Value\ntransforms.maskPII.fields=email,phone\ntransforms.addTopic.type=org.apache.kafka.connect.transforms.InsertField$Value\ntransforms.addTopic.topic.field=_kafka_topic\n# Для условного применения:\ntransforms.maskPII.predicate=isProduction\npredicates.isProduction.type=org.apache.kafka.connect.transforms.predicates.HasHeaderKey\npredicates.isProduction.name=env",
+          "relatedLessons": [
+            { "title": "Single Message Transforms", "slug": "05-kafka-connect/03-smt" }
+          ]
+        },
+        {
+          "term": "Dead Letter Queue (DLQ)",
+          "termEn": "Dead Letter Queue (DLQ)",
+          "definition": "Топик Kafka, в который Kafka Connect направляет записи, которые не удалось обработать. При ошибке десериализации, преобразования или записи во внешнюю систему запись помещается в DLQ вместо остановки коннектора. Заголовки записи содержат информацию об ошибке (тип исключения, трассировку стека, имя коннектора). DLQ позволяет команде исследовать проблемные записи без потери данных.",
+          "example": "# Включение DLQ в конфигурации sink-коннектора\nerrors.tolerance=all\nerrors.deadletterqueue.topic.name=orders-dlq\nerrors.deadletterqueue.topic.replication.factor=3\nerrors.deadletterqueue.context.headers.enable=true\nerrors.log.enable=true\nerrors.log.include.messages=true\n# Чтение DLQ для диагностики\nkafka-console-consumer.sh \\\n  --topic orders-dlq \\\n  --property print.headers=true \\\n  --bootstrap-server localhost:9092",
+          "relatedLessons": [
+            { "title": "Обработка ошибок в Connect", "slug": "05-kafka-connect/04-error-handling" }
+          ]
+        },
+        {
+          "term": "Schema Registry",
+          "termEn": "Schema Registry",
+          "definition": "Централизованный сервис для управления схемами сообщений (Avro, Protobuf, JSON Schema). Каждой схеме присваивается числовой ID; продюсеры записывают в топик Magic Byte (0x0) + 4-байтный schema ID + payload. Потребители используют schema ID для получения схемы и десериализации. Schema Registry версионирует схемы в рамках subject и применяет правила совместимости при регистрации новой версии.",
+          "example": "# Регистрация схемы Avro через REST API\ncurl -X POST http://schema-registry:8081/subjects/orders-value/versions \\\n  -H 'Content-Type: application/vnd.schemaregistry.v1+json' \\\n  -d '{\"schema\": \"{\\\"type\\\":\\\"record\\\",\\\"name\\\":\\\"Order\\\",\\\"fields\\\":[{\\\"name\\\":\\\"id\\\",\\\"type\\\":\\\"string\\\"},{\\\"name\\\":\\\"amount\\\",\\\"type\\\":\\\"double\\\"}]}\"}\n\n# Wire Format: [0x00][schema_id: 4 bytes][avro payload]",
+          "relatedLessons": [
+            { "title": "Schema Registry", "slug": "06-schema-registry/01-schema-registry-overview" }
+          ]
+        },
+        {
+          "term": "Avro",
+          "termEn": "Avro",
+          "definition": "Компактный бинарный формат сериализации с поддержкой эволюции схемы, наиболее часто используемый с Kafka и Schema Registry. Avro-запись не содержит имён полей — они определяются схемой, что делает payload минимальным. Поддерживает добавление/удаление необязательных полей с default-значениями без нарушения совместимости. Поддержка Schema Registry встроена в confluent-kafka-avro клиенты.",
+          "example": "# Схема Avro (orders.avsc)\n{\n  \"type\": \"record\",\n  \"name\": \"Order\",\n  \"namespace\": \"com.example\",\n  \"fields\": [\n    {\"name\": \"id\", \"type\": \"string\"},\n    {\"name\": \"amount\", \"type\": \"double\"},\n    {\"name\": \"status\", \"type\": \"string\", \"default\": \"PENDING\"}\n  ]\n}\n# Эволюция: добавление поля с default не нарушает\n# обратную совместимость (BACKWARD mode)",
+          "relatedLessons": [
+            { "title": "Avro и эволюция схем", "slug": "06-schema-registry/02-avro-schema-evolution" }
+          ]
+        },
+        {
+          "term": "Режимы совместимости",
+          "termEn": "Schema Compatibility Modes",
+          "definition": "Правила Schema Registry, определяющие, какие изменения схемы допустимы при регистрации новой версии. BACKWARD: новая версия может читать данные, записанные старой. FORWARD: старая версия может читать данные, записанные новой. FULL: совместима в обоих направлениях. BACKWARD_TRANSITIVE: совместима со всеми предыдущими версиями, а не только с предыдущей. По умолчанию используется BACKWARD.",
+          "example": "# Установка режима совместимости для subject\ncurl -X PUT http://schema-registry:8081/config/orders-value \\\n  -H 'Content-Type: application/vnd.schemaregistry.v1+json' \\\n  -d '{\"compatibility\": \"BACKWARD\"}'\n\n# Таблица допустимых изменений при BACKWARD:\n# Добавить опциональное поле (с default) — РАЗРЕШЕНО\n# Удалить поле                           — РАЗРЕШЕНО\n# Добавить обязательное поле             — ЗАПРЕЩЕНО\n# Изменить тип поля                      — ЗАПРЕЩЕНО",
+          "relatedLessons": [
+            { "title": "Совместимость схем", "slug": "06-schema-registry/03-compatibility" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "streams-ksqldb",
+      "name": "Kafka Streams и ksqlDB",
+      "terms": [
+        {
+          "term": "KStream",
+          "termEn": "KStream",
+          "definition": "Абстракция Kafka Streams, представляющая бесконечный поток записей, где каждая запись интерпретируется как независимое событие. KStream поддерживает stateless-операции (filter, map, flatMap) и stateful-операции (aggregate, join, windowed operations). При материализации KStream создаёт новый топик с результатами. Все записи сохраняются, даже с одинаковым ключом.",
+          "example": "StreamsBuilder builder = new StreamsBuilder();\nKStream<String, Order> orders =\n    builder.stream(\"raw-orders\");\n\n// Stateless трансформация\nKStream<String, EnrichedOrder> enriched = orders\n    .filter((key, order) -> order.getAmount() > 0)\n    .mapValues(order -> enrich(order));\n\n// Запись в новый топик\nenriched.to(\"enriched-orders\",\n    Produced.with(Serdes.String(), enrichedSerde));",
+          "relatedLessons": [
+            { "title": "KStream и KTable", "slug": "07-kafka-streams/02-kstream-ktable" }
+          ]
+        },
+        {
+          "term": "KTable",
+          "termEn": "KTable",
+          "definition": "Абстракция Kafka Streams, представляющая changelog-поток, материализованный как таблица: для каждого ключа хранится только последнее значение. Запись с null-значением воспринимается как удаление ключа (tombstone). KTable хранит состояние локально в RocksDB и реплицирует его через changelog-топик. Joins с KTable — это lookup по ключу в текущем снимке состояния.",
+          "example": "StreamsBuilder builder = new StreamsBuilder();\n// KTable из топика user-profiles\nKTable<String, UserProfile> profiles =\n    builder.table(\"user-profiles\",\n        Materialized.as(\"profiles-store\"));\n\n// Join KStream с KTable\nKStream<String, EnrichedOrder> enriched = orders.join(\n    profiles,\n    (order, profile) -> new EnrichedOrder(order, profile.getName())\n);\n// Join мгновенный: lookup по ключу в локальном state store",
+          "relatedLessons": [
+            { "title": "KStream и KTable", "slug": "07-kafka-streams/02-kstream-ktable" }
+          ]
+        },
+        {
+          "term": "GlobalKTable",
+          "termEn": "GlobalKTable",
+          "definition": "Вариант KTable, в котором каждый экземпляр приложения хранит полную копию таблицы, а не только партиции, назначенные ему. Позволяет выполнять join по произвольному атрибуту (не обязательно по ключу раздела). Полезен для небольших справочных таблиц (например, конфигурация, коды стран), которые нужно иметь на каждом узле. Недостаток: потребляет больше памяти и сети.",
+          "example": "StreamsBuilder builder = new StreamsBuilder();\n// GlobalKTable реплицируется на все экземпляры\nGlobalKTable<String, Product> products =\n    builder.globalTable(\"product-catalog\");\n\n// Можно join по любому полю значения, не только по ключу\nKStream<String, EnrichedOrder> enriched = orders.join(\n    products,\n    (orderKey, order) -> order.getProductId(), // извлечение ключа для join\n    (order, product) -> new EnrichedOrder(order, product)\n);",
+          "relatedLessons": [
+            { "title": "KStream и KTable", "slug": "07-kafka-streams/02-kstream-ktable" }
+          ]
+        },
+        {
+          "term": "State Store (хранилище состояния)",
+          "termEn": "State Store",
+          "definition": "Локальное хранилище ключ-значение в Kafka Streams, поддерживающее stateful-операции: агрегации, джоины, windowing. По умолчанию реализован на базе RocksDB (persistent) или HashMap (in-memory). Каждый state store автоматически реплицируется через changelog-топик, что позволяет восстановить состояние при перезапуске или ребалансировке. Standby-реплики обеспечивают быстрое восстановление.",
+          "example": "// Materialized store для агрегации\nKTable<String, Long> orderCounts = orders\n    .groupByKey()\n    .count(Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>\n        as(\"order-count-store\")\n        .withKeySerde(Serdes.String())\n        .withValueSerde(Serdes.Long())\n    );\n\n// Запрос состояния через Interactive Queries\nReadOnlyKeyValueStore<String, Long> store =\n    streams.store(StoreQueryParameters.fromNameAndType(\n        \"order-count-store\", QueryableStoreTypes.keyValueStore()));",
+          "relatedLessons": [
+            { "title": "State Stores", "slug": "07-kafka-streams/03-state-stores" }
+          ]
+        },
+        {
+          "term": "Оконные операции",
+          "termEn": "Windowing",
+          "definition": "Механизм группировки событий по временным окнам для вычисления агрегатов за определённый период. Kafka Streams поддерживает четыре типа окон: Tumbling (неперекрывающиеся окна фиксированного размера), Hopping (перекрывающиеся окна), Session (динамические окна по активности), Sliding (окна фиксированного размера, скользящие по событиям). Результаты хранятся в windowed state store.",
+          "example": "// Подсчёт заказов за каждые 5 минут (Tumbling Window)\nKTable<Windowed<String>, Long> windowedCounts = orders\n    .groupByKey()\n    .windowedBy(TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(5)))\n    .count(Materialized.as(\"windowed-count-store\"));\n\n// Ключ результата: Windowed{key=\"user-1\", window=[12:00, 12:05)}\n// Hopping: окно 5 мин, шаг 1 мин — записи считаются в нескольких окнах\nTimeWindows.ofSizeAndGrace(Duration.ofMinutes(5), Duration.ofSeconds(30))\n    .advanceBy(Duration.ofMinutes(1));",
+          "relatedLessons": [
+            { "title": "Windowing", "slug": "07-kafka-streams/04-windowing" }
+          ]
+        },
+        {
+          "term": "ksqlDB",
+          "termEn": "ksqlDB",
+          "definition": "SQL-движок для потоковой обработки на базе Kafka Streams, позволяющий писать потоковые запросы на SQL без написания Java-кода. Создаёт STREAM (аналог KStream) и TABLE (аналог KTable) поверх топиков Kafka. CSAS (CREATE STREAM AS SELECT) и CTAS (CREATE TABLE AS SELECT) запускают постоянные потоковые вычисления. Поддерживает push-запросы (подписка на поток изменений) и pull-запросы (точечный lookup по состоянию).",
+          "example": "-- Создание стрима поверх топика\nCREATE STREAM orders (\n    order_id VARCHAR KEY,\n    amount DOUBLE,\n    user_id VARCHAR\n) WITH (\n    KAFKA_TOPIC='raw-orders',\n    VALUE_FORMAT='AVRO'\n);\n\n-- Постоянное агрегирование (CSAS)\nCREATE TABLE order_totals AS\n    SELECT user_id, SUM(amount) AS total\n    FROM orders\n    GROUP BY user_id\n    EMIT CHANGES;",
+          "relatedLessons": [
+            { "title": "ksqlDB", "slug": "08-ksqldb/01-ksqldb-overview" }
+          ]
+        },
+        {
+          "term": "Interactive Queries (интерактивные запросы)",
+          "termEn": "Interactive Queries",
+          "definition": "Механизм Kafka Streams для запроса текущего состояния локальных state stores через HTTP или gRPC без чтения из Kafka. Каждый экземпляр приложения может ответить на запросы к своим локальным партициям. Для распределённых state stores клиент должен найти нужный экземпляр через метаданные (streamsMetadataForStore) и выполнить RPC-запрос к нему. Используется для serving layer в Lambda/Kappa архитектурах.",
+          "example": "// Экспозиция Interactive Queries через REST\nvar queryableStore = streams.store(\n    StoreQueryParameters.fromNameAndType(\n        \"order-count-store\",\n        QueryableStoreTypes.keyValueStore()\n    )\n);\n\n// Получить метаданные (какой экземпляр хранит ключ)\nKeyQueryMetadata metadata = streams.queryMetadataForKey(\n    \"order-count-store\", \"user-42\", Serdes.String().serializer()\n);\n// metadata.activeHost() -> {host, port} нужного инстанса",
+          "relatedLessons": [
+            { "title": "Interactive Queries", "slug": "07-kafka-streams/05-interactive-queries" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "security",
+      "name": "Безопасность Kafka",
+      "terms": [
+        {
+          "term": "SASL (Simple Authentication and Security Layer)",
+          "termEn": "SASL (Simple Authentication and Security Layer)",
+          "definition": "Фреймворк аутентификации, используемый Kafka для проверки подлинности клиентов и брокеров. Kafka поддерживает несколько механизмов SASL: PLAIN (логин/пароль в открытом виде, только поверх TLS), SCRAM-SHA-256 и SCRAM-SHA-512 (безопасный хеш с защитой от перехвата), OAUTHBEARER (JWT-токены), GSSAPI/Kerberos (корпоративные среды с Active Directory). Выбор механизма зависит от инфраструктуры безопасности организации.",
+          "example": "# Конфигурация брокера для SASL/SCRAM\nlisteners=SASL_SSL://0.0.0.0:9093\nsecurity.inter.broker.protocol=SASL_SSL\nsasl.mechanism.inter.broker.protocol=SCRAM-SHA-512\nsasl.enabled.mechanisms=SCRAM-SHA-512\n\n# Создание пользователя\nkafka-configs.sh --bootstrap-server localhost:9092 \\\n  --alter --add-config 'SCRAM-SHA-512=[iterations=8192,password=secret]' \\\n  --entity-type users --entity-name alice\n\n# Конфигурация клиента (JAAS)\nsasl.mechanism=SCRAM-SHA-512\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \\\n  username=\"alice\" password=\"secret\";",
+          "relatedLessons": [
+            { "title": "Аутентификация SASL", "slug": "09-security/01-sasl-authentication" }
+          ]
+        },
+        {
+          "term": "SSL/TLS Mutual Authentication",
+          "termEn": "SSL/TLS Mutual Authentication",
+          "definition": "Двусторонняя проверка подлинности, при которой и брокер, и клиент предоставляют друг другу сертификаты X.509. Клиент проверяет сертификат брокера через truststore, брокер проверяет сертификат клиента (если ssl.client.auth=required). Обеспечивает шифрование трафика и аутентификацию без дополнительного механизма SASL. Управление жизненным циклом сертификатов — главная операционная сложность.",
+          "example": "# Конфигурация брокера для mTLS\nssl.keystore.location=/etc/kafka/ssl/kafka.server.keystore.jks\nssl.keystore.password=keystorepass\nssl.key.password=keypass\nssl.truststore.location=/etc/kafka/ssl/kafka.server.truststore.jks\nssl.truststore.password=truststorepass\nssl.client.auth=required\n\n# Конфигурация клиента\nssl.keystore.location=/etc/kafka/ssl/client.keystore.jks\nssl.truststore.location=/etc/kafka/ssl/client.truststore.jks\nsecurity.protocol=SSL",
+          "relatedLessons": [
+            { "title": "Шифрование TLS", "slug": "09-security/02-tls-encryption" }
+          ]
+        },
+        {
+          "term": "ACL (Access Control List)",
+          "termEn": "ACL (Access Control List)",
+          "definition": "Механизм авторизации Kafka, определяющий права доступа конкретного principal (пользователя или сервиса) к ресурсу (топику, группе, кластеру) для определённой операции (Read, Write, Create, Describe, Delete). ACL проверяется после успешной аутентификации. Хранятся в ZooKeeper или (в KRaft-режиме) в метаданных кластера. Поддерживается ALLOW и DENY правила.",
+          "example": "# Предоставить alice право записи в топик orders\nkafka-acls.sh --bootstrap-server localhost:9092 \\\n  --add \\\n  --allow-principal User:alice \\\n  --operation Write \\\n  --topic orders\n\n# Предоставить group order-processor право чтения\nkafka-acls.sh --bootstrap-server localhost:9092 \\\n  --add \\\n  --allow-principal User:service-account \\\n  --operation Read \\\n  --group order-processor\n\n# Просмотр всех ACL\nkafka-acls.sh --list --bootstrap-server localhost:9092",
+          "relatedLessons": [
+            { "title": "Авторизация ACL", "slug": "09-security/03-acls-authorization" }
+          ]
+        },
+        {
+          "term": "Квоты (Quotas)",
+          "termEn": "Quotas",
+          "definition": "Механизм ограничения ресурсов, потребляемых клиентами Kafka, для защиты от шумных соседей. Kafka поддерживает три типа квот: producer_byte_rate (байт/с для продюсеров), consumer_byte_rate (байт/с для потребителей), request_percentage (процент сетевых и I/O потоков). При превышении квоты брокер добавляет задержку в ответы клиента (throttling), не обрывая соединение.",
+          "example": "# Установка квоты для конкретного пользователя\nkafka-configs.sh --bootstrap-server localhost:9092 \\\n  --alter \\\n  --add-config 'producer_byte_rate=1048576,consumer_byte_rate=2097152' \\\n  --entity-type users \\\n  --entity-name alice\n\n# Квота по умолчанию для всех клиентов\nkafka-configs.sh --bootstrap-server localhost:9092 \\\n  --alter \\\n  --add-config 'producer_byte_rate=10485760' \\\n  --entity-type users \\\n  --entity-default",
+          "relatedLessons": [
+            { "title": "Квоты и троттлинг", "slug": "09-security/04-quotas" }
+          ]
+        },
+        {
+          "term": "Audit Logging (аудит)",
+          "termEn": "Audit Logging",
+          "definition": "Регистрация событий авторизации и операций с кластером для целей безопасности и соответствия требованиям (GDPR, PCI DSS, SOC2). В Kafka с AclAuthorizer все события ALLOW/DENY записываются через log4j в отдельный лог-файл. Kafka Enterprise-решения предлагают централизованный аудит с маршрутизацией событий в SIEM-системы. Audit-лог должен быть защищён от изменений и храниться отдельно.",
+          "example": "# log4j.properties — включение аудит-лога\nlog4j.appender.authorizerAppender=org.apache.log4j.DailyRollingFileAppender\nlog4j.appender.authorizerAppender.DatePattern='.'yyyy-MM-dd-HH\nlog4j.appender.authorizerAppender.File=/var/log/kafka/kafka-authorizer.log\nlog4j.appender.authorizerAppender.layout=org.apache.log4j.PatternLayout\nlog4j.appender.authorizerAppender.layout.ConversionPattern=[%d] %p %m (%c)%n\nlog4j.logger.kafka.authorizer.logger=INFO, authorizerAppender\nlog4j.additivity.kafka.authorizer.logger=false",
+          "relatedLessons": [
+            { "title": "Аудит и мониторинг безопасности", "slug": "09-security/05-audit" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "production-ops",
+      "name": "Production Operations",
+      "terms": [
+        {
+          "term": "JMX (Java Management Extensions)",
+          "termEn": "JMX (Java Management Extensions)",
+          "definition": "Стандартный механизм Java для экспозиции метрик брокера через MBeans. Kafka публикует сотни метрик в пространстве имён kafka.server:type=..., kafka.network:type=..., kafka.log:type=.... Метрики доступны через JMX Exporter (Prometheus), Kafka Exporter или JConsole. Ключевые группы: BrokerTopicMetrics (throughput), ReplicaManager (ISR), NetworkProcessor (latency).",
+          "example": "# Примеры критических JMX метрик\nkafka.server:type=BrokerTopicMetrics,name=MessagesInPerSec\nkafka.server:type=BrokerTopicMetrics,name=BytesInPerSec\nkafka.server:type=ReplicaManager,name=UnderReplicatedPartitions\nkafka.server:type=ReplicaManager,name=OfflinePartitionsCount\nkafka.controller:type=KafkaController,name=ActiveControllerCount\nkafka.network:type=RequestMetrics,name=TotalTimeMs,request=Produce\n\n# Запуск JMX Exporter для Prometheus\n# -javaagent:jmx_prometheus_javaagent.jar=7071:kafka-jmx-config.yml",
+          "relatedLessons": [
+            { "title": "Мониторинг и метрики", "slug": "10-production-ops/01-monitoring" }
+          ]
+        },
+        {
+          "term": "Consumer Lag (лаг потребителя)",
+          "termEn": "Consumer Lag",
+          "definition": "Разница между Log End Offset (LEO) лидера партиции и последним зафиксированным смещением группы потребителей. Лаг показывает, сколько записей группа ещё не обработала. Высокий и растущий лаг сигнализирует о том, что потребители не справляются с нагрузкой. Мониторинг лага — ключевая метрика SLA для потоковых систем. Инструменты: kafka-consumer-groups.sh, Burrow, Kafka Lag Exporter.",
+          "example": "# Просмотр лага всех групп потребителей\nkafka-consumer-groups.sh \\\n  --bootstrap-server localhost:9092 \\\n  --describe \\\n  --group order-processor\n# GROUP           TOPIC    PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG\n# order-processor orders   0          1250            1300            50\n# order-processor orders   1          980             980             0\n# order-processor orders   2          700             750             50\n# Общий лаг: 100 записей",
+          "relatedLessons": [
+            { "title": "Мониторинг и метрики", "slug": "10-production-ops/01-monitoring" }
+          ]
+        },
+        {
+          "term": "Сжатие/расширение ISR",
+          "termEn": "ISR Shrink/Expand",
+          "definition": "Динамическое изменение множества In-Sync Replicas в ответ на состояние репликации. ISR сжимается, когда реплика не отправляла Fetch-запрос лидеру дольше replica.lag.time.max.ms. ISR расширяется, когда отставшая реплика догнала лидера и несколько секунд остаётся синхронизированной. Частые изменения ISR (ISR thrashing) создают нагрузку на контроллер и сигнализируют о проблемах с производительностью реплик.",
+          "example": "# Метрики ISR для мониторинга\nkafka.server:type=ReplicaManager,name=IsrShrinksPerSec\nkafka.server:type=ReplicaManager,name=IsrExpandsPerSec\nkafka.server:type=ReplicaManager,name=UnderReplicatedPartitions\n\n# Параметры, влияющие на ISR\nreplica.lag.time.max.ms=30000  # реплика выбывает через 30 сек\nreplica.fetch.min.bytes=1\nreplica.fetch.wait.max.ms=500\n\n# Алерт: UnderReplicatedPartitions > 0 дольше 5 минут",
+          "relatedLessons": [
+            { "title": "Репликация", "slug": "01-kafka-architecture/04-replication" },
+            { "title": "Эксплуатация кластера", "slug": "10-production-ops/02-cluster-operations" }
+          ]
+        },
+        {
+          "term": "Перераспределение партиций",
+          "termEn": "Partition Reassignment",
+          "definition": "Операция переноса лидерства или реплик партиций между брокерами для балансировки нагрузки или замены оборудования. Выполняется через kafka-reassign-partitions.sh или автоматически через Cruise Control. Во время переноса происходит межброкерская репликация, которую необходимо ограничивать (throttling) для предотвращения влияния на производительность клиентов.",
+          "example": "# Шаг 1: Сгенерировать план перераспределения\nkafka-reassign-partitions.sh \\\n  --bootstrap-server localhost:9092 \\\n  --generate \\\n  --topics-to-move-json-file topics.json \\\n  --broker-list \"1,2,3,4\" > reassignment.json\n\n# Шаг 2: Применить с троттлингом\nkafka-reassign-partitions.sh \\\n  --bootstrap-server localhost:9092 \\\n  --execute \\\n  --reassignment-json-file reassignment.json \\\n  --throttle 50000000  # 50 MB/s максимум",
+          "relatedLessons": [
+            { "title": "Эксплуатация кластера", "slug": "10-production-ops/02-cluster-operations" }
+          ]
+        },
+        {
+          "term": "Prometheus + Grafana",
+          "termEn": "Prometheus + Grafana",
+          "definition": "Стандартный стек мониторинга Kafka в production. JMX Prometheus Exporter или Kafka Exporter (для consumer lag) собирают метрики и предоставляют их по HTTP. Prometheus скрапирует метрики каждые 15-60 секунд. Grafana визуализирует данные в дашбордах. Готовые дашборды: Kafka Overview (Grafana ID 7589), Consumer Lag Exporter (ID 12483). Alertmanager отправляет уведомления при нарушении пороговых значений.",
+          "example": "# docker-compose.yml фрагмент\nservices:\n  jmx-exporter:\n    image: bitnami/jmx-exporter\n    command: [\"5556\", \"/etc/config/kafka.yml\"]\n    volumes:\n      - ./kafka-jmx-config.yml:/etc/config/kafka.yml\n  prometheus:\n    image: prom/prometheus\n    volumes:\n      - ./prometheus.yml:/etc/prometheus/prometheus.yml\n  grafana:\n    image: grafana/grafana\n    # Импорт дашборда: grafana.com/dashboards/7589",
+          "relatedLessons": [
+            { "title": "Мониторинг и метрики", "slug": "10-production-ops/01-monitoring" }
+          ]
+        },
+        {
+          "term": "Capacity Planning (планирование ёмкости)",
+          "termEn": "Capacity Planning",
+          "definition": "Методика расчёта необходимых ресурсов кластера Kafka на основе ожидаемой нагрузки. Ключевые параметры: пропускная способность (MB/s записи = throughput × replication_factor), объём хранения (throughput × retention × replication_factor), сетевая пропускная способность (запись + чтение × количество групп потребителей). Правило большого пальца: 80% утилизация дискового I/O и сети как максимум.",
+          "example": "# Формулы расчёта\n# Требуемый дисковый I/O на запись:\n#   write_throughput * replication_factor\n#   Пример: 100 MB/s * 3 = 300 MB/s\n\n# Требуемое хранилище:\n#   write_throughput * retention_hours * 3600 * replication_factor\n#   Пример: 100 MB/s * 168h * 3600 * 3 = ~181 TB\n\n# Сетевой трафик на брокер (лидер партиции):\n#   write + read * num_consumer_groups\n#   = 100 + 100 * 3 = 400 MB/s исходящих",
+          "relatedLessons": [
+            { "title": "Планирование ёмкости", "slug": "10-production-ops/03-capacity-planning" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "advanced-patterns",
+      "name": "Продвинутые паттерны",
+      "terms": [
+        {
+          "term": "MirrorMaker 2",
+          "termEn": "MirrorMaker 2",
+          "definition": "Инструмент для репликации данных между кластерами Kafka, построенный на базе Kafka Connect. Поддерживает топологии active-passive (односторонняя репликация для DR) и active-active (двусторонняя для геораспределённых сред). MirrorMaker 2 сохраняет смещения потребителей через трансляцию (offset translation), позволяя группам переключаться между кластерами без потери позиции. Автоматически создаёт топики с префиксом источника.",
+          "example": "# mm2.properties — конфигурация репликации active-passive\nclusters=primary, secondary\nprimary.bootstrap.servers=kafka-primary:9092\nsecondary.bootstrap.servers=kafka-secondary:9092\n\n# Репликация из primary в secondary\nprimary->secondary.enabled=true\nprimary->secondary.topics=orders.*,payments.*\n\n# Синхронизация смещений потребителей\nprimary->secondary.sync.group.offsets.enabled=true\nprimary->secondary.emit.checkpoints.interval.seconds=10\n\n# Запуск\nconnect-mirror-maker.sh mm2.properties",
+          "relatedLessons": [
+            { "title": "MirrorMaker 2 и Multi-DC", "slug": "11-multi-dc/01-mirrormaker2" }
+          ]
+        },
+        {
+          "term": "RPO/RTO",
+          "termEn": "RPO/RTO (Recovery Point Objective / Recovery Time Objective)",
+          "definition": "Ключевые метрики для проектирования аварийного восстановления (DR) Kafka-кластеров. RPO (Recovery Point Objective) — максимально допустимый объём потерянных данных, выраженный во времени: сколько данных можно потерять при катастрофическом сбое. RTO (Recovery Time Objective) — максимально допустимое время восстановления сервиса. Для Kafka: RPO определяется задержкой репликации MirrorMaker 2, RTO — временем переключения клиентов на резервный кластер.",
+          "example": "# Пример анализа RPO/RTO для Kafka DR\n\n# Сценарий: active-passive с MirrorMaker 2\n# Задержка репликации: ~5 секунд\n# RPO = 5 секунд (данные за 5 сек могут быть потеряны)\n\n# Процедура переключения:\n# 1. Обнаружение сбоя primary:      ~30 сек\n# 2. Переключение DNS/LB:             ~2 мин\n# 3. Перезапуск клиентов:             ~5 мин\n# RTO = ~8 минут\n\n# Для RPO=0: синхронная репликация\n# (недоступна в стандартной Kafka, требует Kafka Bridge)",
+          "relatedLessons": [
+            { "title": "Disaster Recovery", "slug": "11-multi-dc/02-disaster-recovery" }
+          ]
+        },
+        {
+          "term": "Event Sourcing (событийное источниковедение)",
+          "termEn": "Event Sourcing",
+          "definition": "Архитектурный паттерн, при котором состояние системы определяется не текущими значениями в базе данных, а как результат воспроизведения последовательности событий. Kafka выступает журналом событий: каждое изменение состояния публикуется как неизменяемое событие. Текущее состояние восстанавливается воспроизведением событий от начала лога (или от снимка). Обеспечивает полный аудит, возможность временного перемотки и воспроизводимость.",
+          "example": "// Паттерн Event Sourcing с Kafka\n// Команды -> события -> проекции\n\n// Событие (неизменяемое)\npublic record OrderPlaced(\n    String orderId,\n    String userId,\n    List<OrderItem> items,\n    double totalAmount,\n    Instant timestamp\n) {}\n\n// Публикация события\nproducer.send(new ProducerRecord<>(\n    \"order-events\",\n    orderId,           // ключ для партиционирования\n    new OrderPlaced(orderId, userId, items, total, Instant.now())\n));\n\n// Проекция: восстановление состояния через Kafka Streams KTable",
+          "relatedLessons": [
+            { "title": "Event Sourcing с Kafka", "slug": "12-design-patterns/01-event-sourcing" }
+          ]
+        },
+        {
+          "term": "CQRS (Command Query Responsibility Segregation)",
+          "termEn": "CQRS (Command Query Responsibility Segregation)",
+          "definition": "Паттерн разделения команд (изменений состояния) и запросов (чтений) на разные модели. В связке с Kafka: команды публикуются как события в топик, потребители проецируют события в оптимизированные для чтения хранилища (Elasticsearch для поиска, PostgreSQL для транзакций, Redis для кеша). Kafka Streams или ksqlDB создают и поддерживают материализованные представления в актуальном состоянии.",
+          "example": "// CQRS с Kafka\n// Write side: команды -> события\nkafka-topic: order-events (append-only event log)\n\n// Read side: несколько проекций для разных сценариев\n// 1. PostgreSQL: текущий статус заказа (по ID)\n// 2. Elasticsearch: поиск заказов по атрибутам\n// 3. Redis: корзина пользователя (TTL)\n// 4. KTable в Kafka Streams: агрегаты для дашборда\n\n// Connect Sink обновляет все проекции\n// асинхронно из топика order-events",
+          "relatedLessons": [
+            { "title": "CQRS с Kafka", "slug": "12-design-patterns/02-cqrs" }
+          ]
+        },
+        {
+          "term": "Transactional Outbox (транзакционный ящик исходящих)",
+          "termEn": "Transactional Outbox",
+          "definition": "Паттерн надёжной публикации событий без распределённых транзакций между базой данных и Kafka. Приложение в одной локальной транзакции записывает изменение данных и событие в таблицу outbox той же базы данных. Отдельный процесс (или Debezium CDC) читает таблицу outbox и публикует события в Kafka. Гарантирует, что событие будет опубликовано тогда и только тогда, когда транзакция в БД зафиксирована.",
+          "example": "-- Схема outbox таблицы\nCREATE TABLE outbox (\n    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n    topic VARCHAR NOT NULL,\n    key VARCHAR,\n    payload JSONB NOT NULL,\n    created_at TIMESTAMP DEFAULT NOW(),\n    sent_at TIMESTAMP  -- NULL = ещё не отправлено\n);\n\n-- В одной транзакции с бизнес-логикой\nBEGIN;\n  UPDATE orders SET status = 'CONFIRMED' WHERE id = $1;\n  INSERT INTO outbox (topic, key, payload)\n    VALUES ('order-events', $1, '{\"event\": \"OrderConfirmed\", ...}');\nCOMMIT;",
+          "relatedLessons": [
+            { "title": "Transactional Outbox", "slug": "12-design-patterns/03-outbox" }
+          ]
+        },
+        {
+          "term": "Saga Pattern (паттерн Saga)",
+          "termEn": "Saga Pattern",
+          "definition": "Паттерн управления распределёнными транзакциями через последовательность локальных транзакций, координируемых через события. При сбое на любом шаге выполняются компенсирующие транзакции в обратном порядке. Хореография (choreography): сервисы реагируют на события друг друга. Оркестрация (orchestration): центральный координатор управляет порядком шагов. Kafka служит шиной событий между сервисами Saga.",
+          "example": "// Saga хореография: оформление заказа\n// 1. OrderService: OrderPlaced -> orders-events\n// 2. PaymentService: слушает orders-events,\n//    резервирует оплату -> PaymentReserved\n// 3. InventoryService: слушает PaymentReserved,\n//    резервирует товар -> InventoryReserved\n// 4. ShippingService: создаёт доставку -> OrderCompleted\n\n// Компенсация при ошибке на шаге 3:\n// InventoryService: InventoryFailed ->\n// PaymentService: отменяет резервирование",
+          "relatedLessons": [
+            { "title": "Saga Pattern", "slug": "12-design-patterns/04-saga" }
+          ]
+        },
+        {
+          "term": "Topic Governance (управление топиками)",
+          "termEn": "Topic Governance",
+          "definition": "Набор политик, соглашений и процессов для управления жизненным циклом топиков в масштабируемой Kafka-среде. Включает: соглашения об именовании (домен.сущность.событие.версия), управление схемами через Schema Registry, политики доступа через ACL, определение владельцев топиков, политики хранения и архивирования, процессы создания и удаления топиков. Предотвращает неконтролируемый рост числа топиков.",
+          "example": "# Соглашение об именовании топиков\n# формат: {domain}.{entity}.{event}.{version}\n\n# Примеры:\nordersvc.order.placed.v1\nordersvc.order.shipped.v1\npayment.transaction.completed.v2\nanalytics.user.session.ended.v1\n\n# Метаданные топика (через Custom Config)\nkafka-configs.sh --bootstrap-server localhost:9092 \\\n  --alter --topic ordersvc.order.placed.v1 \\\n  --add-config 'owner=orders-team,\\\n  contact=orders@company.com,\\\n  sla-tier=gold'",
+          "relatedLessons": [
+            { "title": "Governance и операции", "slug": "13-capstone/02-governance" }
+          ]
+        }
+      ]
+    }
+  ]
 }
