@@ -1,0 +1,178 @@
+# Multi-DC и Design Patterns -- Docker Lab
+#
+# Этот стенд моделирует два независимых Kafka 4.0 KRaft-кластера
+# в двух дата-центрах (DC-1 = Primary, DC-2 = DR) с репликацией через MirrorMaker 2.
+# Дополнительно: PostgreSQL для демонстрации паттерна transactional outbox.
+#
+# Сервисы:
+#   kafka-dc1      -- Kafka 4.0 KRaft (Основной кластер DC-1), порт 9092
+#   kafka-dc2      -- Kafka 4.0 KRaft (DR-кластер DC-2), порт 9094
+#   mirrormaker2   -- MirrorMaker 2 (репликация dc1 -> dc2)
+#   postgres-outbox -- PostgreSQL 16 (таблица outbox для паттерна transactional outbox)
+#
+# Запуск: docker compose up -d
+# Остановка (с очисткой томов): docker compose down -v
+# Проверка статуса: docker compose ps
+# Логи MM2: docker compose logs -f mirrormaker2
+
+services:
+
+  # -------------------------------------------------------------------
+  # DC-1 Primary: Основной Kafka-кластер (брокер + контроллер в KRaft)
+  # -------------------------------------------------------------------
+  kafka-dc1:
+    image: apache/kafka:4.0.0
+    container_name: kafka-dc1
+    ports:
+      - "9092:9092"   # Внешний доступ к DC-1 Kafka (для упражнений с хоста)
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+
+      # Listeners:
+      #   PLAINTEXT://:9092  -- клиентские подключения (producer/consumer)
+      #   CONTROLLER://:9093 -- внутренняя KRaft-коммуникация (не открыт наружу)
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-dc1:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+
+      # KRaft кворум: один узел (combined mode для лаб-стенда)
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-dc1:9093
+
+      # Репликация для одного брокера: RF=1 (лаб-стенд, не production)
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+
+      # Уникальный идентификатор кластера DC-1
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+
+      KAFKA_LOG_DIRS: /var/kafka/dc1-logs
+
+    volumes:
+      - kafka-dc1-data:/var/kafka/dc1-logs
+
+    healthcheck:
+      test: ["CMD", "kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+    networks:
+      - kafka-lab-net
+
+  # -------------------------------------------------------------------
+  # DC-2 DR: Резервный Kafka-кластер (брокер + контроллер в KRaft)
+  # -------------------------------------------------------------------
+  kafka-dc2:
+    image: apache/kafka:4.0.0
+    container_name: kafka-dc2
+    ports:
+      - "9094:9092"   # Внешний доступ к DC-2 Kafka (порт 9094 на хосте)
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-dc2:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+
+      # KRaft кворум: один узел DC-2
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-dc2:9093
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+
+      # Уникальный идентификатор кластера DC-2 (отличается от DC-1)
+      CLUSTER_ID: "NkV4PFZCNjgxNjNFNDM3Rl"
+
+      KAFKA_LOG_DIRS: /var/kafka/dc2-logs
+
+    volumes:
+      - kafka-dc2-data:/var/kafka/dc2-logs
+
+    healthcheck:
+      test: ["CMD", "kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+    networks:
+      - kafka-lab-net
+
+  # -------------------------------------------------------------------
+  # MirrorMaker 2: репликация DC-1 -> DC-2 (active-passive)
+  # -------------------------------------------------------------------
+  mirrormaker2:
+    image: apache/kafka:4.0.0
+    container_name: mirrormaker2
+    depends_on:
+      kafka-dc1:
+        condition: service_healthy
+      kafka-dc2:
+        condition: service_healthy
+    # connect-mirror-maker.sh запускает MirrorMaker 2 в standalone режиме
+    # (встроенный Connect worker + три MM2 connector'а)
+    command: /opt/kafka/bin/connect-mirror-maker.sh /opt/kafka/config/mm2.properties
+    volumes:
+      # Монтируем конфигурационный файл MM2 в контейнер
+      - ./config/mm2.properties:/opt/kafka/config/mm2.properties:ro
+    networks:
+      - kafka-lab-net
+    restart: on-failure
+
+  # -------------------------------------------------------------------
+  # PostgreSQL: база данных для паттерна transactional outbox (упражнение 03)
+  # -------------------------------------------------------------------
+  postgres-outbox:
+    image: postgres:16-alpine
+    container_name: postgres-outbox
+    ports:
+      - "5432:5432"   # Внешний доступ для psql с хоста (необязательно)
+    environment:
+      # Внимание: учётные данные только для учебного стенда.
+      # Никогда не используйте admin/admin в production-системах.
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: orders
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # SQL-скрипт для создания таблицы outbox при первом запуске
+      - ./config/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d orders"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+    networks:
+      - kafka-lab-net
+
+# -------------------------------------------------------------------
+# Именованные тома для постоянного хранения данных
+# -------------------------------------------------------------------
+volumes:
+  kafka-dc1-data:
+    driver: local
+  kafka-dc2-data:
+    driver: local
+  postgres-data:
+    driver: local
+
+# -------------------------------------------------------------------
+# Сеть: все сервисы в одной bridge-сети
+# Имена контейнеров kafka-dc1, kafka-dc2, postgres-outbox
+# используются как DNS-имена внутри сети
+# -------------------------------------------------------------------
+networks:
+  kafka-lab-net:
+    driver: bridge
