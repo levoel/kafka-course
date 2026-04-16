@@ -1,0 +1,26 @@
+# Prometheus конфигурация для Kafka Security + Monitoring Lab
+# Документация: https://prometheus.io/docs/prometheus/latest/configuration/configuration/
+
+global:
+  scrape_interval: 15s       # как часто опрашивать цели (по умолчанию)
+  evaluation_interval: 15s   # как часто вычислять правила алертов
+  scrape_timeout: 10s        # таймаут одного scrape-запроса
+
+scrape_configs:
+  # JMX Exporter от Kafka брокера
+  # JMX Exporter слушает на kafka:9404 (KAFKA_OPTS java-агент)
+  - job_name: "kafka-broker"
+    static_configs:
+      - targets:
+          - "kafka:9404"
+        labels:
+          cluster: "security-lab"
+          broker_id: "1"
+    scrape_interval: 10s     # опрашивать брокер чаще (каждые 10с)
+    scrape_timeout: 8s
+
+  # Самомониторинг Prometheus
+  - job_name: "prometheus"
+    static_configs:
+      - targets:
+          - "localhost:9090"

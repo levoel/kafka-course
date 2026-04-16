@@ -1,0 +1,19 @@
+# Grafana: автоматическая provisioning конфигурация источника данных Prometheus
+# Файл монтируется в: /etc/grafana/provisioning/datasources/datasource.yml
+# Документация: https://grafana.com/docs/grafana/latest/administration/provisioning/
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    # proxy -- Grafana обращается к Prometheus через внутреннюю Docker-сеть
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    # Включить поддержку Prometheus query hints и exemplars
+    jsonData:
+      httpMethod: POST
+      timeInterval: "15s"
+    # Не удалять при перезапуске Grafana
+    editable: false

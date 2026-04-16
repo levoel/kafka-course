@@ -1,0 +1,147 @@
+# Kafka 4.0 KRaft -- SASL/SCRAM + JMX Exporter + Prometheus + Grafana
+#
+# Этот стенд демонстрирует:
+#   - Kafka 4.0 в режиме KRaft с включённым SASL/SCRAM-SHA-256
+#   - JMX Exporter как Java-агент для экспорта метрик Kafka в формате Prometheus
+#   - Prometheus для сбора метрик
+#   - Grafana для визуализации метрик
+#
+# JMX Exporter JAR загружается сервисом jmx-exporter-init при первом запуске
+# и сохраняется в именованный том jmx-exporter-jar.
+#
+# Запуск: docker compose up -d
+# Остановка: docker compose down -v
+# Проверка здоровья: docker compose ps
+
+services:
+
+  # Вспомогательный контейнер: загружает JMX Exporter JAR в общий том
+  # Выполняется однократно и завершается (restart: no)
+  jmx-exporter-init:
+    image: alpine:3.19
+    container_name: jmx-exporter-init
+    restart: "no"
+    volumes:
+      - jmx-exporter-jar:/opt/jmx_exporter
+    command: >
+      sh -c "
+        if [ ! -f /opt/jmx_exporter/jmx_prometheus_javaagent.jar ]; then
+          echo 'Загрузка JMX Prometheus Java Agent...'
+          wget -q -O /opt/jmx_exporter/jmx_prometheus_javaagent.jar
+            https://github.com/prometheus/jmx_exporter/releases/download/1.1.0/jmx_prometheus_javaagent-1.1.0.jar
+          echo 'JMX Exporter загружен успешно.'
+        else
+          echo 'JMX Exporter уже присутствует в томе.'
+        fi
+      "
+
+  kafka:
+    image: apache/kafka:4.0.0
+    container_name: kafka-security-lab
+    depends_on:
+      jmx-exporter-init:
+        condition: service_completed_successfully
+    ports:
+      - "9092:9092"   # Plaintext (Admin/Internal) -- для управления кластером
+      - "9094:9094"   # SASL_PLAINTEXT -- для аутентифицированных клиентов
+      - "9404:9404"   # JMX Exporter HTTP -- Prometheus scrape endpoint
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+
+      # Три listener:
+      #   PLAINTEXT://9092   -- без аутентификации, для admin-операций (kafka-configs, kafka-topics)
+      #   SASL_PLAINTEXT://9094 -- с SASL/SCRAM-SHA-256, для клиентов (producer/consumer)
+      #   CONTROLLER://9093  -- внутренняя KRaft-коммуникация (не открыт наружу)
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,SASL_PLAINTEXT://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,SASL_PLAINTEXT://kafka:9094
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_DIRS: /var/kafka/logs
+
+      # SASL: включить механизм SCRAM-SHA-256
+      KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-256
+      # Inter-broker protocol -- PLAINTEXT (оба брокера находятся внутри Docker сети)
+      KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: PLAINTEXT
+
+      # Авторизатор Kafka 4.0 (KRaft): StandardAuthorizer
+      # ВАЖНО: старый AclAuthorizer удалён в Kafka 4.0; используйте StandardAuthorizer
+      KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+      # Разрешить всем при отсутствии ACL -- удобно на этапе создания учётных записей
+      # В упражнении 02 будет изменено для демонстрации deny-by-default
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "true"
+      # Суперпользователи: не подпадают под ACL-проверки
+      KAFKA_SUPER_USERS: "User:admin;User:ANONYMOUS"
+
+      # JMX Exporter: Java-агент, порт 9404, конфиг из volume
+      KAFKA_OPTS: "-javaagent:/opt/jmx_exporter/jmx_prometheus_javaagent.jar=9404:/opt/jmx_exporter/kafka-broker.yml"
+      KAFKA_JMX_PORT: 9999
+
+      # CLUSTER_ID для стабильного идентификатора кластера
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+
+    volumes:
+      - kafka-data:/var/kafka/logs
+      - jmx-exporter-jar:/opt/jmx_exporter
+      - ./config/kafka-broker.yml:/opt/jmx_exporter/kafka-broker.yml:ro
+
+    healthcheck:
+      test: ["CMD", "kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus-lab
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=1d"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana-lab
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./config/grafana-datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  kafka-data:
+  jmx-exporter-jar:
+  prometheus-data:
+  grafana-data:

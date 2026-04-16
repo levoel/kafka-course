@@ -1,0 +1,112 @@
+# JMX Exporter конфигурация для Kafka 4.0 брокера
+# Документация: https://github.com/prometheus/jmx_exporter
+#
+# Экспортируемые метрики:
+#   kafka_server_*      -- метрики брокера (репликация, throughput, quota)
+#   kafka_network_*     -- метрики сетевого слоя (latency, request rate)
+#   kafka_controller_*  -- метрики KRaft контроллера (active controller count)
+#   kafka_log_*         -- метрики журнала (log start/end offset, segment count)
+
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+
+# Паттерны JMX MBean -> Prometheus метрики
+# Синтаксис: pattern захватывает группы ($1, $2, ...) из имени MBean
+# name: имя Prometheus метрики (snake_case)
+# labels: дополнительные label для группировки по топику/разделу
+
+rules:
+  # UnderReplicatedPartitions -- КРИТИЧЕСКАЯ метрика
+  # Должна быть равна 0 в рабочем кластере
+  # Алерт: > 0 дольше 5 минут = риск потери данных
+  - pattern: "kafka.server<type=ReplicaManager, name=UnderReplicatedPartitions><>Value"
+    name: kafka_server_replicamanager_underreplicatedpartitions
+    type: GAUGE
+    help: "Количество under-replicated партиций (ISR < replication.factor)"
+
+  # UnderMinIsrPartitionCount -- партиции ниже min.insync.replicas
+  # Алерт: > 0 немедленно (acks=all запись невозможна)
+  - pattern: "kafka.server<type=ReplicaManager, name=UnderMinIsrPartitionCount><>Value"
+    name: kafka_server_replicamanager_underminisrpartitioncount
+    type: GAUGE
+    help: "Количество партиций ниже min.insync.replicas"
+
+  # PartitionCount и LeaderCount
+  - pattern: "kafka.server<type=ReplicaManager, name=(PartitionCount|LeaderCount)><>Value"
+    name: "kafka_server_replicamanager_$1"
+    type: GAUGE
+
+  # RequestHandlerAvgIdlePercent -- загрузка I/O потоков
+  # Норма: > 0.30 (30% простоя)
+  # Алерт: < 0.30 дольше 10 минут = брокер перегружен
+  - pattern: "kafka.server<type=KafkaRequestHandlerPool, name=RequestHandlerAvgIdlePercent><>OneMinuteRate"
+    name: kafka_server_kafkarequesthandlerpool_requesthandleravgidlepercent
+    type: GAUGE
+    help: "Доля времени простоя I/O потоков (1.0 = полный простой)"
+
+  # MessagesInPerSec -- входящий поток сообщений
+  - pattern: "kafka.server<type=BrokerTopicMetrics, name=MessagesInPerSec><>OneMinuteRate"
+    name: kafka_server_brokertopicmetrics_messagesinpersec
+    type: GAUGE
+    help: "Входящих сообщений в секунду (все топики)"
+
+  # BytesInPerSec / BytesOutPerSec -- входящий/исходящий байтовый поток
+  - pattern: "kafka.server<type=BrokerTopicMetrics, name=(BytesInPerSec|BytesOutPerSec|BytesRejectedPerSec)><>OneMinuteRate"
+    name: "kafka_server_brokertopicmetrics_$1_rate"
+    type: GAUGE
+
+  # Per-topic throughput (с label topic)
+  - pattern: "kafka.server<type=BrokerTopicMetrics, name=(BytesInPerSec|BytesOutPerSec|MessagesInPerSec), topic=(.+)><>OneMinuteRate"
+    name: "kafka_server_brokertopicmetrics_$1_rate"
+    labels:
+      topic: "$2"
+    type: GAUGE
+
+  # Request latency (TotalTimeMs по типу запроса)
+  # Норма p99 (acks=all): < 100ms
+  # Алерт p99: > 500ms = проблема с диском или ISR
+  - pattern: "kafka.network<type=RequestMetrics, name=TotalTimeMs, request=(.+)><>99thPercentile"
+    name: "kafka_network_requestmetrics_totaltimems_p99"
+    labels:
+      request: "$1"
+    type: GAUGE
+    help: "p99 latency запроса (мс)"
+
+  # RequestsPerSec по типу запроса
+  - pattern: "kafka.network<type=RequestMetrics, name=RequestsPerSec, request=(.+)><>OneMinuteRate"
+    name: "kafka_network_requestmetrics_requestspersec"
+    labels:
+      request: "$1"
+    type: GAUGE
+
+  # ActiveControllerCount -- количество активных контроллеров
+  # Норма: 1. Алерт: 0 (нет контроллера) или > 1 (split-brain)
+  - pattern: "kafka.controller<type=KafkaController, name=ActiveControllerCount><>Value"
+    name: kafka_controller_kafkacontroller_activecontrollercount
+    type: GAUGE
+    help: "Количество активных KRaft контроллеров (норма: 1)"
+
+  # OfflinePartitionsCount
+  - pattern: "kafka.controller<type=KafkaController, name=OfflinePartitionsCount><>Value"
+    name: kafka_controller_kafkacontroller_offlinepartitionscount
+    type: GAUGE
+    help: "Количество offline партиций (норма: 0)"
+
+  # BrokerState -- состояние брокера
+  # 0=NOT_RUNNING, 2=STARTING, 3=RECOVERY, 4=RUNNING, 6=PENDING_SHUTDOWN, 7=SHUTTING_DOWN
+  - pattern: "kafka.server<type=KafkaServer, name=BrokerState><>Value"
+    name: kafka_server_kafkaserver_brokerstate
+    type: GAUGE
+    help: "Состояние брокера (4 = RUNNING)"
+
+  # OfflineLogDirectoryCount -- количество недоступных директорий данных
+  # Норма: 0. > 0 = сбой диска
+  - pattern: "kafka.log<type=LogManager, name=OfflineLogDirectoryCount><>Value"
+    name: kafka_log_logmanager_offlinelogdirectorycount
+    type: GAUGE
+    help: "Количество недоступных директорий журнала (норма: 0)"
+
+  # IsrExpandsPerSec / IsrShrinksPerSec
+  - pattern: "kafka.server<type=ReplicaManager, name=(IsrExpandsPerSec|IsrShrinksPerSec)><>OneMinuteRate"
+    name: "kafka_server_replicamanager_$1_rate"
+    type: GAUGE
