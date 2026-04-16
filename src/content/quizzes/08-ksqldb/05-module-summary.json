@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "08-ksqldb/05-module-summary",
+  "moduleId": "08-ksqldb",
+  "_meta": {
+    "idPrefix": "kafka-m08-05",
+    "description": "4 synthesis questions: kafka-m08-05-q1, q2, q3 for MC; kafka-m08-05-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m08-05-q1",
+      "type": "multiple-choice",
+      "question": "Команда реализует real-time систему мониторинга с требованиями: (1) подсчёт ошибок по сервисам за 5-минутные скользящие окна (sliding windows), (2) обогащение событий из справочника сервисов, (3) логика эскалации с обращением к внешнему API при превышении порога. Что правильно рекомендовать?",
+      "options": [
+        {
+          "id": "a",
+          "text": "ksqlDB — SQL-синтаксис проще и быстрее в разработке"
+        },
+        {
+          "id": "b",
+          "text": "Kafka Streams — sliding windows недоступны в ksqlDB, обращение к внешнему API невозможно в SQL, сложная бизнес-логика эскалации реализуется через Processor API"
+        },
+        {
+          "id": "c",
+          "text": "Оба инструмента одинаково подходят — выбор произвольный"
+        },
+        {
+          "id": "d",
+          "text": "ksqlDB с UDF — UDF может реализовать вызов внешнего API и sliding window логику"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Три требования делают Kafka Streams единственным правильным выбором. (1) Sliding windows: SlidingWindows.ofTimeDifferenceWithNoGrace(Duration.ofMinutes(5)) в Kafka Streams DSL — в ksqlDB нет SQL-аналога WINDOW SLIDING. (2) Enrichment из справочника — это KStream-KTable join, возможно в обоих, но (3) вызов внешнего API в процессинге (HTTP-запрос при превышении порога) недоступен в ksqlDB SQL и ограниченно доступен через UDF. Processor API в Kafka Streams — естественное решение: punctuator вызывается по таймеру или при события, может выполнять произвольный Java-код включая HTTP-запросы.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m08-05-q2",
+      "type": "multiple-choice",
+      "question": "Стартап строит MVP аналитической платформы: агрегация событий по категориям за 1-часовые tumbling окна, enrichment из таблицы категорий, REST API для текущих статистик. Команда из 3 человек, все знают SQL, никто не знает Kafka Streams Java DSL. Что выбрать?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Kafka Streams — более мощный инструмент, несмотря на кривую обучения"
+        },
+        {
+          "id": "b",
+          "text": "ksqlDB — CTAS с WINDOW TUMBLING для агрегации, LEFT JOIN для enrichment, pull queries для REST API backend. SQL-команда реализует это за часы без Java-знаний"
+        },
+        {
+          "id": "c",
+          "text": "Apache Flink — более подходящее решение для аналитики"
+        },
+        {
+          "id": "d",
+          "text": "Оба инструмента не подходят — нужна OLAP база данных"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Для данного сценария ksqlDB идеален: задачи стандартны (TUMBLING aggregation, KStream-KTable join, materialized view для pull queries), команда знает SQL, скорость разработки критична для MVP. Конкретный пример реализации: CREATE TABLE hourly_stats AS SELECT category, COUNT(*) AS events FROM events_stream LEFT JOIN categories_table ON e.cat_id = c.cat_id WINDOW TUMBLING (SIZE 1 HOUR) GROUP BY category EMIT CHANGES; — затем pull query возвращает данные для REST API. Команда из 3 SQL-разработчиков реализует это за часы, а не дни как при изучении Kafka Streams Java DSL.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m08-05-q3",
+      "type": "multiple-choice",
+      "question": "Что из нижеперечисленного является корректным утверждением о соотношении Kafka Streams и ksqlDB?",
+      "options": [
+        {
+          "id": "a",
+          "text": "ksqlDB заменяет Kafka Streams — Confluent планирует deprecate Java DSL в пользу SQL"
+        },
+        {
+          "id": "b",
+          "text": "Kafka Streams и ksqlDB — конкуренты от разных производителей"
+        },
+        {
+          "id": "c",
+          "text": "ksqlDB — уровень SQL-абстракции поверх Kafka Streams: ksqlDB компилирует SQL в Kafka Streams топологии. Оба инструмента дополняют друг друга, а не конкурируют"
+        },
+        {
+          "id": "d",
+          "text": "Kafka Streams — устаревший инструмент, ksqlDB — его современная замена"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "ksqlDB внутренне построен на Kafka Streams: когда вы пишете CREATE STREAM AS SELECT, ksqlDB компилирует это в Kafka Streams TopologyBuilder и запускает топологию через Kafka Streams runtime. Это два уровня одной системы: Kafka Streams — низкоуровневый Java DSL с полным контролем; ksqlDB — высокоуровневый SQL-интерфейс для стандартных сценариев. Один дополняет другой: в одной системе ksqlDB может обрабатывать стандартные пайплайны, а Kafka Streams — сложные кастомные трансформации.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m08-05-q4",
+      "type": "true-false",
+      "question": "ksqlDB поддерживает создание SOURCE и SINK коннекторов через SQL-синтаксис (CREATE SOURCE CONNECTOR / CREATE SINK CONNECTOR), и эти коннекторы выполняются непосредственно внутри ksqlDB-сервера.",
+      "correctAnswer": "false",
+      "explanation": "Частично ложь, требует уточнения. CREATE SOURCE CONNECTOR / CREATE SINK CONNECTOR — корректный SQL-синтаксис ksqlDB, который работает. Но коннекторы выполняются НЕ на ksqlDB-сервере — они выполняются на отдельном Kafka Connect worker-кластере (Модуль 05). ksqlDB только управляет коннекторами через Kafka Connect REST API (ksql.connect.url=http://connect-worker:8083): при CREATE SOURCE CONNECTOR ksqlDB отправляет POST-запрос на Connect REST API. Это важное разграничение: ksqlDB = плоскость управления (control plane), Kafka Connect = плоскость данных (data plane) для коннекторов.",
+      "bloomLevel": "analytical"
+    }
+  ]
+}

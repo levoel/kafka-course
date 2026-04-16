@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "08-ksqldb/03-windowed-aggregations-udfs",
+  "moduleId": "08-ksqldb",
+  "_meta": {
+    "idPrefix": "kafka-m08-03",
+    "description": "4 questions: kafka-m08-03-q1, q2, q3 for MC; kafka-m08-03-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m08-03-q1",
+      "type": "multiple-choice",
+      "question": "Что возвращают псевдо-столбцы WINDOWSTART и WINDOWEND в windowed запросе ksqlDB? Какой тип данных и что они означают?",
+      "options": [
+        {
+          "id": "a",
+          "text": "VARCHAR в формате ISO 8601: начало и конец окна в читаемом виде"
+        },
+        {
+          "id": "b",
+          "text": "BIGINT: Unix timestamp в миллисекундах, обозначающие начало (включительно) и конец (исключительно) временного окна"
+        },
+        {
+          "id": "c",
+          "text": "TIMESTAMP: Java LocalDateTime объект начала и конца окна"
+        },
+        {
+          "id": "d",
+          "text": "INT: порядковый номер окна с начала потока"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "WINDOWSTART и WINDOWEND возвращают BIGINT — Unix timestamp в миллисекундах. WINDOWSTART — включительная нижняя граница окна; WINDOWEND — исключительная верхняя граница. Например, для часового tumbling окна с 14:00 до 15:00: WINDOWSTART = 1704106800000, WINDOWEND = 1704110400000. Для конвертации в читаемый формат используется FROM_UNIXTIME(WINDOWSTART / 1000) или FORMAT_TIMESTAMP. Эти псевдо-столбцы доступны только внутри windowed запроса (с WINDOW TUMBLING/HOPPING/SESSION clause).",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m08-03-q2",
+      "type": "multiple-choice",
+      "question": "Напишите ksqlDB запрос для подсчёта количества транзакций по merchant_id за каждые 15-минутные tumbling окна из потока transactions_stream (поля: tx_id, merchant_id, amount, ts).",
+      "options": [
+        {
+          "id": "a",
+          "text": "SELECT merchant_id, COUNT(*) FROM transactions_stream GROUP BY merchant_id WINDOW TUMBLING 15 MINUTES EMIT CHANGES;"
+        },
+        {
+          "id": "b",
+          "text": "CREATE TABLE merchant_tx_counts AS SELECT merchant_id, COUNT(*) AS tx_count, WINDOWSTART AS win_start FROM transactions_stream WINDOW TUMBLING (SIZE 15 MINUTES) GROUP BY merchant_id EMIT CHANGES;"
+        },
+        {
+          "id": "c",
+          "text": "CREATE STREAM merchant_tx_counts AS SELECT merchant_id, COUNT(*) AS tx_count FROM transactions_stream WINDOW TUMBLING (SIZE 15 MINUTES) GROUP BY merchant_id EMIT CHANGES;"
+        },
+        {
+          "id": "d",
+          "text": "CREATE TABLE merchant_tx_counts AS SELECT merchant_id, SUM(1) AS tx_count FROM transactions_stream GROUP BY merchant_id, TUMBLING(15 MINUTES) EMIT CHANGES;"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Корректный синтаксис: CTAS (CREATE TABLE AS SELECT) для создания materialized TABLE, WINDOW TUMBLING (SIZE 15 MINUTES) — синтаксис ksqlDB для tumbling window, GROUP BY merchant_id — агрегация по ключу внутри окна, COUNT(*) — счётчик, EMIT CHANGES — persistent query. Вариант A — неверный порядок WINDOW и GROUP BY. Вариант C — windowed агрегация должна создавать TABLE (не STREAM), так как GROUP BY создаёт state. Вариант D — неверный синтаксис TUMBLING().",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m08-03-q3",
+      "type": "multiple-choice",
+      "question": "Один и тот же поток events_stream обрабатывается двумя запросами: WINDOW TUMBLING (SIZE 1 HOUR) и WINDOW HOPPING (SIZE 1 HOUR, ADVANCE BY 15 MINUTES). При одинаковом входном потоке из 100 событий — сколько строк в выходной TABLE произведёт каждый запрос? Почему?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Оба запроса произведут одинаковое количество строк — разный синтаксис, одинаковый результат"
+        },
+        {
+          "id": "b",
+          "text": "TUMBLING произведёт меньше строк: каждое событие попадает в одно окно. HOPPING произведёт больше строк: каждое событие попадает в 4 перекрывающихся окна (1 час / 15 минут advance = 4), умножая количество строк"
+        },
+        {
+          "id": "c",
+          "text": "HOPPING произведёт меньше строк, так как скользящие окна более эффективны"
+        },
+        {
+          "id": "d",
+          "text": "TUMBLING произведёт больше строк из-за отсутствия перекрытия"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "При TUMBLING (SIZE 1 HOUR) каждое событие принадлежит ровно одному часовому окну. 100 событий = 100 записей в выходе (одна на событие на окно). При HOPPING (SIZE 1 HOUR, ADVANCE BY 15 MINUTES) перекрытие SIZE/ADVANCE = 60/15 = 4: каждое событие принадлежит 4 окнам одновременно (если оно не на самом краю). 100 событий -> примерно 4x больше записей в выходной TABLE. Это ключевое свойство hopping windows: больший охват за счёт большего объёма данных.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m08-03-q4",
+      "type": "true-false",
+      "question": "UDF (User-Defined Function) в ksqlDB можно написать прямо на SQL — достаточно зарегистрировать SQL-функцию через CREATE FUNCTION синтаксис, аналогично PostgreSQL.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. ksqlDB не поддерживает CREATE FUNCTION на SQL — нет аналога PL/pgSQL или PL/Python. UDF, UDAF и UDTF в ksqlDB пишутся исключительно на Java или Kotlin с использованием аннотаций @UdfDescription, @Udf, @UdafDescription, @UdtfDescription. Функции компилируются в JAR и деплоятся в директорию ext/ ksqlDB-сервера. Это одно из принципиальных ограничений ksqlDB: для создания пользовательских функций требуется Java-компетенция, даже если сам пайплайн написан на SQL.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

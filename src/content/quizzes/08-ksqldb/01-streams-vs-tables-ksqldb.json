@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "08-ksqldb/01-streams-vs-tables-ksqldb",
+  "moduleId": "08-ksqldb",
+  "_meta": {
+    "idPrefix": "kafka-m08-01",
+    "description": "4 questions: kafka-m08-01-q1, q2, q3 for MC; kafka-m08-01-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m08-01-q1",
+      "type": "multiple-choice",
+      "question": "В чём принципиальная разница между STREAM и TABLE в ksqlDB с точки зрения семантики Kafka-топика?",
+      "options": [
+        {
+          "id": "a",
+          "text": "STREAM хранит данные в отдельной базе данных ksqlDB, TABLE — в Kafka-топике"
+        },
+        {
+          "id": "b",
+          "text": "STREAM интерпретирует топик как append-only лог событий (каждое сообщение — независимое событие), TABLE — как changelog (каждое сообщение по ключу обновляет актуальное состояние)"
+        },
+        {
+          "id": "c",
+          "text": "STREAM и TABLE — синонимы в ksqlDB, разница только синтаксическая"
+        },
+        {
+          "id": "d",
+          "text": "TABLE поддерживает только Avro-формат, STREAM — только JSON"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "STREAM соответствует KStream в Kafka Streams: append-only поток событий, каждое сообщение независимо. Новое сообщение с тем же ключом — это новое событие, не обновление. TABLE соответствует KTable: changelog, где актуальное состояние — последнее значение по ключу. Новое сообщение с существующим ключом перезаписывает предыдущее (UPSERT). Это фундаментальная разница: поток транзакций — STREAM; словарь пользователей — TABLE.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m08-01-q2",
+      "type": "multiple-choice",
+      "question": "Архитектор хочет зарегистрировать в ksqlDB топик sensor-readings, куда IoT-сенсоры постоянно шлют измерения температуры (каждое измерение независимо, ключ — sensor_id). Какое SQL-выражение корректно и почему?",
+      "options": [
+        {
+          "id": "a",
+          "text": "CREATE TABLE sensor_readings (sensor_id VARCHAR PRIMARY KEY, temperature DOUBLE) WITH (kafka_topic='sensor-readings', value_format='JSON') — потому что sensor_id уникален"
+        },
+        {
+          "id": "b",
+          "text": "CREATE STREAM sensor_readings (sensor_id VARCHAR KEY, temperature DOUBLE, ts BIGINT) WITH (kafka_topic='sensor-readings', value_format='JSON') — потому что каждое измерение независимое событие"
+        },
+        {
+          "id": "c",
+          "text": "CREATE TABLE sensor_readings (...) — потому что TABLE быстрее при агрегации"
+        },
+        {
+          "id": "d",
+          "text": "Оба варианта эквивалентны — ksqlDB автоматически выбирает тип"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Показания сенсора — это события: каждое измерение независимо, история важна (хотим видеть все температуры, не только последнюю). CREATE STREAM — правильный выбор: STREAM интерпретирует топик как append-only лог. TABLE был бы неверен: он оставил бы только последнее показание по sensor_id, теряя историю. Ключ KEY (не PRIMARY KEY) в STREAM означает ключ Kafka-сообщения для партиционирования, а не уникальный идентификатор записи.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m08-01-q3",
+      "type": "multiple-choice",
+      "question": "Разработчик создаёт CREATE TABLE orders (...) WITH (kafka_topic='orders', value_format='JSON') без указания PRIMARY KEY в определении столбцов. Что произойдёт?",
+      "options": [
+        {
+          "id": "a",
+          "text": "ksqlDB автоматически использует offset Kafka-сообщения как первичный ключ"
+        },
+        {
+          "id": "b",
+          "text": "ksqlDB вернёт ошибку — TABLE требует явного объявления PRIMARY KEY для корректного UPSERT-поведения"
+        },
+        {
+          "id": "c",
+          "text": "TABLE будет создана без первичного ключа — работает как STREAM с TABLE-синтаксисом"
+        },
+        {
+          "id": "d",
+          "text": "ksqlDB автоматически выберет первый столбец как PRIMARY KEY"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "CREATE TABLE в ksqlDB требует явного указания PRIMARY KEY — это обязательно для KTable-семантики: ksqlDB должен знать, по какому полю хранить актуальное состояние в state store. Без PRIMARY KEY ksqlDB не может определить логику UPSERT: какое поле использовать как ключ для RocksDB lookup. Ошибка будет на этапе парсинга SQL-выражения. Правильно: user_id VARCHAR PRIMARY KEY в определении столбцов TABLE.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m08-01-q4",
+      "type": "true-false",
+      "question": "ksqlDB внутренне построен на Kafka Streams: каждое SQL-выражение CREATE STREAM AS SELECT или CREATE TABLE AS SELECT компилируется в Kafka Streams топологию, которая выполняется внутри ksqlDB-сервера.",
+      "correctAnswer": "true",
+      "explanation": "Истина. ksqlDB — это уровень SQL-абстракции поверх Kafka Streams. Каждое SQL-выражение (CSAS, CTAS) парсируется, планируется и компилируется в Kafka Streams TopologyBuilder, который строит граф Source/Processor/Sink узлов. Kafka Streams экземпляр, работающий внутри ksqlDB-сервера, выполняет эту топологию как обычное Streams-приложение: consumer groups, state stores (RocksDB), changelog topics — всё из Kafka Streams. Понимание Kafka Streams DSL даёт понимание того, что ksqlDB делает под капотом.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

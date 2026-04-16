@@ -1,0 +1,282 @@
+{
+  "lessonSlug": "08-ksqldb/_exam",
+  "moduleId": "08-ksqldb",
+  "examTitle": "Экзамен: ksqlDB",
+  "passThreshold": 70,
+  "_meta": {
+    "idPrefix": "kafka-m08-exam",
+    "description": "10 applied/analytical scenario-based questions covering ksqlDB STREAM/TABLE semantics, CSAS/CTAS, push/pull queries, windowed aggregations, production deployment, and Kafka Streams vs ksqlDB trade-offs"
+  },
+  "questions": [
+    {
+      "id": "kafka-m08-exam-q1",
+      "type": "multiple-choice",
+      "question": "Требуется: (1) создать поток обогащённых заказов, объединив orders_stream с customers_table по customer_id; (2) заказы дороже 1000 фильтровать. Какие SQL-выражения нужны и в каком порядке?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Сначала CREATE TABLE customers (... PRIMARY KEY ...) WITH (...), затем CREATE STREAM orders (...) WITH (...), затем CREATE STREAM enriched_orders AS SELECT o.*, c.name FROM orders o LEFT JOIN customers c ON o.customer_id = c.customer_id WHERE o.amount > 1000 EMIT CHANGES;"
+        },
+        {
+          "id": "b",
+          "text": "SELECT * FROM orders JOIN customers ON customer_id WHERE amount > 1000 EMIT CHANGES INTO enriched_orders;"
+        },
+        {
+          "id": "c",
+          "text": "CREATE STREAM enriched_orders AS SELECT o.*, c.name FROM orders o, customers c WHERE o.customer_id = c.customer_id AND o.amount > 1000;"
+        },
+        {
+          "id": "d",
+          "text": "CREATE TABLE enriched_orders AS SELECT o.order_id, c.name FROM orders o LEFT JOIN customers c ON o.customer_id = c.customer_id WHERE o.amount > 1000 GROUP BY o.order_id EMIT CHANGES;"
+        }
+      ],
+      "correctAnswer": "a",
+      "explanation": "Правильный порядок: (1) CREATE TABLE customers с PRIMARY KEY — TABLE для KTable-стороны join. (2) CREATE STREAM orders — STREAM для KStream-стороны join. (3) CREATE STREAM enriched_orders AS SELECT ... CSAS с LEFT JOIN и WHERE фильтром + EMIT CHANGES. Это KStream-KTable join: каждое событие из orders_stream обогащается текущим значением из customers_table. WHERE amount > 1000 фильтрует до записи в выходной топик. Вариант B — неверный синтаксис (INTO не работает так). Вариант D — использует CTAS с GROUP BY, что создаёт TABLE, а не STREAM для enrichment.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 01: Streams и Tables в ksqlDB; Урок 02: CSAS/CTAS и Push/Pull запросы"
+    },
+    {
+      "id": "kafka-m08-exam-q2",
+      "type": "multiple-choice",
+      "question": "Команда создала CTAS: CREATE TABLE user_stats AS SELECT user_id, COUNT(*) AS events FROM clickstream GROUP BY user_id EMIT CHANGES; Разработчик выполняет: SELECT * FROM user_stats WHERE user_id = 'user-42'; — и получает пустой результат, хотя в топике clickstream есть события от user-42. Перечислите возможные причины.",
+      "options": [
+        {
+          "id": "a",
+          "text": "Pull queries не поддерживают WHERE на VARCHAR ключах"
+        },
+        {
+          "id": "b",
+          "text": "Возможные причины: (1) clickstream STREAM ещё не зарегистрирован; (2) CTAS persistent query ещё не обработал события (задержка старта); (3) user_id в Kafka-сообщениях сериализован как ключ, но CTAS создаёт state store по сообщению, а не по ключу; (4) value_format несовместим с фактическим форматом данных в топике"
+        },
+        {
+          "id": "c",
+          "text": "user-42 не существует в системе — pull query всегда находит данные при правильной настройке"
+        },
+        {
+          "id": "d",
+          "text": "Нужен EMIT CHANGES в pull query для получения результатов"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "При пустом результате pull query на материализованный CTAS возможны несколько причин: (1) Persistent query только что запущен и ещё не обработал события из clickstream — state store пуст, нужно подождать. (2) value_format в CTAS не совпадает с фактическим форматом данных: если данные в JSON, но указан AVRO — десериализация провалится, события не попадут в state. (3) Ключ Kafka-сообщения (user_id) используется в GROUP BY — проверьте, что user_id корректно задан как KEY в определении STREAM. (4) Возможна проблема с кодировкой ключа. Диагностика: EXPLAIN на persistent query, проверка SHOW QUERIES на ошибки.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 02: CSAS/CTAS и Push/Pull запросы — раздел 'Pull queries'"
+    },
+    {
+      "id": "kafka-m08-exam-q3",
+      "type": "multiple-choice",
+      "question": "Разработчик создал 30 CTAS-queries на двухнодовом ksqlDB кластере (8 CPU, 16GB RAM на ноду). Через неделю производительность деградирует: consumer lag растёт, обработка замедляется. Что является наиболее вероятной причиной и как исправить?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Проблема в Kafka — нужно увеличить число партиций"
+        },
+        {
+          "id": "b",
+          "text": "30 CTAS = 30 Kafka Streams топологий = 30 наборов state stores + 30 consumer groups. Ресурсы кластера (CPU, диск для RocksDB) исчерпаны. Решения: добавить ноды в кластер, оптимизировать queries (объединить смежные агрегации), уменьшить retention state stores, или мигрировать часть пайплайна на Kafka Streams"
+        },
+        {
+          "id": "c",
+          "text": "Нужно увеличить Kafka retention для исходных топиков"
+        },
+        {
+          "id": "d",
+          "text": "Проблема решается перезапуском ksqlDB сервера"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Каждый CTAS persistent query = отдельная Kafka Streams топология = отдельный consumer group + state store (RocksDB) на диске + CPU thread для обработки. 30 CTAS на 2 ноды = ~15 топологий на ноду. При агрессивных state stores (большие GROUP BY по миллионам ключей) диск ноды заполняется, RocksDB compaction замедляет запись, CPU перегружен. Consumer lag растёт. Решение: горизонтальное масштабирование (добавить ноды — Kafka Streams автоматически rebalances), оптимизация (объединить похожие агрегации в один запрос), настройка state store TTL для windowed stores.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 04: ksqlDB в Production — раздел 'Capacity planning для ksqlDB кластера'"
+    },
+    {
+      "id": "kafka-m08-exam-q4",
+      "type": "multiple-choice",
+      "question": "CTAS-запрос: CREATE TABLE errors_hourly AS SELECT service, COUNT(*) AS cnt FROM error_stream WINDOW TUMBLING (SIZE 1 HOUR) GROUP BY service EMIT CHANGES; Некоторые события приходят с опозданием до 20 минут. Какие записи теряются и как исправить?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Записи не теряются — ksqlDB автоматически обрабатывает запоздавшие записи"
+        },
+        {
+          "id": "b",
+          "text": "Записи, опоздавшие на 20 минут после закрытия окна, отбрасываются (grace period по умолчанию = 0). Исправление: WINDOW TUMBLING (SIZE 1 HOUR, GRACE PERIOD 30 MINUTES) — тогда записи с опозданием до 30 минут всё ещё попадут в закрытое окно"
+        },
+        {
+          "id": "c",
+          "text": "Нужно добавить EMIT FINAL вместо EMIT CHANGES для обработки поздних событий"
+        },
+        {
+          "id": "d",
+          "text": "Запоздавшие записи помещаются в следующее окно автоматически"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "При WINDOW TUMBLING без GRACE PERIOD, grace period по умолчанию = 0 (или очень мало в некоторых версиях). Записи, event time которых относится к уже закрытому окну, отбрасываются — агрегат не обновляется. Для событий с опозданием до 20 минут нужен GRACE PERIOD минимум 20 минут, рекомендуется взять с запасом. Исправление: WINDOW TUMBLING (SIZE 1 HOUR, GRACE PERIOD 30 MINUTES). Под капотом это Kafka Streams TimeWindows.ofSizeAndGrace(Duration.ofHours(1), Duration.ofMinutes(30)) — grace period, после которого записи отвергаются.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 03: Windowed Aggregations и UDFs — раздел 'GRACE PERIOD'"
+    },
+    {
+      "id": "kafka-m08-exam-q5",
+      "type": "multiple-choice",
+      "question": "Разработчик выполняет DROP STREAM enriched_orders; Что происходит с Kafka-топиком ENRICHED_ORDERS, который был создан этим CSAS-запросом?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Kafka-топик ENRICHED_ORDERS автоматически удаляется вместе с потоком"
+        },
+        {
+          "id": "b",
+          "text": "DROP STREAM удаляет только метаданные ksqlDB (регистрацию потока и persistent query). Kafka-топик ENRICHED_ORDERS остаётся. Для удаления топика вместе со STREAM нужно: DROP STREAM enriched_orders DELETE TOPIC;"
+        },
+        {
+          "id": "c",
+          "text": "DROP STREAM не работает, если persistent query активен — нужно сначала TERMINATE"
+        },
+        {
+          "id": "d",
+          "text": "DROP STREAM удаляет топик только если он был создан через CSAS (не через CREATE STREAM ... WITH)"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "DROP STREAM в ksqlDB удаляет метаданные ksqlDB (регистрацию STREAM, завершает persistent query если он был активен), но НЕ удаляет Kafka-топик. Топик остаётся в кластере Kafka с данными. Это осознанное поведение: позволяет удалить регистрацию в ksqlDB, сохранив данные для других потребителей. Для полного удаления, включая топик: DROP STREAM IF EXISTS enriched_orders DELETE TOPIC; — суффикс DELETE TOPIC явно указывает на удаление Kafka-топика. То же применимо к DROP TABLE ... DELETE TOPIC.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 02: CSAS/CTAS и Push/Pull запросы — раздел 'Управление запросами'"
+    },
+    {
+      "id": "kafka-m08-exam-q6",
+      "type": "multiple-choice",
+      "question": "Команда выбирает между ksqlDB и Kafka Streams для real-time fraud detection системы с требованиями: (1) sliding window за последние 5 минут для каждой транзакции, (2) внешний вызов ML scoring API для каждого события, (3) сложная бизнес-логика с несколькими состояниями. Обоснуйте выбор.",
+      "options": [
+        {
+          "id": "a",
+          "text": "ksqlDB — проще в разработке, UDF может реализовать sliding window и ML вызов"
+        },
+        {
+          "id": "b",
+          "text": "Kafka Streams — (1) SlidingWindows доступны только в Java DSL, (2) внешние HTTP-вызовы в Processor API, (3) сложная логика состояний через KeyValueStore + punctuators. ksqlDB не покрывает все три требования"
+        },
+        {
+          "id": "c",
+          "text": "Нет разницы — оба инструмента идентичны по возможностям"
+        },
+        {
+          "id": "d",
+          "text": "Apache Flink — ни ksqlDB, ни Kafka Streams не подходят"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Kafka Streams — единственный правильный выбор для всех трёх требований: (1) SlidingWindows.ofTimeDifferenceWithNoGrace(Duration.ofMinutes(5)) — Java DSL класс из Kafka 2.7+, в ksqlDB нет WINDOW SLIDING SQL-аналога; (2) Processor API или обычный Java-код в transformValues() позволяет вызвать ML scoring HTTP API, в ksqlDB это невозможно в SQL (UDF не рекомендован для внешних вызовов из-за blocking); (3) KeyValueStore + Processor API с punctuators реализует любую логику состояний. ksqlDB оптимален для TUMBLING/HOPPING/SESSION агрегаций без внешних зависимостей.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 05: Итоги модуля — раздел 'Когда использовать ksqlDB'"
+    },
+    {
+      "id": "kafka-m08-exam-q7",
+      "type": "multiple-choice",
+      "question": "Разработчик выполняет в ksqlDB: CREATE SOURCE CONNECTOR jdbc_source WITH ('connector.class'='io.confluent.connect.jdbc.JdbcSourceConnector', ...). На каком компоненте системы физически выполняется этот коннектор?",
+      "options": [
+        {
+          "id": "a",
+          "text": "На ksqlDB-сервере — он встраивает Kafka Connect runtime"
+        },
+        {
+          "id": "b",
+          "text": "На отдельном Kafka Connect worker-кластере. ksqlDB только управляет коннектором через Kafka Connect REST API (ksql.connect.url). Коннектор выполняет данные задачи на Connect worker, а не на ksqlDB"
+        },
+        {
+          "id": "c",
+          "text": "На Kafka-брокере — брокер принимает коннектор и выполняет его"
+        },
+        {
+          "id": "d",
+          "text": "На Schema Registry — источник данных подключается через Schema Registry"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "CREATE SOURCE CONNECTOR в ksqlDB — это команда управления, а не развёртывания. ksqlDB отправляет POST-запрос на Kafka Connect REST API (настраивается через ksql.connect.url=http://connect-worker:8083). Connect worker создаёт коннектор, распределяет tasks по workers, выполняет чтение из источника (PostgreSQL в данном случае) и запись в Kafka-топик. ksqlDB не выполняет connector tasks — он только control plane. Это разграничение важно для capacity planning: коннекторы требуют ресурсов Connect-кластера, а не ksqlDB-кластера.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 04: ksqlDB в Production — раздел 'ksqlDB + Connect: полный SQL-пайплайн'"
+    },
+    {
+      "id": "kafka-m08-exam-q8",
+      "type": "multiple-choice",
+      "question": "В production ksqlDB работает в interactive mode. Дежурный инженер случайно запускает TERMINATE CSAS_PAYMENT_PROCESSOR_0;. Что произойдёт с downstream-потребителями и как предотвратить повторение?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Downstream-потребители автоматически переключатся на резервный query"
+        },
+        {
+          "id": "b",
+          "text": "Persistent query CSAS_PAYMENT_PROCESSOR_0 останавливается: запись в выходной топик PAYMENT_PROCESSOR прекращается. Downstream-потребители перестают получать новые данные (consumer lag растёт). Предотвращение: переход на headless mode с ksql.queries.file — в этом режиме CLI не может выполнять TERMINATE"
+        },
+        {
+          "id": "c",
+          "text": "ksqlDB автоматически перезапускает terminated queries через 30 секунд"
+        },
+        {
+          "id": "d",
+          "text": "Ничего критичного — данные накапливаются в Kafka и будут обработаны при следующем запуске query"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "TERMINATE немедленно останавливает persistent query: Kafka Streams топология завершается, consumer group commit последние offsets, запись в выходной топик прекращается. Downstream потребители видят: consumer lag = 0 новых сообщений в выходном топике, pipeline «заморожен». Восстановление: CREATE STREAM IF NOT EXISTS ... снова — ksqlDB перечитает с последних committed offsets. Предотвращение: headless mode (ksql.headless=true + ksql.queries.file=) — в headless режиме REST API для изменения queries отключён, CLI не принимает CREATE/DROP/TERMINATE команды.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 04: ksqlDB в Production — раздел 'Interactive vs Headless mode'"
+    },
+    {
+      "id": "kafka-m08-exam-q9",
+      "type": "multiple-choice",
+      "question": "Push query SELECT * FROM pageviews_stream EMIT CHANGES; выполнялся 3 часа, после чего HTTP-клиент закрыл соединение. Что произошло с ресурсами ksqlDB-сервера после отключения?",
+      "options": [
+        {
+          "id": "a",
+          "text": "На сервере остался persistent query, который продолжает потреблять ресурсы — нужен TERMINATE"
+        },
+        {
+          "id": "b",
+          "text": "Transient push query завершился вместе с HTTP-соединением. На ksqlDB-сервере нет остаточных ресурсов: нет consumer group, нет state store, нет записей в SHOW QUERIES"
+        },
+        {
+          "id": "c",
+          "text": "Query переходит в состояние PAUSED и может быть возобновлён"
+        },
+        {
+          "id": "d",
+          "text": "Данные за 3 часа буферизуются в памяти ksqlDB до следующего подключения клиента"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Push query без CREATE STREAM AS SELECT (то есть ad-hoc SELECT ... EMIT CHANGES) — это transient query. Он существует ровно пока клиент подключён. При закрытии HTTP-соединения ksqlDB немедленно прекращает выполнение: consumer group завершает poll, temporary resources освобождаются. Transient queries не видны в SHOW QUERIES (показываются только persistent queries). Это принципиальная разница от CSAS: CSAS = persistent, живёт независимо от клиентов; SELECT EMIT CHANGES = transient, умирает с соединением.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 02: CSAS/CTAS и Push/Pull запросы — раздел 'Persistent vs transient queries'"
+    },
+    {
+      "id": "kafka-m08-exam-q10",
+      "type": "multiple-choice",
+      "question": "CTAS с GROUP BY создаёт материализованную TABLE (state store на RocksDB). Новая ksqlDB-нода добавляется в кластер. Получит ли новая нода копию state store для обработки своих задач после rebalance?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Нет — state store создаётся заново с нуля на новой ноде, теряя историю"
+        },
+        {
+          "id": "b",
+          "text": "Да — при добавлении новой ноды Kafka Streams rebalances задачи. Для своих задач новая нода восстанавливает state store из changelog-топиков Kafka. При num.standby.replicas > 0 — восстановление мгновенное (warm standby)"
+        },
+        {
+          "id": "c",
+          "text": "State store копируется напрямую между нодами через p2p репликацию ksqlDB"
+        },
+        {
+          "id": "d",
+          "text": "Новая нода не участвует в обработке существующих queries — только для новых"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "ksqlDB использует Kafka Streams для управления state store, который хранит changelog в Kafka-топике (с cleanup.policy=compact). При добавлении новой ноды: Kafka Streams rebalancing перераспределяет задачи между нодами. Новая нода получает часть задач, для каждой задачи читает changelog-топик с начала и восстанавливает state store. Это занимает время пропорциональное размеру state store. С ksql.streams.num.standby.replicas=1 другие ноды заранее поддерживают warm copy changelog, поэтому восстановление быстрее. Это стандартная Kafka Streams fault tolerance механика, которую ksqlDB наследует.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 04: ksqlDB в Production — раздел 'High Availability'"
+    }
+  ]
+}

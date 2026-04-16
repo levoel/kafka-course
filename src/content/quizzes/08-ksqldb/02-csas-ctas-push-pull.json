@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "08-ksqldb/02-csas-ctas-push-pull",
+  "moduleId": "08-ksqldb",
+  "_meta": {
+    "idPrefix": "kafka-m08-02",
+    "description": "4 questions: kafka-m08-02-q1, q2, q3 for MC; kafka-m08-02-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m08-02-q1",
+      "type": "multiple-choice",
+      "question": "В чём разница между persistent query и transient query в ksqlDB?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Persistent query хранит данные в PostgreSQL, transient — только в памяти"
+        },
+        {
+          "id": "b",
+          "text": "Persistent query (CSAS/CTAS) продолжает работать после отключения клиента и переживает рестарт сервера; transient query (SELECT ... EMIT CHANGES) завершается при отключении клиента"
+        },
+        {
+          "id": "c",
+          "text": "Persistent query работает быстрее transient за счёт кэширования"
+        },
+        {
+          "id": "d",
+          "text": "Transient query виден в SHOW QUERIES, persistent — нет"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Persistent query создаётся через CSAS или CTAS: он регистрируется на сервере, получает уникальный query_id, виден в SHOW QUERIES, работает независимо от подключённых клиентов, переживает рестарт ksqlDB-сервера. Transient query — это ad-hoc SELECT с EMIT CHANGES или pull query: запрос живёт ровно столько, сколько подключён клиент. При отключении — query завершается, никаких постоянных ресурсов не занимает. Persistent queries — продакшн-нагрузка; transient — разработка и отладка.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m08-02-q2",
+      "type": "multiple-choice",
+      "question": "Напишите CSAS-запрос для следующей задачи: из потока events_stream (с полями event_id VARCHAR, event_type VARCHAR, payload VARCHAR, severity INT) выбрать только события с severity > 3 и сохранить как новый поток critical_events.",
+      "options": [
+        {
+          "id": "a",
+          "text": "SELECT * FROM events_stream WHERE severity > 3 INTO critical_events EMIT CHANGES;"
+        },
+        {
+          "id": "b",
+          "text": "CREATE STREAM critical_events AS SELECT event_id, event_type, payload, severity FROM events_stream WHERE severity > 3 EMIT CHANGES;"
+        },
+        {
+          "id": "c",
+          "text": "CREATE TABLE critical_events AS SELECT * FROM events_stream WHERE severity > 3 GROUP BY event_id EMIT CHANGES;"
+        },
+        {
+          "id": "d",
+          "text": "INSERT INTO critical_events SELECT * FROM events_stream WHERE severity > 3;"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "CSAS (CREATE STREAM AS SELECT) — это правильный синтаксис для создания непрерывного потокового запроса, который фильтрует события. Вариант B корректен: создаёт persistent query, автоматически создаёт Kafka-топик CRITICAL_EVENTS, непрерывно читает из events_stream, применяет фильтр severity > 3, пишет результаты. Вариант A — неверный синтаксис (INTO не работает так в ksqlDB). Вариант C — CTAS для агрегации, неуместен для фильтрации без GROUP BY. Вариант D — INSERT INTO добавляет в существующий поток, не создаёт новый.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m08-02-q3",
+      "type": "multiple-choice",
+      "question": "Разработчик выполняет pull query: SELECT * FROM orders_raw WHERE order_id = 'ord-42'; Ksqldb возвращает ошибку. Наиболее вероятная причина?",
+      "options": [
+        {
+          "id": "a",
+          "text": "order_id 'ord-42' не существует в топике Kafka"
+        },
+        {
+          "id": "b",
+          "text": "orders_raw является STREAM или нематериализованной TABLE — pull queries работают только с TABLE, созданной через CTAS (с state store)"
+        },
+        {
+          "id": "c",
+          "text": "Pull queries требуют явного EMIT CHANGES в конце"
+        },
+        {
+          "id": "d",
+          "text": "Pull queries не поддерживают WHERE с VARCHAR-ключами"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Pull query (SELECT без EMIT CHANGES) работает только с материализованными TABLE — то есть с TABLE, созданными через CTAS или Table с явным query, которые имеют state store (RocksDB) под капотом. SELECT * FROM orders_raw выполняет lookup в state store. Если orders_raw — это STREAM или TABLE, созданная через CREATE TABLE ... WITH (...) без CTAS (не имеет state store) — lookup невозможен, ksqlDB вернёт ошибку. Решение: создать CTAS: CREATE TABLE orders_indexed AS SELECT * FROM orders_raw EMIT CHANGES; — тогда pull query заработает.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m08-02-q4",
+      "type": "true-false",
+      "question": "Persistent query, созданный через CSAS (CREATE STREAM AS SELECT), продолжает работать после перезапуска ksqlDB-сервера и автоматически возобновляет обработку с того места, где остановился.",
+      "correctAnswer": "true",
+      "explanation": "Истина. Persistent queries (CSAS/CTAS) — это постоянные Kafka Streams топологии. При рестарте ksqlDB-сервера он автоматически загружает все persistent queries из внутреннего хранилища метаданных (в Kafka-топике) и восстанавливает их выполнение. Kafka Streams под капотом использует consumer group offsets — обработка возобновляется с последнего закоммиченного offset. State stores восстанавливаются из changelog-топиков. Именно эта надёжность делает CSAS/CTAS инструментом для production-пайплайнов.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "08-ksqldb/04-ksqldb-production",
+  "moduleId": "08-ksqldb",
+  "_meta": {
+    "idPrefix": "kafka-m08-04",
+    "description": "4 questions: kafka-m08-04-q1, q2, q3 for MC; kafka-m08-04-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m08-04-q1",
+      "type": "multiple-choice",
+      "question": "В чём главное отличие interactive mode от headless mode в ksqlDB? Какой режим рекомендуется для production и почему?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Interactive mode быстрее — headless добавляет задержку при чтении SQL-файла"
+        },
+        {
+          "id": "b",
+          "text": "Interactive mode позволяет создавать/изменять/завершать queries через CLI и REST API в любой момент; headless mode запускает queries из SQL-файла при старте сервера и не принимает изменений через CLI. Headless рекомендован для production: декларативный, воспроизводимый, исключает случайный TERMINATE критичного query"
+        },
+        {
+          "id": "c",
+          "text": "Headless mode поддерживает больше типов queries чем interactive"
+        },
+        {
+          "id": "d",
+          "text": "Interactive mode — для production, headless — только для тестирования"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Interactive mode (ksql.headless=false, по умолчанию) открывает полный доступ через CLI и REST API: любой с доступом может CREATE, DROP, TERMINATE. В production это риск: случайная ошибка уничтожает pipeline. Headless mode (ksql.headless=true + ksql.queries.file=) запускает фиксированный набор queries при старте сервера. CLI не может изменить queries — только читать статус. Изменения идут через Git: обновил queries.sql, задеплоил, перезапустил ksqlDB. Декларативный подход снижает операционные риски.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m08-04-q2",
+      "type": "multiple-choice",
+      "question": "DevOps-инженер настраивает ksqlDB в headless mode. Какая конфигурация в ksql-server.properties правильно включает headless режим с SQL-файлом /etc/ksqldb/production.sql?",
+      "options": [
+        {
+          "id": "a",
+          "text": "ksql.mode=headless\nksql.sql.file=/etc/ksqldb/production.sql"
+        },
+        {
+          "id": "b",
+          "text": "ksql.headless=true\nksql.queries.file=/etc/ksqldb/production.sql"
+        },
+        {
+          "id": "c",
+          "text": "ksql.interactive=false\nksql.startup.queries=/etc/ksqldb/production.sql"
+        },
+        {
+          "id": "d",
+          "text": "ksql.headless.mode=enabled\nksql.queries=/etc/ksqldb/production.sql"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Правильные параметры конфигурации ksqlDB для headless mode: ksql.headless=true — включает headless режим; ksql.queries.file=/path/to/queries.sql — путь к SQL-файлу с persistent queries. При старте ksqlDB сервер читает этот файл и запускает все SQL-выражения как persistent queries. Остальные варианты содержат несуществующие параметры конфигурации. Эти два параметра — официальный способ настройки headless mode согласно документации ksqlDB.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m08-04-q3",
+      "type": "multiple-choice",
+      "question": "Команда планирует запустить 50 persistent queries на ksqlDB кластере из 2 нод. Треть queries — CTAS с windowed агрегациями по миллионам уникальных ключей. При capacity planning — какой ресурс наиболее критичен и почему?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Сеть — каждый query создаёт дополнительный трафик в Kafka"
+        },
+        {
+          "id": "b",
+          "text": "Диск (SSD) — windowed CTAS queries создают RocksDB WindowStore с данными по миллионам ключей. При миллионах ключей и часовых окнах state store может занимать десятки гигабайт на ноду"
+        },
+        {
+          "id": "c",
+          "text": "RAM — ksqlDB хранит весь state исключительно в памяти"
+        },
+        {
+          "id": "d",
+          "text": "CPU — windowed агрегация требует вычислений для каждого события"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Для windowed CTAS с миллионами ключей наиболее критичен диск (желательно SSD). Каждый windowed CTAS создаёт RocksDB WindowStore на диске ksqlDB-сервера: (число уникальных ключей) × (размер значения) × (количество активных окон). Для 1 миллиона user_id, 4 байта count, 4 часовых окна = ~16MB минимум, но с overhead RocksDB и key encoding реально значительно больше. 17 windowed queries (треть из 50) по миллионам ключей = десятки гигабайт state store. Медленный диск = узкое место для RocksDB compaction и state recovery.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m08-04-q4",
+      "type": "true-false",
+      "question": "В headless mode ksqlDB разработчик может подключиться через ksqlDB CLI и выполнить SHOW QUERIES для просмотра статуса запущенных queries, но не может выполнить CREATE STREAM или TERMINATE.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. В headless mode ksqlDB CLI вообще не может подключиться к серверу для интерактивной работы — REST endpoint для queries отключён. Headless mode полностью отвергает подключения CLI и REST-запросы на создание/изменение/завершение queries. Единственный способ узнать статус — через JMX-метрики или логи ksqlDB-сервера. Это намеренное ограничение: headless mode гарантирует, что набор queries определяется только SQL-файлом при старте, а не runtime-командами.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}
