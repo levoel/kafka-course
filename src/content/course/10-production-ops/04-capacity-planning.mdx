@@ -1,0 +1,410 @@
+---
+title: "Формулы планирования ёмкости"
+description: "Точный расчёт дисков, партиций, сети и памяти для Kafka-кластера. Интерактивный калькулятор"
+order: 4
+difficulty: "advanced"
+estimatedTime: 30
+topics: ["Capacity Planning", "Disk Sizing", "Partition Count", "Network Bandwidth", "Memory", "Replication Factor"]
+---
+
+# Формулы планирования ёмкости
+
+Kafka-кластер без capacity planning — это кластер, который упадёт в самый неудобный момент. Под-provisioned кластер даёт data loss, накопленный lag, outages в production. Пере-provisioned кластер — wasteful spend на железо, которое простаивает.
+
+В этом уроке: четыре формулы (диск, партиции, сеть, память) с подробными числовыми примерами и интерактивным калькулятором для ваших конкретных параметров.
+
+---
+
+## Зачем capacity planning
+
+<DiagramContainer title="Последствия неправильного capacity planning" color="red">
+  <div className="space-y-4 p-2">
+    <FlowRow>
+      <DataBox
+        label="Под-provisioned"
+        tooltip="Диски заполнены: Kafka начинает удалять старые сегменты раньше retention срока. Consumers с медленной обработкой теряют данные. Сеть перегружена: producer latency растёт, появляются TimeoutException."
+      >
+        Диски на 100%, retention нарушен, latency растёт
+      </DataBox>
+      <Arrow direction="right" label="vs" />
+      <DataBox
+        label="Пере-provisioned"
+        tooltip="Серверы с 30% утилизацией. Дорогие NVMe-диски простаивают. Экономически неэффективно. Для стартапа на seed-раунде -- критично."
+      >
+        30% утилизация, wasteful spend
+      </DataBox>
+    </FlowRow>
+    <FlowRow>
+      <DataBox
+        label="Правильное планирование"
+        tooltip="60-70% утилизация + 30-40% headroom. Достаточно для burst нагрузки. Достаточно для partition reassignment (добавление брокера создаёт временную нагрузку). Предсказуемые расходы."
+      >
+        60-70% утилизация + 30-40% headroom
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+---
+
+## Интерактивный калькулятор
+
+<CapacityPlannerDiagram client:visible />
+
+Калькулятор выше позволяет ввести ваши параметры и мгновенно получить расчёт. Ниже — подробное объяснение каждой формулы.
+
+---
+
+## Формула 1: Disk sizing
+
+Расчёт объёма дисков — самый критичный шаг. Ошибка здесь стоит дорого: Kafka не может перераспределить данные за секунду.
+
+**Базовая формула ежедневного объёма:**
+
+```
+daily_GB = (msg_rate_per_sec × avg_msg_bytes × 86400 × replication_factor) / 1073741824
+```
+
+где `86400` — секунд в сутках, `1073741824` = 1024³.
+
+**Пример расчёта:**
+
+Параметры системы: 10,000 msg/s, avg msg size 500 bytes, RF=3, retention=7 дней.
+
+```
+daily_GB = (10000 × 500 × 86400 × 3) / 1073741824
+         = 1296000000000 / 1073741824
+         = 1207 GB ≈ 1.21 TB/день
+```
+
+Суммарный объём за retention:
+
+```
+total_disk_GB = daily_GB × retention_days
+              = 1207 × 7
+              = 8449 GB ≈ 8.45 TB
+```
+
+Per broker (3 брокера, равномерное распределение):
+
+```
+per_broker_GB = total_disk_GB / broker_count
+              = 8449 / 3
+              = 2816 GB ≈ 2.82 TB per broker
+```
+
+<DiagramContainer title="Disk sizing: шаг за шагом" color="blue">
+  <div className="space-y-3 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">Пример: 10K msg/s, 500B avg, RF=3, 7 дней retention</div>
+    <FlowRow>
+      <DataBox
+        label="Входящий трафик"
+        tooltip="msg_rate × avg_size = throughput без репликации. 10K × 500B = 5 MB/s incoming от producers."
+      >
+        10K × 500B = 5 MB/s
+      </DataBox>
+      <Arrow direction="right" label="× RF=3" />
+      <DataBox
+        label="С репликацией"
+        tooltip="Каждый байт записывается RF раз: на лидере + 2 фолловерах. 5 MB/s × 3 = 15 MB/s суммарный дисковый I/O."
+      >
+        15 MB/s суммарно
+      </DataBox>
+      <Arrow direction="right" label="× 86400s" />
+      <DataBox
+        label="В сутки"
+        tooltip="15 MB/s × 86400 секунд = 1,296,000 MB = 1207 GB в сутки. Это суммарный объём по всему кластеру."
+      >
+        1207 GB/день
+      </DataBox>
+      <Arrow direction="right" label="× 7 дней" />
+      <DataBox
+        label="За retention"
+        tooltip="1207 GB × 7 дней = 8449 GB суммарно по кластеру. Делим на 3 брокера = 2816 GB per broker."
+      >
+        8449 GB total
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+**Учёт сжатия:**
+
+Если `compression.type=lz4` (ratio ≈ 2.0x):
+
+```
+effective_daily_GB = daily_GB / compression_ratio
+                   = 1207 / 2.0
+                   = 603 GB/день
+```
+
+Сжатие применяется producer'ом до записи на диск — брокер хранит уже сжатые данные.
+
+**Headroom: добавьте 30-40%:**
+
+```
+provisioned_disk = per_broker_GB × 1.4
+                 = 2816 × 1.4
+                 = 3943 GB ≈ 4 TB per broker
+```
+
+При добавлении нового брокера partition reassignment создаёт дополнительную I/O нагрузку. Headroom необходим.
+
+---
+
+## Формула 2: Partition count
+
+Количество партиций определяет параллелизм. Нельзя уменьшить (только пересоздать топик), можно только увеличить.
+
+**Throughput-based минимум:**
+
+```
+throughput_MB_s = msg_rate_per_sec × avg_msg_bytes / 1048576
+
+min_partitions_throughput = ceil(throughput_MB_s / partition_throughput_MB_s)
+```
+
+`partition_throughput_MB_s` — пропускная способность одной партиции:
+- Spinning disk (HDD): ~10 MB/s
+- SSD: ~30 MB/s
+- NVMe SSD: ~100 MB/s
+
+**Consumer-based минимум:**
+
+```
+min_partitions_consumers = max_consumer_count
+```
+
+Один consumer в группе = один поток чтения. Если нужно 8 parallel consumers — нужно минимум 8 партиций.
+
+**Финальный минимум:**
+
+```
+min_partitions = max(min_partitions_throughput, min_partitions_consumers)
+```
+
+**Пример:**
+
+Параметры: 50 MB/s target throughput, SSD-диски (30 MB/s per partition), 8 consumers per group.
+
+```
+min_partitions_throughput = ceil(50 / 30) = 2
+min_partitions_consumers = 8
+min_partitions = max(2, 8) = 8 партиций
+```
+
+С запасом 2x: рекомендуем 12 партиций (кратно числу брокеров = 3 для равномерного распределения).
+
+<DiagramContainer title="Partition count: throughput и consumer-based расчёт" color="emerald">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <DataBox
+        label="Throughput-based"
+        tooltip="Пример: 50 MB/s / 30 MB/s (SSD) = 1.67, округляем вверх = 2 партиции для throughput. При HDD: 50/10 = 5 партиций. При NVMe: 50/100 = 1 партиция."
+      >
+        50MB/s / 30MB/s (SSD) = 2 партиции min
+      </DataBox>
+      <Arrow direction="right" label="max()" />
+      <DataBox
+        label="Consumer-based"
+        tooltip="8 consumers в group = 8 партиций минимум. Если партиций меньше -- часть consumers будет idle. Больше consumers чем партиций -- лишние idle."
+      >
+        8 consumers = 8 партиций min
+      </DataBox>
+      <Arrow direction="right" label="= max = 8" />
+      <DataBox
+        label="Итоговый выбор"
+        tooltip="max(2, 8) = 8. С запасом и кратностью числу брокеров: 12 партиций (12/3 брокера = 4 партиции per broker, равномерное распределение)."
+      >
+        12 партиций (×2 запас, делится на 3 брокера)
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+**Практические ограничения partition count:**
+
+- Рекомендуемый максимум: 10,000 партиций per broker
+- При 200,000+ партиций в кластере: ухудшение производительности контроллера (KRaft)
+- Каждая партиция = open file handles (1 на сегмент), индексные файлы, memory для ISR tracking
+- Не создавайте 1,000 партиций для топика с одним consumer — waste ресурсов
+
+<Callout type="warning">
+Partition count нельзя УМЕНЬШИТЬ. Если вы создали топик с 100 партициями, вернуть к 10 невозможно без пересоздания топика (с потерей данных или перезаписью через новый топик). Начинайте с рассчитанного минимума плюс 2-3x запас. Увеличить можно в любой момент командой kafka-topics.sh --alter --partitions.
+</Callout>
+
+---
+
+## Формула 3: Network bandwidth
+
+Kafka генерирует три потока сетевого трафика: входящий от producers, inter-broker репликация, исходящий к consumers.
+
+**Входящий трафик (от producers):**
+
+```
+inbound_MB_s = msg_rate_per_sec × avg_msg_bytes / 1048576
+```
+
+**Трафик репликации (inter-broker):**
+
+```
+replication_MB_s = inbound_MB_s × (replication_factor - 1)
+```
+
+Каждый входящий байт реплицируется на (RF-1) фолловеров.
+
+**Исходящий трафик (к consumers):**
+
+```
+outbound_MB_s = inbound_MB_s × consumer_group_count
+```
+
+Каждая consumer group получает полную копию данных.
+
+**Per-broker при равномерном распределении:**
+
+```
+per_broker_MB_s = (inbound_MB_s + replication_MB_s + outbound_MB_s) / broker_count
+```
+
+**Пример:**
+
+Параметры: 5 MB/s inbound, RF=3, 3 consumer groups, 3 брокера.
+
+```
+inbound_MB_s     = 5 MB/s
+replication_MB_s = 5 × (3-1) = 10 MB/s
+outbound_MB_s    = 5 × 3 = 15 MB/s
+
+total_MB_s = 5 + 10 + 15 = 30 MB/s (суммарно по кластеру)
+
+per_broker_MB_s = 30 / 3 = 10 MB/s per broker
+```
+
+NIC limit: 1 Gbps = 125 MB/s. При 10 MB/s: утилизация 10/125 = 8% — безопасно.
+
+**Правило 70%:** Не нагружайте NIC более чем на 70% от номинала в sustained режиме. Оставшиеся 30% — для burst трафика и partition reassignment.
+
+```
+max_sustained_MB_s = NIC_capacity_MB_s × 0.7
+
+# 1 Gbps NIC: 125 × 0.7 = 87.5 MB/s max sustained
+# 10 Gbps NIC: 1250 × 0.7 = 875 MB/s max sustained
+```
+
+---
+
+## Формула 4: Memory (JVM heap + OS page cache)
+
+Kafka — I/O-bound, не heap-bound. Память важна не для JVM, а для OS page cache.
+
+**JVM Heap:**
+
+```properties
+# Правило: 6 GB, фиксированный
+-Xms6g -Xmx6g
+```
+
+Более 6-8 GB heap = проблемы с GC паузами (Full GC на 16GB heap = стоп мира на несколько секунд). Kafka не использует heap для хранения данных — всё идёт через page cache.
+
+**OS Page Cache:**
+
+```
+ideal_page_cache_GB = active_segments_count × segment_size_GB
+
+active_segment_per_partition ≈ 1 GB (default log.segment.bytes=1073741824)
+active_segments_count = partition_count × replication_factor
+```
+
+**Пример расчёта памяти:**
+
+100 партиций per broker, segment size = 1 GB, RF=3:
+
+```
+active_segments = 100 × 3 = 300 (учитывая что партиции распределены по брокерам)
+ideal_page_cache = 300 GB
+
+С 64 GB RAM: доступный page cache = 64 - 6 (heap) - 2 (OS) = 56 GB
+56 / 300 = 18.7% активных сегментов в cache
+```
+
+18.7% — приемлемо для нагруженного production. Идеал — 33%+. Добавление RAM является самой cost-effective оптимизацией Kafka.
+
+<DiagramContainer title="Память: JVM heap vs OS page cache" color="violet">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <DataBox
+        label="JVM Heap (6 GB)"
+        tooltip="Kafka использует heap для: метаданных партиций, ISR списков, request/response объектов. НЕ для хранения данных. Более 8 GB = GC паузы. Фиксируйте: -Xms6g -Xmx6g."
+      >
+        -Xms6g -Xmx6g (НЕ увеличивать)
+      </DataBox>
+      <Arrow direction="right" label="+" />
+      <DataBox
+        label="OS Page Cache (остальная RAM)"
+        tooltip="Главный рычаг производительности Kafka. ОС кэширует активные log сегменты в RAM. Чтение горячих данных = чтение из RAM (nanoseconds), не с диска (milliseconds). Больше RAM = больше cache = меньше disk I/O = ниже latency."
+      >
+        64GB RAM - 6GB heap - 2GB OS = 56GB cache
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+---
+
+## Формула 5: Broker count
+
+```
+min_brokers = max(
+  disk_requirement,
+  network_requirement,
+  partition_requirement
+)
+
+# Disk: total_disk_GB / disk_per_broker_GB
+# Network: total_network_MB_s / (NIC_MB_s × 0.7)
+# Partitions: total_partitions × RF / partitions_per_broker_limit
+```
+
+---
+
+## Real-world sizing examples
+
+<DiagramContainer title="Примеры размерности кластеров" color="slate">
+  <div className="overflow-x-auto p-2">
+    <Grid columns={5}>
+      <FlowNode variant="header" tooltip="Типичный профиль использования">Профиль</FlowNode>
+      <FlowNode variant="header" tooltip="Входящая нагрузка">Нагрузка</FlowNode>
+      <FlowNode variant="header" tooltip="Рекомендованная конфигурация кластера">Конфигурация</FlowNode>
+      <FlowNode variant="header" tooltip="Суммарный объём дисков">Диски</FlowNode>
+      <FlowNode variant="header" tooltip="Тип NIC">NIC</FlowNode>
+
+      <DataBox label="Startup / Dev" tooltip="Небольшой стартап с умеренными требованиями. IoT или e-commerce события.">Startup</DataBox>
+      <DataBox label="5K msg/s, 200 bytes, RF=2, 7d" tooltip="5K сообщений в секунду, средний размер 200 байт. RF=2 для экономии.">5K msg/s, 200B, RF=2</DataBox>
+      <DataBox label="3 брокера" tooltip="Минимально рекомендуемое число брокеров для RF=2. Один брокер на контроллер.">3 брокера</DataBox>
+      <DataBox label="~600 GB total" tooltip="5K × 200B × 86400 × 2 / 1GB × 7 дней / 3 брокера ≈ 200 GB per broker. С headroom: 300 GB per broker, 900 GB total.">~900 GB total</DataBox>
+      <DataBox label="1 Gbps" tooltip="При 5K msg/s: 1 MB/s inbound. Включая репликацию и consumers: максимум 10-20 MB/s. 1 Gbps (125 MB/s) достаточно.">1 Gbps</DataBox>
+
+      <DataBox label="Mid-size" tooltip="Продуктовая компания с активными пользователями. Несколько сервисов.">Mid-size</DataBox>
+      <DataBox label="100K msg/s, 1KB, RF=3, 14d" tooltip="100K сообщений в секунду, средний размер 1 KB. RF=3 для надёжности. Retention 14 дней.">100K msg/s, 1KB, RF=3</DataBox>
+      <DataBox label="5-7 брокеров" tooltip="100K × 1KB × 86400 × 3 / 1GB × 14 дней = 36 TB. При 6 TB per broker: 6 брокеров. С headroom: 7 брокеров.">5-7 брокеров</DataBox>
+      <DataBox label="~36 TB total" tooltip="С headroom 40%: ~50 TB total или ~7-8 TB per broker.">~50 TB total</DataBox>
+      <DataBox label="10 Gbps" tooltip="100K × 1KB = 100 MB/s inbound. × 2 (replica) × 3 (consumers) = 800 MB/s суммарно. Нужны 10 Gbps NIC.">10 Gbps</DataBox>
+
+      <DataBox label="Highload" tooltip="Крупная платформа: социальная сеть, fintech, e-commerce в пиковые дни.">Highload</DataBox>
+      <DataBox label="1M msg/s, 500B, RF=3, 30d" tooltip="1 миллион сообщений в секунду, 500 байт средний размер. Retention 30 дней для compliance.">1M msg/s, 500B, RF=3</DataBox>
+      <DataBox label="15-20 брокеров" tooltip="1M × 500B × 86400 × 3 / 1GB × 30 дней = 3456 TB. При 200 TB per broker: 17 брокеров. С headroom: 20.">15-20 брокеров</DataBox>
+      <DataBox label="~3.5 PB total" tooltip="С headroom и деградацией: ~5 PB total выделенного пространства. Tiered Storage (Kafka 4.0) позволяет вынести cold data в S3.">~5 PB total</DataBox>
+      <DataBox label="2×25 Gbps (bonded)" tooltip="1M × 500B = 500 MB/s inbound. × 2 (replica) × 5 (consumers) = 3500 MB/s. Нужны bonded 25 Gbps карты.">2×25 Gbps</DataBox>
+    </Grid>
+  </div>
+</DiagramContainer>
+
+<Callout type="tip">
+Начните с формул, затем добавьте 30-50% запас (headroom). Kafka-кластер не должен работать на 100% ёмкости -- при добавлении нового брокера partition reassignment создаёт дополнительную нагрузку. Запас в 30-40% -- это не расточительство, а operational safety margin.
+</Callout>
+
+<KnowledgeCheck
+  question="Система обрабатывает 50K msg/s со средним размером 2 KB. RF=3, retention=14 дней, 5 consumer groups. Рассчитайте: (1) ежедневный объём диска (без сжатия), (2) суммарный объём за retention, (3) минимальное число партиций при partition throughput = 10 MB/s (HDD), (4) network bandwidth per broker (3 брокера)."
+  answer="Расчёт: (1) daily_GB = (50000 × 2000 × 86400 × 3) / 1073741824 = 25920000000000 / 1073741824 = 24140 GB ≈ 24.1 TB/день. (2) total_disk = 24140 × 14 = 337,960 GB ≈ 338 TB, per broker при 3 брокерах: 338 TB / 3 ≈ 112.7 TB. (3) throughput_MB_s = 50000 × 2000 / 1048576 = 95.4 MB/s. min_partitions = ceil(95.4 / 10) = 10 партиций. (4) inbound = 95.4 MB/s. replication = 95.4 × 2 = 190.8 MB/s. outbound = 95.4 × 5 = 477 MB/s. total = 95.4 + 190.8 + 477 = 763 MB/s. per_broker = 763 / 3 = 254 MB/s. Это 254/125 = 203% утилизации 1 Gbps NIC -- нужны 10 Gbps NIC (1250 MB/s, утилизация 254/1250 = 20%, безопасно)."
+/>

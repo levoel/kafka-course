@@ -1,0 +1,205 @@
+---
+title: "Итоги модуля: Production Operations"
+description: "Production ops checklist -- от JMX метрик до capacity planning. Ключевые числа и пороги"
+order: 6
+difficulty: "advanced"
+estimatedTime: 10
+topics: ["Production Ops Summary", "Checklist"]
+---
+
+# Итоги модуля: Production Operations
+
+Модуль 10 закрывает разрыв между "знаю Kafka API" и "умею эксплуатировать Kafka в production". Здесь собраны все ключевые числа, пороги и операционные процедуры.
+
+---
+
+## Production ops checklist
+
+<DiagramContainer title="Ops lifecycle: Plan -> Monitor -> Scale -> Repeat" color="blue">
+  <div className="space-y-4 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">Каждый этап ссылается на урок модуля</div>
+    <FlowRow>
+      <FlowNode
+        variant="source"
+        tooltip="Урок 04: Capacity Planning. Диск (daily_GB = rate × size × 86400 × RF). Партиции (max throughput-based, consumer-based). Сеть (inbound + replication + consumer). Память (6GB heap + page cache). +30-40% headroom."
+      >
+        Plan (capacity)
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="process"
+        tooltip="Урок 01-02: JMX Metrics + Monitoring Stack. JMX Exporter + Prometheus + Grafana. Алерты на URP, RequestHandlerAvgIdlePercent, consumer lag. Два экспортера: JMX для broker internals, kafka-exporter для consumer group lag."
+      >
+        Monitor (JMX/Prometheus)
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="process"
+        tooltip="Урок 03: Performance Tuning. Throughput: batch.size=1MB, linger.ms=50, lz4. Latency: batch.size=16KB, linger.ms=0, acks=1. Consumer: fetch.min.bytes=1MB, max.poll.records=1000."
+      >
+        Tune (performance)
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="process"
+        tooltip="Урок 05: kafka-reassign-partitions. --generate + --execute + --verify. ВСЕГДА с --throttle (50 MB/s). После завершения: удалить throttle, запустить preferred leader election."
+      >
+        Scale (reassign)
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="sink"
+        tooltip="Кластер сбалансирован, мониторинг работает. Вернуться к Plan: пересчитать ёмкость по мере роста нагрузки. Цикл повторяется с каждым значимым изменением нагрузки."
+      >
+        Repeat
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+**Monitoring checklist:**
+- JMX Exporter (port 9404) настроен на всех брокерах
+- kafka-exporter настроен для consumer group lag
+- Prometheus scrape: 15s для JMX, 30s для kafka-exporter
+- Grafana дашборд с панелями: Broker Health, Throughput, Latency, Consumer Lag
+- Алерты настроены (минимум): URP > 0 на 5 мин, RequestHandlerAvgIdlePercent < 0.3, consumer lag > 10000
+
+**Performance checklist:**
+- Throughput producer: batch.size=1MB, linger.ms=50, compression=lz4, buffer.memory=64MB
+- Latency producer: batch.size=16KB, linger.ms=0, compression=none, acks=1
+- Consumer: fetch.min.bytes=1MB, max.poll.records=1000
+- Broker: НЕ настраивать log.flush.interval.messages/ms
+
+**Capacity checklist:**
+- Формулы посчитаны для текущей нагрузки
+- +30-40% headroom на все ресурсы
+- Partition count = max(throughput-based, consumer-based) × 2, кратно числу брокеров
+- NIC утилизация не превышает 70%
+
+**Operations checklist:**
+- kafka-reassign-partitions процедура задокументирована
+- Throttle значение рассчитано для кластера
+- Runbook для добавления/удаления брокера готов
+
+---
+
+## Ключевые числа: сводная таблица
+
+<DiagramContainer title="Топ-20 ключевых параметров и порогов" color="slate">
+  <div className="overflow-x-auto p-2">
+    <Grid columns={3}>
+      <FlowNode variant="header" tooltip="Параметр или метрика">Параметр</FlowNode>
+      <FlowNode variant="header" tooltip="Рекомендованное значение или нормальный диапазон">Рекомендованное значение</FlowNode>
+      <FlowNode variant="header" tooltip="Когда требуется действие">Alert-порог</FlowNode>
+
+      <DataBox label="UnderReplicatedPartitions" tooltip="Критическая метрика брокера. 0 в норме.">UnderReplicatedPartitions</DataBox>
+      <DataBox label="0" tooltip="Строго 0 в production. Допустим временный рост при rolling restart.">0</DataBox>
+      <DataBox label="больше 0 на 5+ мин" tooltip="Немедленная диагностика: проверить брокеры, диск, сеть.">больше 0 (5 мин)</DataBox>
+
+      <DataBox label="RequestHandlerAvgIdlePercent" tooltip="Загрузка I/O-потоков брокера.">RequestHandlerAvgIdlePercent</DataBox>
+      <DataBox label="больше 0.30 (30% простоя)" tooltip="30% idle = достаточный запас. Меньше 30% = брокер приближается к пределу.">больше 0.30</DataBox>
+      <DataBox label="меньше 0.30 на 10+ мин" tooltip="Увеличить num.io.threads или добавить брокеры.">меньше 0.30</DataBox>
+
+      <DataBox label="ActiveControllerCount" tooltip="KRaft контроллер: должен быть ровно 1.">ActiveControllerCount</DataBox>
+      <DataBox label="1" tooltip="Ровно один активный KRaft-контроллер.">1</DataBox>
+      <DataBox label="не равно 1" tooltip="0 = нет контроллера. Больше 1 = split-brain. Оба критичны.">не 1</DataBox>
+
+      <DataBox label="Produce TotalTimeMs p99" tooltip="Задержка produce запроса на 99-м перцентиле.">Produce p99 latency</DataBox>
+      <DataBox label="меньше 100ms (acks=all)" tooltip="При acks=1: менее 20ms. При acks=all: менее 100ms.">менее 100ms</DataBox>
+      <DataBox label="больше 500ms" tooltip="Disk bottleneck или ISR-ожидание. Диагностика: LocalTimeMs и RemoteTimeMs.">больше 500ms</DataBox>
+
+      <DataBox label="records-lag-max" tooltip="Максимальный лаг консьюмера.">Consumer lag max</DataBox>
+      <DataBox label="меньше 100" tooltip="Нормальный лаг при стабильной нагрузке.">меньше 100</DataBox>
+      <DataBox label="больше 1000 / больше 10000" tooltip="Warning: больше 1000. Critical: больше 10000.">1K / 10K</DataBox>
+
+      <DataBox label="batch.size (throughput)" tooltip="Размер batch для throughput-оптимизации.">batch.size (throughput)</DataBox>
+      <DataBox label="1048576 (1 MB)" tooltip="1 MB: baseline для throughput producer. Увеличивает эффективность batch-ing.">1,048,576 (1 MB)</DataBox>
+      <DataBox label="Не применимо" tooltip="Это конфигурация, не метрика. Сравнивайте с batch-size-avg JMX.">—</DataBox>
+
+      <DataBox label="linger.ms (throughput)" tooltip="Время ожидания для заполнения batch.">linger.ms (throughput)</DataBox>
+      <DataBox label="50ms" tooltip="50ms: baseline для throughput producer. Trade-off: +50ms latency.">50 ms</DataBox>
+      <DataBox label="Не применимо" tooltip="Конфигурация. Смотреть record-queue-time-avg JMX.">—</DataBox>
+
+      <DataBox label="compression.type" tooltip="Алгоритм сжатия для throughput.">compression.type</DataBox>
+      <DataBox label="lz4" tooltip="lz4: оптимальный баланс ratio/speed. Для bandwidth-limited: zstd.">lz4</DataBox>
+      <DataBox label="Избегать gzip" tooltip="gzip слишком медленный для высоконагруженных систем.">избегать gzip</DataBox>
+
+      <DataBox label="fetch.min.bytes" tooltip="Минимальный объём данных перед fetch-ответом.">fetch.min.bytes</DataBox>
+      <DataBox label="1048576 (1 MB)" tooltip="1 MB: снижает число fetch-запросов при высокой нагрузке. Default 1 byte = неэффективно.">1,048,576 (1 MB)</DataBox>
+      <DataBox label="Не применимо" tooltip="Конфигурация. Влияет на fetch-rate JMX метрику.">—</DataBox>
+
+      <DataBox label="JVM Heap" tooltip="Размер heap Kafka-брокера.">JVM Heap (-Xmx)</DataBox>
+      <DataBox label="6 GB (фиксированный)" tooltip="-Xms6g -Xmx6g. Не увеличивать. Больше heap = GC паузы.">6 GB</DataBox>
+      <DataBox label="больше 8 GB" tooltip="Более 8 GB heap -> GC паузы -> spike latency. Не рекомендуется.">больше 8 GB</DataBox>
+
+      <DataBox label="NIC утилизация" tooltip="Загрузка сетевой карты брокера.">NIC утилизация</DataBox>
+      <DataBox label="меньше 70%" tooltip="70% -- предел для sustained трафика. Оставшиеся 30% = burst headroom + reassignment.">меньше 70%</DataBox>
+      <DataBox label="больше 70% sustained" tooltip="Добавить брокеры или перейти на 10 Gbps NIC.">больше 70%</DataBox>
+
+      <DataBox label="Headroom (disk/network)" tooltip="Запас ёмкости относительно текущей нагрузки.">Headroom</DataBox>
+      <DataBox label="30-40%" tooltip="30-40% запас: достаточно для burst и partition reassignment.">30-40%</DataBox>
+      <DataBox label="меньше 20%" tooltip="При запасе менее 20% -- срочно расширять кластер.">меньше 20%</DataBox>
+
+      <DataBox label="Throttle (reassignment)" tooltip="Скорость реплицирования при partition reassignment.">Throttle (reassignment)</DataBox>
+      <DataBox label="50 MB/s (52428800)" tooltip="Baseline для 1 Gbps NIC с умеренным трафиком. Корректируйте по доступной пропускной способности.">50 MB/s</DataBox>
+      <DataBox label="0 (без throttle)" tooltip="Никогда не выполнять reassignment без throttle в production.">никогда без throttle</DataBox>
+    </Grid>
+  </div>
+</DiagramContainer>
+
+---
+
+## Типичные ошибки production ops
+
+<DiagramContainer title="Топ-4 ошибки Production Operations" color="red">
+  <div className="space-y-3 p-2">
+    <FlowColumn>
+      <DataBox
+        label="1. Reassignment без throttle"
+        tooltip="Последствие: весь сетевой и дисковый I/O потребляется репликацией. Producers получают TimeoutException. Consumers накапливают lag. Правило: ВСЕГДА --throttle при --execute."
+      >
+        kafka-reassign-partitions --execute без --throttle
+      </DataBox>
+      <Arrow direction="down" />
+      <DataBox
+        label="2. Чрезмерное количество партиций"
+        tooltip="Последствие: каждая партиция = open file handles, индексные файлы, память для ISR tracking. При 100,000 партициях на брокере: деградация контроллера, slow leader elections. Правило: начинать с минимального расчётного числа."
+      >
+        Over-partitioning: топик с 1000 партиций при 1 consumer
+      </DataBox>
+      <Arrow direction="down" />
+      <DataBox
+        label="3. log.flush.interval.messages в production"
+        tooltip="Последствие: принудительный fsync после каждого N сообщений убивает throughput (в 10-100x). Kafka специально использует OS page cache и периодический fsync. Durability = replication (acks=all), не fsync."
+      >
+        log.flush.interval.messages=1 или log.flush.interval.ms=1000
+      </DataBox>
+      <Arrow direction="down" />
+      <DataBox
+        label="4. JVM Heap больше 8 GB"
+        tooltip="Последствие: GC паузы при Full GC на большом heap -- stop-the-world на несколько секунд. Kafka брокер не реагирует на запросы во время GC паузы. Правило: -Xms6g -Xmx6g, без вариантов."
+      >
+        -Xmx16g: большой heap -> GC паузы -> latency spikes
+      </DataBox>
+    </FlowColumn>
+  </div>
+</DiagramContainer>
+
+---
+
+## Связь с предыдущими модулями
+
+Production ops применяет знания из всего курса:
+
+| Тема | Модуль | Применение в Production Ops |
+|------|--------|----------------------------|
+| ISR, репликация | Модуль 01 | UnderReplicatedPartitions диагностика |
+| Producer API | Модуль 02 | batch.size, linger.ms, acks config |
+| Consumer API | Модуль 03 | fetch.min.bytes, lag monitoring |
+| Log segments | Модуль 04 | Disk sizing, page cache |
+| Квоты | Модуль 09 | Встроены в production ops checklist |
+
+<KnowledgeCheck
+  question="Production сценарий: кластер 3 брокера, 20 топиков, суммарно 240 партиций (RF=3). Мониторинг показывает: disk utilization broker-2 = 95%, broker-1 и broker-3 = 45%. UnderReplicatedPartitions = 0. records-lag-max для analytics-group = 15,000. Опишите: (1) план действий в порядке приоритета, (2) почему диск broker-2 заполнен (возможные причины), (3) как исправить дисбаланс дисков."
+  answer="(1) Порядок приоритетов: ПЕРВОЕ -- consumer lag 15,000 (CRITICAL). Диагностика: kafka-consumer-groups.sh --describe. Если records-consumed-rate = 0 -- scale consumer group или перезапустить. Если consumed-rate > 0 но lag растёт -- добавить consumers или проверить max.poll.interval.ms. ВТОРОЕ -- disk broker-2 95% (WARNING). Риск: при следующем retention-cleanup может не успеть освободить место. Срочно: проверить retention.ms для топиков, временно снизить retention для некритичных топиков, добавить диск или начать reassignment. (2) Причины дисбаланса диска: (а) Изначально неравномерное создание партиций -- broker-2 получил hot топики с большим объёмом; (б) Rolling restart: брокер становится preferred leader для многих партиций после перезапуска; (в) kafka-reassign-partitions не запускался после добавления broker-1 или broker-3. (3) Исправление: kafka-reassign-partitions --generate с broker-list=1,2,3 -- переместить часть партиций с broker-2 на broker-1 и broker-3. Throttle: при текущей нагрузке 45% disk на broker-1/3 -- 50 MB/s безопасно. После reassignment: preferred leader election. Мониторить BytesInPerSec per broker для равномерности."
+/>

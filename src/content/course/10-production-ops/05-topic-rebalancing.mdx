@@ -1,0 +1,416 @@
+---
+title: "Topic Rebalancing"
+description: "kafka-reassign-partitions -- перераспределение партиций при добавлении/удалении брокеров. Generate, Execute, Verify, Throttle"
+order: 5
+difficulty: "advanced"
+estimatedTime: 30
+topics: ["kafka-reassign-partitions", "Partition Reassignment", "Broker Decommission", "Throttle", "Rebalancing"]
+---
+
+# Topic Rebalancing: kafka-reassign-partitions
+
+Вы добавили новый брокер в кластер. Он запустился, зарегистрировался в KRaft-метаданных. И... стоит пустым. Kafka не перераспределяет данные автоматически. В отличие от HDFS, где NameNode сам балансирует блоки, Kafka требует явного действия администратора.
+
+Инструмент: `kafka-reassign-partitions.sh`. Три фазы: генерировать план, выполнить, проверить. И критически важный параметр, без которого reassignment убьёт production кластер: `--throttle`.
+
+---
+
+## Зачем нужна перебалансировка
+
+<DiagramContainer title="До и после добавления брокера" color="amber">
+  <div className="space-y-4 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">Kafka НЕ перераспределяет партиции автоматически</div>
+    <FlowRow>
+      <DataBox
+        label="Broker 1 (старый)"
+        tooltip="До добавления broker-4: broker-1 несёт треть всех партиций и трафика. После добавления broker-4 -- продолжает нести треть. Ничего не изменилось автоматически."
+      >
+        Партиции: 100%, трафик: 100% load
+      </DataBox>
+      <Arrow direction="right" label="+ broker 4" />
+      <DataBox
+        label="Broker 4 (новый)"
+        tooltip="Новый брокер запустился, зарегистрировался. Но ни одной партиции на нём нет. 0% трафика. Без kafka-reassign-partitions он будет простаивать вечно."
+      >
+        Партиции: 0, трафик: 0%
+      </DataBox>
+    </FlowRow>
+    <FlowRow>
+      <DataBox
+        label="После reassignment"
+        tooltip="После выполнения kafka-reassign-partitions: партиции перераспределены. Каждый из 4 брокеров несёт 25% нагрузки. Cluster сбалансирован."
+      >
+        Все 4 брокера: ~25% нагрузки каждый
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+---
+
+## Три фазы: generate, execute, verify
+
+<DiagramContainer title="kafka-reassign-partitions: три фазы" color="blue">
+  <div className="space-y-4 p-2">
+    <FlowColumn>
+      <DataBox
+        label="Фаза 1: --generate"
+        tooltip="Генерирует предложенный план перераспределения. Ввод: список топиков и целевой список брокеров. Вывод: JSON с текущим расположением партиций и предложенным новым. ПРОСМАТРИВАЙТЕ план перед выполнением."
+      >
+        Генерация плана (без изменений в кластере)
+      </DataBox>
+      <Arrow direction="down" />
+      <DataBox
+        label="Фаза 2: --execute"
+        tooltip="Запускает перемещение реплик. Фоновый процесс: данные копируются между брокерами через сеть. Может занимать часы для больших объёмов. ОБЯЗАТЕЛЬНО используйте --throttle."
+      >
+        Выполнение (фоновая копирование данных)
+      </DataBox>
+      <Arrow direction="down" />
+      <DataBox
+        label="Фаза 3: --verify"
+        tooltip="Проверяет статус выполнения. Показывает: какие партиции завершили перемещение, какие ещё в процессе. Запускайте периодически для мониторинга прогресса."
+      >
+        Проверка статуса (можно запускать многократно)
+      </DataBox>
+    </FlowColumn>
+  </div>
+</DiagramContainer>
+
+### Фаза 1: Generate
+
+```bash
+# Шаг 1: Создать файл с топиками для перераспределения
+cat > /tmp/topics.json << 'EOF'
+{
+  "topics": [
+    {"topic": "orders"},
+    {"topic": "payments"},
+    {"topic": "user-events"}
+  ],
+  "version": 1
+}
+EOF
+
+# Шаг 2: Сгенерировать план
+kafka-reassign-partitions.sh \
+  --bootstrap-server localhost:9092 \
+  --topics-to-move-json-file /tmp/topics.json \
+  --broker-list "1,2,3,4" \
+  --generate \
+  2>&1 | tee /tmp/reassignment-plan.txt
+```
+
+Команда выведет два JSON-блока:
+1. **Current partition replica assignment** — текущее расположение
+2. **Proposed partition reassignment configuration** — предложенный план
+
+```bash
+# Сохранить только предложенный план (второй блок JSON)
+# В реальности нужно вручную скопировать из вывода
+cat /tmp/proposed-plan.json
+```
+
+**ОБЯЗАТЕЛЬНО просмотрите предложенный план** перед выполнением. Убедитесь:
+- Новый брокер (4) присутствует в replica lists
+- Предпочтительный лидер (первый элемент `replicas[]`) распределён равномерно
+- Нет "горящих" партиций (критически важных), которые могут временно стать under-replicated
+
+### Фаза 2: Execute
+
+```bash
+kafka-reassign-partitions.sh \
+  --bootstrap-server localhost:9092 \
+  --reassignment-json-file /tmp/proposed-plan.json \
+  --execute \
+  --throttle 52428800
+# 52428800 bytes/s = 50 MB/s
+```
+
+Команда запускает фоновое копирование данных. Процесс:
+1. Новая реплика добавляется как фолловер (Out-of-Sync Replica)
+2. Данные копируются: лидер -> новый фолловер
+3. Когда фолловер догнал лидера — он входит в ISR
+4. Старая реплика удаляется из ISR и с диска
+
+Во время выполнения: `UnderReplicatedPartitions` **временно вырастет** — это нормально. Каждая перемещаемая партиция временно имеет дополнительную реплику (over-replicated), затем лишняя удаляется.
+
+### Фаза 3: Verify
+
+```bash
+kafka-reassign-partitions.sh \
+  --bootstrap-server localhost:9092 \
+  --reassignment-json-file /tmp/proposed-plan.json \
+  --verify
+```
+
+Пример вывода:
+```
+Status of partition reassignment:
+Reassignment of partition orders-0 is completed.
+Reassignment of partition orders-1 is completed.
+Reassignment of partition payments-0 is still in progress.
+Reassignment of partition payments-1 is still in progress.
+```
+
+Продолжайте проверять до тех пор, пока все партиции не покажут "completed".
+
+---
+
+## Формат JSON плана переназначения
+
+```json
+{
+  "version": 1,
+  "partitions": [
+    {
+      "topic": "orders",
+      "partition": 0,
+      "replicas": [2, 3, 4],
+      "log_dirs": ["any", "any", "any"]
+    },
+    {
+      "topic": "orders",
+      "partition": 1,
+      "replicas": [3, 4, 1],
+      "log_dirs": ["any", "any", "any"]
+    },
+    {
+      "topic": "orders",
+      "partition": 2,
+      "replicas": [4, 1, 2],
+      "log_dirs": ["any", "any", "any"]
+    }
+  ]
+}
+```
+
+**Важно о порядке `replicas`:**
+- Первый элемент массива = **preferred leader**
+- Порядок остальных элементов = порядок репликации
+- Равномерное распределение preferred leaders по брокерам обеспечивает равномерную лидерную нагрузку
+
+**`log_dirs`:**
+- `"any"` — брокер сам выбирает дисковый путь (стандартный случай)
+- Конкретный путь (например `"/data/disk2"`) — для JBOD (Multiple disks per broker, Kafka 4.0+)
+
+---
+
+## Throttle: критически важный параметр
+
+Без throttle partition reassignment потребляет ALL доступную сетевую и дисковую пропускную способность. Результат: producers получают TimeoutException, consumers накапливают lag, latency взлетает.
+
+**Как работает throttle:**
+
+```bash
+# Установить throttle при выполнении
+kafka-reassign-partitions.sh \
+  --bootstrap-server localhost:9092 \
+  --reassignment-json-file /tmp/proposed-plan.json \
+  --execute \
+  --throttle 52428800   # 50 MB/s replication speed limit
+```
+
+Под капотом это устанавливает на затронутых брокерах:
+- `leader.replication.throttled.rate=52428800` — лидер ограничивает скорость отдачи данных фолловерам
+- `follower.replication.throttled.rate=52428800` — фолловер ограничивает скорость получения
+
+**Удалить throttle после завершения:**
+
+```bash
+# ДЛЯ КАЖДОГО затронутого брокера (1, 2, 3, 4)
+for BROKER_ID in 1 2 3 4; do
+  kafka-configs.sh \
+    --bootstrap-server localhost:9092 \
+    --entity-type brokers \
+    --entity-name $BROKER_ID \
+    --alter \
+    --delete-config leader.replication.throttled.rate,follower.replication.throttled.rate
+done
+```
+
+Забытый throttle после завершения reassignment замедляет обычную репликацию. Всегда удаляйте его после verify.
+
+**Выбор значения throttle:**
+
+Практическое правило: throttle = 50% от доступной NIC bandwidth / число параллельных reassignment.
+
+```
+# 1 Gbps NIC = 125 MB/s
+# Занято обычным трафиком: ~30 MB/s
+# Доступно для reassignment: 125 - 30 = 95 MB/s
+# Throttle = 50% от доступного = 47.5 MB/s ≈ 50 MB/s (52428800 bytes)
+
+# Для 10 Gbps NIC с 200 MB/s обычного трафика:
+# Доступно: 1250 - 200 = 1050 MB/s
+# Throttle = 50% = 525 MB/s (550502400 bytes)
+```
+
+**Оценка времени завершения:**
+
+```
+duration_hours = data_to_move_GB / throttle_MB_s / 1024 × 3600
+
+# Пример: 500 GB данных при 50 MB/s
+# duration = 500 GB × 1024 MB/GB / 50 MB/s = 10240 s ≈ 2.8 часа
+```
+
+---
+
+## Playbook: добавление нового брокера
+
+<DiagramContainer title="Процесс добавления брокера (8 шагов)" color="emerald">
+  <div className="space-y-2 p-2">
+    <FlowColumn>
+      <DataBox
+        label="Шаг 1: Запустить новый брокер"
+        tooltip="Новый брокер запускается с тем же cluster.id (из CLUSTER_ID env var или формата Kafka), новым уникальным node.id. Конфигурация: подключение к KRaft controllers, listener config."
+      >
+        kafka-server-start.sh с новым node.id
+      </DataBox>
+      <Arrow direction="down" />
+      <DataBox
+        label="Шаг 2: Дождаться регистрации"
+        tooltip="Проверить: ActiveBrokerCount в JMX вырос на 1. Или: kafka-broker-api-versions.sh --bootstrap-server new-broker:9092 -- должен ответить."
+      >
+        Проверить ActiveBrokerCount = 4
+      </DataBox>
+      <Arrow direction="down" />
+      <DataBox
+        label="Шаг 3: Сгенерировать план"
+        tooltip="kafka-reassign-partitions.sh --generate с broker-list включающим новый broker. Просмотреть предложенный план."
+      >
+        --generate с broker-list 1,2,3,4
+      </DataBox>
+      <Arrow direction="down" />
+      <DataBox
+        label="Шаг 4: Проверить план"
+        tooltip="Убедиться: новый брокер присутствует в replica lists. Preferred leaders распределены равномерно. Нет аномалий."
+      >
+        Проверить предложенный план вручную
+      </DataBox>
+      <Arrow direction="down" />
+      <DataBox
+        label="Шаг 5: Execute с throttle"
+        tooltip="--throttle 50 MB/s (или расчётное значение). Команда вернётся сразу -- копирование происходит в фоне."
+      >
+        --execute --throttle 52428800
+      </DataBox>
+      <Arrow direction="down" />
+      <DataBox
+        label="Шаг 6: Мониторинг"
+        tooltip="Периодически запускать --verify. Смотреть UnderReplicatedPartitions (временно вырастет -- норма). Смотреть ReplicationBytesInPerSec."
+      >
+        --verify каждые 5 минут
+      </DataBox>
+      <Arrow direction="down" />
+      <DataBox
+        label="Шаг 7: Удалить throttle"
+        tooltip="После verify показал 'completed' для всех партиций: удалить throttle конфиги на всех затронутых брокерах."
+      >
+        kafka-configs.sh --delete-config throttle
+      </DataBox>
+      <Arrow direction="down" />
+      <DataBox
+        label="Шаг 8: Preferred leader election"
+        tooltip="После reassignment некоторые партиции могут иметь leader != preferred leader. Preferred leader election восстанавливает баланс лидеров."
+      >
+        kafka-leader-election.sh --election-type preferred --all-topic-partitions
+      </DataBox>
+    </FlowColumn>
+  </div>
+</DiagramContainer>
+
+**Preferred leader election:**
+
+```bash
+kafka-leader-election.sh \
+  --bootstrap-server localhost:9092 \
+  --election-type preferred \
+  --all-topic-partitions
+```
+
+После reassignment партиция может иметь лидера, который не является preferred leader (первый элемент в `replicas[]`). Это происходит если текущий лидер не изменился, но reassignment изменил порядок реплик. Preferred leader election перемещает лидерство к preferred реплике — без копирования данных, мгновенно.
+
+---
+
+## Playbook: вывод брокера из эксплуатации
+
+```bash
+# Шаг 1: Сгенерировать план, исключив выводимый брокер
+# broker-list не включает broker-3 (выводимый)
+cat > /tmp/decommission-topics.json << 'EOF'
+{"topics": [{"topic": "orders"}, {"topic": "payments"}], "version": 1}
+EOF
+
+kafka-reassign-partitions.sh \
+  --bootstrap-server localhost:9092 \
+  --topics-to-move-json-file /tmp/decommission-topics.json \
+  --broker-list "1,2,4" \  # broker-3 НЕ включён
+  --generate
+
+# Шаг 2: Execute с throttle
+# Шаг 3: Verify до завершения
+# Шаг 4: Убедиться что UnderReplicatedPartitions вернулся к 0
+# Шаг 5: Остановить broker-3
+bin/kafka-server-stop.sh
+
+# Шаг 6: Удалить конфиг broker-3 из cluster (опционально, KRaft сам обнаружит отсутствие)
+```
+
+**НИКОГДА** не останавливайте брокер до переноса всех его партиций. Результат: UnderReplicatedPartitions взлетит, часть партиций может стать offline.
+
+---
+
+## Мониторинг reassignment
+
+Пока выполняется reassignment, смотрите эти метрики:
+
+| Метрика | Ожидаемое поведение | Тревожный сигнал |
+|---------|--------------------|--------------------|
+| `UnderReplicatedPartitions` | Временно растёт (новые реплики догоняют), затем возвращается к 0 | Не уменьшается после нескольких часов |
+| `ReplicationBytesInPerSec` | Повышенный трафик (репликация идёт) | Нулевой при незавершённом reassignment |
+| `BytesInPerSec` per broker | Выравнивается по брокерам по мере завершения | Hot broker остаётся после завершения |
+| `LeaderCount` per broker | Выравнивается после preferred leader election | Один брокер несёт 80%+ лидеров |
+
+---
+
+## Kafka 4.0: JBOD и intra-broker reassignment
+
+В Kafka 4.0 поддержка JBOD (Just a Bunch of Disks) значительно улучшена. Один брокер может иметь несколько disks:
+
+```properties
+# server.properties
+log.dirs=/data/disk1,/data/disk2,/data/disk3
+```
+
+`kafka-reassign-partitions.sh` поддерживает перемещение партиций **между дисками на одном брокере** (intra-broker reassignment). Это быстрее межброкерского перемещения (нет сетевого трафика — только disk-to-disk copy):
+
+```json
+{
+  "version": 1,
+  "partitions": [
+    {
+      "topic": "orders",
+      "partition": 0,
+      "replicas": [1, 2, 3],
+      "log_dirs": ["/data/disk2", "any", "any"]
+    }
+  ]
+}
+```
+
+Запись `/data/disk2` для broker-1 означает: переместить партицию 0 топика orders на disk2 брокера 1. Полезно для балансировки нагрузки между дисками при неравномерном использовании.
+
+<Callout type="danger">
+НИКОГДА не запускайте kafka-reassign-partitions без --throttle в production! Без ограничения reassignment потребляет весь сетевой и дисковый I/O. Producers получат TimeoutException, consumers -- lag spike. Сервисы, зависящие от Kafka, начнут деградировать. Стандартный throttle: 50 MB/s per broker. Для кластера с 1 Gbps NIC и умеренным трафиком -- безопасно. Увеличивайте только если мониторинг показывает, что throttle не влияет на production трафик.
+</Callout>
+
+<Callout type="tip">
+Автоматическая балансировка: Confluent Platform включает Self-Balancing Clusters (confluent.balancer.enable=true) -- автоматическое перераспределение при добавлении брокеров. Apache Kafka community работает над нативной auto-rebalancing (KIP-848 и связанные). До тех пор: kafka-reassign-partitions + регулярный мониторинг байт на брокер для обнаружения дисбаланса.
+</Callout>
+
+<KnowledgeCheck
+  question="Вы добавили четвёртый брокер в кластер из трёх. Топик orders имеет 12 партиций с RF=3. Брокер запустился и зарегистрировался. Вы запускаете kafka-reassign-partitions --generate с broker-list=1,2,3,4. Опишите: (1) что вы увидите в proposed plan (сколько партиций переместится и куда), (2) какой throttle установить для 1 Gbps NIC при текущей нагрузке 30 MB/s, (3) как проверить завершение и что сделать после."
+  answer="(1) Proposed plan: При 12 партициях RF=3 на 3 брокерах = 36 реплик (12×3). Равномерное распределение на 4 брокерах = 9 реплик на брокер. Сейчас каждый брокер несёт 36/3=12 реплик. Нужно переместить по 3 реплики с каждого старого брокера на broker-4. Итого: ~9 партиций получат новое расположение реплик с включением broker-4. Preferred leaders будут перераспределены: 12/4=3 partition leaders per broker. (2) Throttle: 1 Gbps = 125 MB/s. Занято: 30 MB/s. Доступно: 95 MB/s. 50% safety: 47.5 MB/s ≈ 50 MB/s = 52428800 bytes. Команда: --throttle 52428800. (3) Проверка: kafka-reassign-partitions.sh --verify до 'completed' для всех партиций. После завершения: (а) удалить throttle на всех 4 брокерах (kafka-configs.sh --delete-config); (б) запустить preferred leader election (kafka-leader-election.sh --election-type preferred --all-topic-partitions); (в) убедиться что UnderReplicatedPartitions = 0."
+/>
