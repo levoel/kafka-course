@@ -61,6 +61,32 @@
       "studyHint": "Модуль 07: Kafka Streams — раздел 'KTable: snapshot table from changelog topic'"
     },
     {
+      "id": "kafka-m13-02-code-1",
+      "type": "code-challenge",
+      "question": "Напишите Python-функцию calculate_partition_count(throughput_mb_s, partition_throughput_mb_s, consumer_count), которая возвращает необходимое число партиций. Число партиций должно быть достаточным как для пропускной способности (ceil(throughput / partition_throughput)), так и для параллелизма consumer-группы (не менее consumer_count). Выведите результат для throughput=200, partition_throughput=10, consumers=12 в формате 'Partitions: N'.",
+      "language": "python",
+      "starterCode": "import math\n\ndef calculate_partition_count(throughput_mb_s, partition_throughput_mb_s, consumer_count):\n    # TODO: вычислите число партиций по пропускной способности\n    throughput_partitions = 0  # замените на вычисление\n    # TODO: верните максимум из двух значений\n    return 0\n\nresult = calculate_partition_count(200, 10, 12)\nprint(f'Partitions: {result}')",
+      "solutionCode": "import math\n\ndef calculate_partition_count(throughput_mb_s, partition_throughput_mb_s, consumer_count):\n    throughput_partitions = math.ceil(throughput_mb_s / partition_throughput_mb_s)\n    return max(throughput_partitions, consumer_count)\n\nresult = calculate_partition_count(200, 10, 12)\nprint(f'Partitions: {result}')",
+      "testCases": [
+        {
+          "id": "tc1",
+          "description": "Вывод содержит 'Partitions:'",
+          "expectedOutput": "Partitions:",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc2",
+          "description": "Результат равен 20 (throughput-bound: ceil(200/10)=20 > consumer_count=12)",
+          "expectedOutput": "Partitions: 20",
+          "matchMode": "contains",
+          "hidden": true
+        }
+      ],
+      "explanation": "Число партиций определяется двумя ограничениями: пропускная способность (throughput_partitions = ceil(200 / 10) = 20) и параллелизм consumer-группы (consumer_count = 12). Берём максимум: max(20, 12) = 20. В данном случае система ограничена throughput, а не числом consumers. Если бы throughput был низким (например, 50 МБ/с при 10 МБ/с на партицию = 5 партиций), но consumer_count=12, то правильный ответ был бы 12 — число партиций не может быть меньше числа consumers в группе, иначе часть consumers останется без работы.",
+      "bloomLevel": "analytical"
+    },
+    {
       "id": "kafka-13-02-q3",
       "type": "multiple-choice",
       "question": "Эталонное решение capstone выбирает active-passive топологию MirrorMaker 2. При каком изменении требований active-active была бы более подходящим выбором?",

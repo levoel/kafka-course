@@ -59,6 +59,39 @@
       "bloomLevel": "analytical"
     },
     {
+      "id": "kafka-m11-02-code-1",
+      "type": "code-challenge",
+      "question": "Напишите JSON-конфигурацию MirrorMaker 2 для двунаправленной репликации между кластерами us-east и eu-west. Кластер us-east реплицирует топики orders.* в eu-west, кластер eu-west реплицирует топики inventory.* в us-east. Фактор репликации для реплицируемых топиков — 3.",
+      "language": "json",
+      "starterCode": "{\n  \"clusters\": \"TODO: перечислите оба кластера через запятую\",\n  \"us-east->eu-west.topics\": \"TODO: паттерн топиков для репликации\",\n  \"eu-west->us-east.topics\": \"TODO: паттерн топиков для репликации\",\n  \"replication.factor\": TODO\n}",
+      "solutionCode": "{\n  \"clusters\": \"us-east,eu-west\",\n  \"us-east->eu-west.topics\": \"orders.*\",\n  \"eu-west->us-east.topics\": \"inventory.*\",\n  \"replication.factor\": 3\n}",
+      "testCases": [
+        {
+          "id": "tc1",
+          "description": "Конфигурация содержит оба кластера us-east и eu-west",
+          "expectedOutput": "us-east",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc2",
+          "description": "Конфигурация реплицирует топики orders.* из us-east в eu-west",
+          "expectedOutput": "orders.*",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc3",
+          "description": "Фактор репликации равен 3",
+          "expectedOutput": "\"replication.factor\": 3",
+          "matchMode": "contains",
+          "hidden": true
+        }
+      ],
+      "explanation": "MirrorMaker 2 настраивается через конфигурационный файл mm2.properties. Ключ clusters перечисляет все участвующие кластеры. Направление репликации задаётся синтаксисом source->target.topics с glob-паттерном топиков. Двунаправленная репликация us-east->eu-west и eu-west->us-east — основа Active-Active топологии. MM2 автоматически предотвращает циклическую репликацию через заголовки записей: запись, реплицированная из us-east в eu-west, не будет повторно реплицирована обратно.",
+      "bloomLevel": "applied"
+    },
+    {
       "id": "kafka-11-02-q3",
       "type": "multiple-choice",
       "question": "Компания IoT-платформы имеет 50 regional edge-кластеров, каждый собирает sensor-данные своего региона. Нужно агрегировать все данные в центральный analytics-кластер для global ML pipeline. Какая топология MM2 оптимальна?",

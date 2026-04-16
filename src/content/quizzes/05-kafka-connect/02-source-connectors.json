@@ -91,6 +91,39 @@
       "correctAnswer": "false",
       "explanation": "Ложь. FileStreamSourceConnector предназначен исключительно для учебных примеров и тестирования. Его критические ограничения для production: (1) не отслеживает ротацию лог-файлов — если файл архивируется и создаётся новый, коннектор может потерять позицию или читать старый файл; (2) нет поддержки сжатых файлов (.gz, .bz2); (3) нет мониторинга появления новых файлов в директории; (4) один файл = одна задача — нет параллелизма. Для production log ingestion используйте специализированные решения: Kafka Connect S3 Source Connector, Filebeat + Logstash, или Confluent Kafka Connect File Pulse Connector.",
       "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m05-02-code-1",
+      "type": "code-challenge",
+      "question": "Напишите JSON-конфигурацию для source connector на базе FileStreamSourceConnector. Коннектор должен читать файл /var/log/app.log и публиковать данные в топик app-logs с одной задачей (tasks.max=1).",
+      "language": "json",
+      "starterCode": "{\n  \"name\": \"app-log-source\",\n  \"config\": {\n    \"connector.class\": \"TODO: класс FileStreamSourceConnector\",\n    \"file\": \"TODO: путь к файлу\",\n    \"topic\": \"TODO: имя топика\",\n    \"tasks.max\": \"TODO\"\n  }\n}",
+      "solutionCode": "{\n  \"name\": \"app-log-source\",\n  \"config\": {\n    \"connector.class\": \"org.apache.kafka.connect.file.FileStreamSourceConnector\",\n    \"file\": \"/var/log/app.log\",\n    \"topic\": \"app-logs\",\n    \"tasks.max\": \"1\"\n  }\n}",
+      "testCases": [
+        {
+          "id": "tc1",
+          "description": "Конфигурация содержит FileStreamSourceConnector",
+          "expectedOutput": "FileStreamSourceConnector",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc2",
+          "description": "Конфигурация указывает путь к файлу /var/log/app.log",
+          "expectedOutput": "/var/log/app.log",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc3",
+          "description": "Конфигурация публикует данные в топик app-logs",
+          "expectedOutput": "app-logs",
+          "matchMode": "contains",
+          "hidden": true
+        }
+      ],
+      "explanation": "FileStreamSourceConnector читает строки из указанного файла и публикует каждую строку как отдельное сообщение в Kafka. Обязательные параметры: connector.class (полное имя класса), file (абсолютный путь к файлу), topic (целевой Kafka-топик). tasks.max=1 — единственно возможное значение для файлового коннектора, поскольку один файл не может параллельно читаться несколькими задачами. В production вместо FileStreamSourceConnector используют специализированные коннекторы с поддержкой ротации файлов.",
+      "bloomLevel": "applied"
     }
   ]
 }

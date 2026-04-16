@@ -59,6 +59,39 @@
       "bloomLevel": "applied"
     },
     {
+      "id": "kafka-m12-03-code-1",
+      "type": "code-challenge",
+      "question": "Напишите Python-функцию create_outbox_entry(order_id, event_type, payload), которая формирует запись для outbox-таблицы. Запись должна содержать поля: id (UUID v4 строкой), aggregate_id (order_id), event_type, payload, created_at (ISO 8601 timestamp), published (False). Выведите запись в формате JSON.",
+      "language": "python",
+      "starterCode": "import json\nimport uuid\nfrom datetime import datetime, timezone\n\ndef create_outbox_entry(order_id, event_type, payload):\n    # TODO: создайте словарь с полями outbox-записи\n    entry = {\n        # id: UUID v4 строкой\n        # aggregate_id: order_id\n        # event_type: event_type\n        # payload: payload\n        # created_at: ISO 8601 timestamp\n        # published: False\n    }\n    return entry\n\n# Тест\nentry = create_outbox_entry('order-42', 'OrderCreated', {'amount': 150})\nprint(json.dumps(entry, ensure_ascii=False))",
+      "solutionCode": "import json\nimport uuid\nfrom datetime import datetime, timezone\n\ndef create_outbox_entry(order_id, event_type, payload):\n    entry = {\n        'id': str(uuid.uuid4()),\n        'aggregate_id': order_id,\n        'event_type': event_type,\n        'payload': payload,\n        'created_at': datetime.now(timezone.utc).isoformat(),\n        'published': False\n    }\n    return entry\n\nentry = create_outbox_entry('order-42', 'OrderCreated', {'amount': 150})\nprint(json.dumps(entry, ensure_ascii=False))",
+      "testCases": [
+        {
+          "id": "tc1",
+          "description": "Вывод содержит поле aggregate_id",
+          "expectedOutput": "aggregate_id",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc2",
+          "description": "Поле published равно false",
+          "expectedOutput": "\"published\": false",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc3",
+          "description": "aggregate_id совпадает с переданным order_id",
+          "expectedOutput": "order-42",
+          "matchMode": "contains",
+          "hidden": true
+        }
+      ],
+      "explanation": "Outbox-запись содержит все поля, необходимые для маршрутизации и идемпотентности: id (UUID v4) — уникальный идентификатор события для дедупликации у consumer; aggregate_id — идентификатор бизнес-сущности, становится Kafka-ключом для partition affinity; event_type — тип события для маршрутизации через EventRouter SMT; payload — бизнес-данные события; created_at — ISO 8601 timestamp для TTL-очистки outbox; published=False — флаг для Polling Publisher, Debezium CDC не использует этот флаг (он читает WAL). Все поля записываются в одной DB-транзакции вместе с бизнес-данными.",
+      "bloomLevel": "applied"
+    },
+    {
       "id": "kafka-12-03-q3",
       "type": "multiple-choice",
       "question": "Ваша команда выбирает между Polling Publisher и Debezium CDC для чтения outbox таблицы. Система обрабатывает 5,000 заказов в секунду, требования по latency — менее 100мс от записи в DB до публикации в Kafka. В каком сценарии следует выбрать Polling Publisher, а не Debezium?",
