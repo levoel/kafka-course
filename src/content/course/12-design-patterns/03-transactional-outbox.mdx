@@ -1,0 +1,352 @@
+---
+title: "Transactional Outbox Pattern"
+description: "Решение dual-write проблемы: outbox таблица в одной DB-транзакции с бизнес-данными, Debezium CDC для публикации в Kafka, сравнение polling publisher vs CDC подходов."
+order: 3
+difficulty: "advanced"
+estimatedTime: 30
+topics: ["Transactional Outbox", "Dual Write", "Debezium", "CDC", "Outbox Pattern", "Reliable Messaging"]
+free: false
+---
+
+# Transactional Outbox Pattern
+
+Каждый разработчик микросервисов рано или поздно сталкивается с одной и той же задачей: нужно одновременно обновить базу данных и опубликовать событие в Kafka. Казалось бы, просто: сначала база, потом Kafka. Но "просто" здесь ломает систему.
+
+**Transactional Outbox** — это паттерн, который делает эту операцию надёжной. Если вы усвоите один паттерн из всего модуля — пусть это будет outbox.
+
+---
+
+## Dual-Write проблема: почему наивный подход не работает
+
+Рассмотрим типичный сценарий: Order Service обрабатывает оплату заказа.
+
+```
+// Наивный подход — НИКОГДА не делайте так
+BEGIN TRANSACTION
+  UPDATE orders SET status = 'PAID', paid_at = NOW()
+      WHERE id = 'order-123';
+COMMIT  -- успешно
+
+producer.send("payments.events", OrderPaidEvent{...});  -- может упасть!
+```
+
+**Сценарий 1: Kafka publish упал после DB commit.**
+
+База данных: заказ переведён в PAID. Kafka: событие OrderPaid не опубликовано. Inventory Service не получил сигнала зарезервировать товары. Notification Service не отправил подтверждение. Заказ застрял в несогласованном состоянии.
+
+**Сценарий 2: DB commit упал после Kafka publish.**
+
+Kafka: событие OrderPaid опубликовано. База данных: откат транзакции, заказ остался в статусе PENDING. Inventory Service зарезервировал товары для заказа, которого не существует. Деньги списаны (внешний платёжный сервис уже обработал), но заказ в PENDING.
+
+**Обратный порядок не помогает.** Если сначала Kafka, потом база — те же два сценария, только зеркально.
+
+Kafka producer не участвует в DB-транзакции. Нет способа атомарно выполнить DB-операцию и Kafka-операцию в одной транзакции (если только не использовать XA-транзакции, которые практически неприменимы при Kafka из-за производительности и совместимости).
+
+<Callout type="warning">
+Dual-write — это не редкий edge case. Это происходит при каждом сетевом сбое, перезапуске приложения, OOM-kill процесса. В production-системе с тысячами транзакций в секунду и SLA 99.9% — это гарантированная проблема без outbox pattern.
+</Callout>
+
+---
+
+## Решение: Outbox Pattern
+
+**Идея:** Записать событие в специальную таблицу `outbox` в той же БД в рамках той же транзакции, что и бизнес-данные. Затем — отдельный процесс читает outbox и публикует в Kafka.
+
+```sql
+-- Бизнес-операция: атомарно обновляем заказ И пишем в outbox
+BEGIN TRANSACTION;
+
+UPDATE orders
+  SET status = 'PAID', paid_at = NOW()
+  WHERE id = 'order-123';
+
+INSERT INTO outbox (
+    id,
+    aggregate_type,
+    aggregate_id,
+    event_type,
+    payload,
+    created_at
+) VALUES (
+    'evt-uuid-001',
+    'Order',
+    'order-123',
+    'OrderPaid',
+    '{"orderId":"order-123","amount":99.98,"currency":"RUB","paidAt":"2026-04-16T10:00:00Z"}',
+    NOW()
+);
+
+COMMIT;  -- обе операции атомарны в одной транзакции
+```
+
+Теперь: если транзакция провалилась — ни заказ не обновлён, ни outbox запись не создана. Если транзакция успешна — гарантированно есть запись в outbox. Kafka-публикация из outbox — это уже отдельная, повторяемая операция. Если она провалилась — процесс повторит её при следующей итерации.
+
+---
+
+## Архитектура Outbox с Debezium CDC
+
+<DiagramContainer title="Transactional Outbox: атомарная запись и CDC-публикация" color="emerald">
+  <div className="space-y-4 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">Одна транзакция: orders + outbox. Debezium читает WAL и публикует в Kafka. Нет dual-write риска.</div>
+    <FlowRow>
+      <FlowNode
+        variant="source"
+        size="sm"
+        tooltip="Order Service: HTTP request на оплату заказа. Открывает одну DB-транзакцию. Выполняет UPDATE orders + INSERT outbox в одном atomic commit. Никакого Kafka producer в бизнес-коде."
+      >
+        Order Service
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowColumn>
+        <FlowNode
+          variant="process"
+          size="sm"
+          tooltip="PostgreSQL: таблица orders (основные данные заказа). Обновляется в той же транзакции. Если транзакция откатится — orders не изменится."
+        >
+          orders table
+        </FlowNode>
+        <FlowNode
+          variant="process"
+          size="sm"
+          tooltip="PostgreSQL: таблица outbox. Получает INSERT в той же транзакции. Строго атомарна с обновлением orders — не может быть выполнена одна без другой."
+        >
+          outbox table
+        </FlowNode>
+      </FlowColumn>
+      <Arrow direction="right" label="WAL CDC" />
+      <FlowNode
+        variant="process"
+        size="sm"
+        tooltip="Debezium PostgreSQL Connector. Читает PostgreSQL WAL (Write-Ahead Log) через logical replication. Каждый INSERT в outbox таблицу -> CDC event в Debezium. Порядок событий = порядок WAL записей. Debezium отслеживает LSN (Log Sequence Number) для exactly-once обработки."
+      >
+        Debezium
+        Connector
+      </FlowNode>
+      <Arrow direction="right" label="SMT Transform" />
+      <FlowNode
+        variant="sink"
+        size="sm"
+        tooltip="Kafka topic: payments.events (или любой другой, определённый aggregate_type полем outbox записи). Ключ = aggregate_id. Value = payload поле. EventRouter SMT автоматически маршрутизирует записи в нужный топик по aggregate_type."
+      >
+        payments.events
+        (Kafka)
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+---
+
+## Debezium Outbox Event Router SMT
+
+Debezium включает специальный **Single Message Transform (SMT)**: `io.debezium.transforms.outbox.EventRouter`. Этот transform преобразует CDC-события из outbox таблицы в правильно отформатированные Kafka записи.
+
+**Конфигурация Debezium Outbox Connector:**
+
+```json
+{
+  "name": "outbox-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "debezium",
+    "database.password": "secret",
+    "database.dbname": "orders_db",
+    "database.server.name": "orders-service",
+    "plugin.name": "pgoutput",
+    "slot.name": "debezium_outbox_slot",
+    "table.include.list": "public.outbox",
+    "transforms": "outbox",
+    "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+    "transforms.outbox.table.field.event.type": "event_type",
+    "transforms.outbox.table.field.event.key": "aggregate_id",
+    "transforms.outbox.route.by.field": "aggregate_type",
+    "transforms.outbox.table.fields.additional.placement": "created_at:header:eventTimestamp",
+    "transforms.outbox.route.topic.replacement": "outbox.event.${routedByValue}"
+  }
+}
+```
+
+**Как EventRouter SMT работает:**
+
+1. Debezium фиксирует INSERT в `public.outbox` через PostgreSQL WAL.
+2. EventRouter извлекает поля outbox записи:
+   - **Topic routing:** значение `aggregate_type` поля (`Order`) → топик `outbox.event.order`
+   - **Kafka key:** значение `aggregate_id` поля (`order-123`)
+   - **Kafka value:** значение `payload` поля (JSON события)
+3. CDC envelope (before/after структура) заменяется чистым бизнес-событием.
+4. Дополнительные поля из `created_at` помещаются в заголовки (header) Kafka записи.
+
+Это критически важно: downstream consumers получают **чистое бизнес-событие**, не CDC-артефакт с before/after структурой.
+
+---
+
+## Схема Outbox таблицы
+
+```sql
+CREATE TABLE outbox (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    aggregate_type  VARCHAR(255)  NOT NULL,   -- 'Order', 'Payment', 'Inventory'
+    aggregate_id    VARCHAR(255)  NOT NULL,   -- 'order-123', 'payment-456'
+    event_type      VARCHAR(255)  NOT NULL,   -- 'OrderCreated', 'OrderPaid', 'OrderCancelled'
+    payload         JSONB         NOT NULL,   -- фактическое содержимое события
+    created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    processed_at    TIMESTAMPTZ,              -- для polling publisher (nullable)
+    version         INTEGER       NOT NULL DEFAULT 1  -- версия схемы события
+);
+
+-- Индекс для polling publisher (если не Debezium)
+CREATE INDEX idx_outbox_unprocessed
+    ON outbox (created_at)
+    WHERE processed_at IS NULL;
+
+-- Индекс для очистки
+CREATE INDEX idx_outbox_created_at ON outbox (created_at);
+```
+
+**Проектные решения:**
+
+- `aggregate_type` — Debezium EventRouter использует для routing в топик.
+- `aggregate_id` — становится Kafka key, обеспечивает partition affinity (все события одного агрегата в одну партицию).
+- `payload` — JSONB или BYTEA (для Avro бинарника). JSONB рекомендуется для отладки.
+- `version` — версия схемы для upcasting при эволюции.
+- `processed_at` — нужен только для polling publisher подхода.
+
+---
+
+## CrossCourseRef: Debezium глубже
+
+<CrossCourseRef
+  courseId="debezium"
+  title="Debezium Deep-Dive: Outbox Pattern и CDC механика"
+/>
+
+Полная конфигурация Debezium connector, WAL/binlog механика, SMT трансформации, LAG-метрики, мониторинг Debezium — в курсе Debezium. Здесь мы сфокусированы на outbox pattern как решении dual-write, а не на деталях CDC инфраструктуры.
+
+---
+
+## Альтернатива: Polling Publisher
+
+Если развёртывание Debezium недопустимо (ограничения инфраструктуры, нет доступа к WAL), используется **Polling Publisher** — простой scheduled job:
+
+```java
+@Scheduled(fixedDelay = 500)  // каждые 500мс
+@Transactional
+void publishOutboxEvents() {
+    List<OutboxEvent> events = outboxRepository
+        .findUnprocessedEvents(100);  // SELECT ... WHERE processed_at IS NULL ORDER BY created_at LIMIT 100
+
+    for (OutboxEvent event : events) {
+        try {
+            String topic = resolveTopicName(event.getAggregateType());
+            producer.send(new ProducerRecord<>(topic, event.getAggregateId(), event.getPayload()))
+                    .get(5, TimeUnit.SECONDS);  // sync для at-least-once
+            event.setProcessedAt(LocalDateTime.now());
+            outboxRepository.save(event);
+        } catch (Exception e) {
+            log.error("Failed to publish outbox event {}", event.getId(), e);
+            // Следующая итерация повторит
+        }
+    }
+}
+```
+
+**Polling vs Debezium CDC: сравнение подходов:**
+
+<DiagramContainer title="Polling Publisher vs Debezium CDC" color="purple">
+  <div className="space-y-4 p-2">
+    <FlowRow>
+      <DataBox
+        label="Polling Publisher"
+        tooltip="Простота: нет CDC инфраструктуры. SELECT-UPDATE-DELETE цикл. Недостатки: задержка = polling interval (100ms-5s). Два DB-запроса на событие (SELECT + UPDATE). Масштабирование: один publisher, иначе дублирование (нужен distributed lock). Порядок: ORDER BY created_at — возможны проблемы при одинаковых timestamp."
+      >
+        Polling: 100ms-5s latency
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="Debezium CDC"
+        tooltip="Latency: почти реального времени (WAL → Kafka за миллисекунды). Порядок: WAL LSN — строго монотонный, надёжный порядок. Масштабирование: Debezium connector — один активный task на таблицу. Сложность: требует Debezium Connect cluster, WAL конфигурация PostgreSQL (wal_level=logical). Нет дополнительного DB-запроса для чтения outbox — WAL прямо."
+      >
+        CDC: near-realtime latency
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+**Когда выбрать Polling Publisher:**
+- Latency 500ms-5s допустима для вашего сценария.
+- Нет возможности установить Debezium (ограниченная инфраструктура).
+- Небольшой объём событий (до нескольких сотен в секунду).
+- PostgreSQL WAL level не может быть `logical`.
+
+**Когда выбрать Debezium CDC:**
+- Требуется near-realtime latency (менее 100ms).
+- Высокий объём событий (тысячи в секунду).
+- Критична надёжность порядка событий.
+- Уже используется Kafka Connect (добавление Debezium — ещё один connector).
+
+---
+
+## Idempotency и обработка дублей
+
+Outbox pattern гарантирует **at-least-once доставку**: событие будет опубликовано минимум один раз. В случае сбоя publisher может опубликовать одно и то же событие дважды.
+
+**Решение:** все consumers outbox событий должны быть идемпотентны. Используйте `eventId` (UUID из outbox) как ключ дедупликации:
+
+```java
+@KafkaListener(topics = "outbox.event.order")
+void onOrderEvent(ConsumerRecord<String, String> record) {
+    String eventId = record.headers()
+        .lastHeader("eventId")
+        .map(h -> new String(h.value()))
+        .orElseGet(() -> extractFromPayload(record.value()));
+
+    if (processedEventRepository.exists(eventId)) {
+        log.info("Duplicate event {}, skipping", eventId);
+        return;
+    }
+
+    processEvent(record.value());
+    processedEventRepository.markProcessed(eventId);
+}
+```
+
+Храните processed eventId в базе данных с TTL или bloom filter для эффективной дедупликации.
+
+---
+
+## Очистка Outbox таблицы
+
+Outbox — временное хранилище. После успешной публикации записи можно удалять:
+
+**При Debezium:** Debezium отслеживает позицию WAL (LSN) через replication slot. После того как INSERT обработан, строку можно безопасно удалить. Периодически:
+
+```sql
+DELETE FROM outbox
+WHERE created_at < NOW() - INTERVAL '1 hour';
+```
+
+Debezium не потеряет необработанные события: при сбое он возобновляет с того же LSN (replication slot сохраняет позицию). Удалять можно только **уже обработанные** строки.
+
+**При Polling Publisher:** DELETE после `processed_at IS NOT NULL` или TTL-очистка.
+
+<Callout type="tip">
+Transactional Outbox Pattern — золотой стандарт надёжной публикации событий в микросервисах. Если вы строите event-driven систему на Kafka, outbox pattern — ваш первый выбор для решения dual-write. Debezium CDC + EventRouter SMT делает его операционно простым.
+</Callout>
+
+---
+
+## Ключевые выводы
+
+1. **Dual-write проблема** — наивная последовательность "сначала DB, потом Kafka" ненадёжна при сбоях. Атомарности нет.
+2. **Outbox решение:** событие пишется в `outbox` таблицу в той же DB-транзакции. Atomicity гарантирована базой данных.
+3. **Debezium EventRouter SMT** читает outbox через CDC (WAL), маршрутизирует в Kafka topic по `aggregate_type`.
+4. **Polling Publisher** — проще, но выше latency и два DB-запроса на событие.
+5. Все consumers outbox событий должны быть **идемпотентны** — at-least-once delivery гарантирует дубли.
+6. Outbox очищается после обработки. Debezium replication slot гарантирует сохранение позиции при сбоях.
+
+<KnowledgeCheck
+  question="Разработчик говорит: 'Я добавил try-catch вокруг Kafka producer.send(), если он упадёт — просто логирую ошибку и двигаюсь дальше. Это решает dual-write.' Почему это НЕ решает проблему, и что будет происходить в production при таком подходе?"
+  answer="try-catch с игнорированием ошибки создаёт silent data loss. Если Kafka publish упал (сетевой сбой, брокер недоступен, timeout) — DB уже обновлена (committed), а событие потеряно навсегда. Downstream consumers (Inventory, Notification, Analytics) никогда не получат сигнал. Это не edge case: в production с SLA 99.9% на 1M транзакций в день — это тысячи потерянных событий. Outbox pattern решает это: событие записывается в БД атомарно с бизнес-данными. Если Kafka publish упал — outbox запись остаётся. Publisher повторит публикацию (retry loop). Потеря данных невозможна: или транзакция провалится (и outbox запись не создастся), или outbox запись гарантирует eventual Kafka публикацию."
+/>
