@@ -1,0 +1,137 @@
+{
+  "lessonSlug": "07-kafka-streams/04-windowing",
+  "moduleId": "07-kafka-streams",
+  "_meta": {
+    "idPrefix": "kafka-m07-04",
+    "description": "Use IDs: kafka-m07-04-q1, q2, q3 for MC; kafka-m07-04-q4 for TF; kafka-m07-04-code-1 for code challenge"
+  },
+  "questions": [
+    {
+      "id": "kafka-m07-04-q1",
+      "type": "multiple-choice",
+      "question": "Система мониторинга считает количество HTTP-ошибок за фиксированные 5-минутные периоды: [0:00-5:00), [5:00-10:00), [10:00-15:00) и т.д. Данные могут опаздывать до 30 секунд. Какой тип окна и конфигурация grace period корректны?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Hopping Window: TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(5)).advanceBy(Duration.ofMinutes(5)) — hopping с advance = size эквивалентен tumbling"
+        },
+        {
+          "id": "b",
+          "text": "Tumbling Window: TimeWindows.ofSizeAndGrace(Duration.ofMinutes(5), Duration.ofSeconds(30)) — фиксированные непересекающиеся окна с grace 30 секунд для запоздавших записей"
+        },
+        {
+          "id": "c",
+          "text": "Session Window: SessionWindows.ofInactivityGapWithNoGrace(Duration.ofMinutes(5)) — сессионное окно с gap 5 минут"
+        },
+        {
+          "id": "d",
+          "text": "Tumbling Window: TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(5)) — grace не нужен, данные всегда поступают вовремя"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Tumbling Window с grace period — правильный выбор. Требования: (1) фиксированные непересекающиеся периоды → tumbling (не hopping, не session). (2) Данные опаздывают до 30 секунд → grace period минимум 30 секунд. TimeWindows.ofSizeAndGrace(Duration.ofMinutes(5), Duration.ofSeconds(30)) создаёт окна [0:00-5:00), [5:00-10:00) и принимает записи до 30 секунд после закрытия каждого окна. Вариант D неверен: ofSizeWithNoGrace() означает grace=0, опоздавшие на 30 сек записи будут отброшены. Вариант A технически эквивалентен tumbling, но семантически неправильно описывает намерение.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m07-04-q2",
+      "type": "multiple-choice",
+      "question": "Kafka Streams приложение использует Suppress.untilWindowCloses(BufferConfig.unbounded()) после windowed count(). Потребитель выходного топика не получает никаких записей в течение 24 часов после запуска. В чём причина?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Suppress блокирует вывод навсегда — необходимо вручную вызвать flush() для эмиссии результатов"
+        },
+        {
+          "id": "b",
+          "text": "По умолчанию в Kafka 3.x+ grace period окна составляет 24 часа. untilWindowCloses ждёт закрытия окна (size + grace). Окно не может закрыться пока не истечёт grace period — результаты появятся только через 24+ часов"
+        },
+        {
+          "id": "c",
+          "text": "unbounded() означает бесконечный буфер — результаты никогда не эмитируются при использовании unbounded буфера"
+        },
+        {
+          "id": "d",
+          "text": "Suppress работает только с Session Windows — для Time Windows необходимо использовать другой механизм"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Это критически важная ловушка grace period по умолчанию. В Kafka Streams 3.x+ default grace period = 24 часа (изменение с 0 в более ранних версиях). Suppress.untilWindowCloses() ждёт пока окно полностью закроется = window_end + grace_period. При grace=24h окно [10:00-10:05) закроется только в 10:05 следующего дня. До этого момента Suppress удерживает все промежуточные результаты. Исправление: явно установить короткий grace: TimeWindows.ofSizeAndGrace(size, Duration.ofSeconds(30)). После этого окна будут закрываться через 30 секунд после их завершения.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m07-04-q3",
+      "type": "multiple-choice",
+      "question": "Пользователь посещает сайт в 10:00, 10:08, 10:35, 10:42, 11:20. Session window с inactivityGap=15 минут. Сколько сессий будет создано и какие их границы?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Одна сессия [10:00-11:20] — все события в пределах 1 часа 20 минут"
+        },
+        {
+          "id": "b",
+          "text": "Три сессии: [10:00-10:08], [10:35-10:42], [11:20-11:20] — каждый кластер событий с разрывом > 15 минут"
+        },
+        {
+          "id": "c",
+          "text": "Две сессии: [10:00-10:42] и [11:20-11:20]. Разрыв 10:08→10:35 = 27 минут > 15 минут, но с учётом merging: 10:35 ближе к 10:08 чем к следующей группе"
+        },
+        {
+          "id": "d",
+          "text": "Пять сессий — каждое событие отдельная сессия при отсутствии одновременных событий"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Анализ с inactivityGap=15 минут: 10:00 → новая сессия. 10:08 → 10:08-10:00=8 мин < 15 → продолжает сессию [10:00-10:08]. 10:35 → 10:35-10:08=27 мин > 15 → НОВАЯ сессия [10:35-10:35]. 10:42 → 10:42-10:35=7 мин < 15 → продолжает [10:35-10:42]. 11:20 → 11:20-10:42=38 мин > 15 → НОВАЯ сессия [11:20-11:20]. Итого 3 сессии: [10:00-10:08], [10:35-10:42], [11:20-11:20]. Важно: разрыв 10:08→10:35=27 мин > gap, поэтому это разные сессии (нет session merging при gaps > inactivityGap).",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m07-04-q4",
+      "type": "true-false",
+      "question": "В hopping window с size=10 минут и advance=2 минуты, событие с timestamp 15:03 принадлежит ровно одному окну.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. Это ключевое отличие hopping от tumbling. В hopping window событие может принадлежать НЕСКОЛЬКИМ окнам. Для size=10 мин, advance=2 мин: количество окон = size/advance = 10/2 = 5. Событие в 15:03 принадлежит всем окнам, которые 'покрывают' момент 15:03: [14:54-15:04), [14:56-15:06), [14:58-15:08), [15:00-15:10), [15:02-15:12). Итого 5 окон. Именно поэтому hopping window генерирует больше выходных записей и требует больше state: одна запись триггерит обновления в нескольких WindowStore записях. В tumbling window то же событие принадлежало бы только одному окну [15:00-15:10).",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m07-04-code-1",
+      "type": "code-challenge",
+      "question": "Реализуйте простую агрегацию по ключу: прочитайте записи из топика 'clicks' (топик уже заполнен данными через seed_topic), сгруппируйте по ключу (user_id), и посчитайте количество кликов для каждого пользователя. Результат запишите в топик 'click-counts' в формате key=user_id, value=строка с числом кликов. Напоминание: это симуляция концепции Kafka Streams aggregation через Producer/Consumer API.",
+      "language": "python",
+      "useKafkaHelpers": true,
+      "starterCode": "from kafka import KafkaProducer, KafkaConsumer\n\n# Сброс состояния брокера и заполнение топика кликов\nreset_broker()\nseed_topic('clicks', [\n    ('user_1', 'click_homepage'),\n    ('user_2', 'click_product'),\n    ('user_1', 'click_cart'),\n    ('user_3', 'click_search'),\n    ('user_2', 'click_checkout'),\n    ('user_1', 'click_pay'),\n    ('user_3', 'click_homepage'),\n    ('user_2', 'click_search'),\n])\n\n# TODO: Прочитайте все записи из топика 'clicks'\n# Подсказка: используйте KafkaConsumer('clicks', group_id='agg-group', auto_offset_reset='earliest')\n# и метод poll() для получения записей\n\ncounts = {}  # {user_id: count}\n\n# TODO: Для каждой записи: увеличьте счётчик для её ключа в словаре counts\n\n# TODO: Создайте KafkaProducer и запишите результаты в топик 'click-counts'\n# Для каждого user_id в counts: producer.send('click-counts', key=user_id, value=str(count))\n\nprint('Aggregation complete. Counts:', counts)\n",
+      "solutionCode": "from kafka import KafkaProducer, KafkaConsumer\n\n# Сброс и заполнение\nreset_broker()\nseed_topic('clicks', [\n    ('user_1', 'click_homepage'),\n    ('user_2', 'click_product'),\n    ('user_1', 'click_cart'),\n    ('user_3', 'click_search'),\n    ('user_2', 'click_checkout'),\n    ('user_1', 'click_pay'),\n    ('user_3', 'click_homepage'),\n    ('user_2', 'click_search'),\n])\n\n# Шаг 1: Прочитать все записи из топика 'clicks'\nconsumer = KafkaConsumer('clicks', group_id='agg-group', auto_offset_reset='earliest')\nrecords = consumer.poll()\nconsumer.close()\n\n# Шаг 2: Агрегировать по ключу (аналог groupByKey().count() в Kafka Streams DSL)\ncounts = {}\nfor tp_records in records.values():\n    for record in tp_records:\n        user_id = record.key\n        counts[user_id] = counts.get(user_id, 0) + 1\n\n# Шаг 3: Записать результаты в 'click-counts' (аналог .to('click-counts'))\nproducer = KafkaProducer()\nfor user_id, count in counts.items():\n    producer.send('click-counts', key=user_id, value=str(count))\nproducer.flush()\n\nprint('Aggregation complete. Counts:', counts)\n",
+      "testCases": [
+        {
+          "id": "tc1",
+          "description": "Топик 'click-counts' содержит записи",
+          "expectedOutput": "Aggregation complete",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc2",
+          "description": "user_1 имеет 3 клика",
+          "expectedOutput": "'user_1': 3",
+          "matchMode": "contains",
+          "hidden": false
+        },
+        {
+          "id": "tc3",
+          "description": "user_2 имеет 3 клика",
+          "expectedOutput": "'user_2': 3",
+          "matchMode": "contains",
+          "hidden": true
+        },
+        {
+          "id": "tc4",
+          "description": "user_3 имеет 2 клика",
+          "expectedOutput": "'user_3': 2",
+          "matchMode": "contains",
+          "hidden": true
+        }
+      ],
+      "explanation": "Это упражнение демонстрирует концепцию Kafka Streams aggregation через Python API. В настоящем Kafka Streams Java коде это выглядело бы так: stream.groupByKey().count(). Здесь мы вручную реализуем ту же логику: (1) читаем поток записей (KafkaConsumer = Source Processor), (2) агрегируем по ключу (groupByKey().count() = dict с счётчиками), (3) пишем результат в выходной топик (to('click-counts') = Sink Processor). Ключевая идея: ключ записи (user_id) определяет группу агрегации — все записи с одним ключом обрабатываются вместе.",
+      "bloomLevel": "applied"
+    }
+  ]
+}

@@ -1,0 +1,244 @@
+---
+title: "Windowing"
+description: "Tumbling, hopping, session, sliding окна — временная сегментация потоков для агрегации"
+order: 4
+difficulty: "advanced"
+estimatedTime: 30
+topics: ["Windowing", "Tumbling Window", "Hopping Window", "Session Window", "Sliding Window", "Grace Period", "WindowedSerde", "Suppress"]
+---
+
+# Windowing
+
+Потоки данных — бесконечны. Невозможно посчитать "количество транзакций за всё время", не дождавшись конца истории. Оконные агрегации решают эту проблему: они делят бесконечный поток на **конечные временные отрезки** (окна) и позволяют агрегировать данные в каждом окне.
+
+Windowing — один из самых часто проверяемых тем в сертификации CCDAK. Нужно чётко понимать семантику каждого типа окна.
+
+---
+
+## Почему нужны окна
+
+Без оконных агрегаций `count()` считает ВСЕ записи за всё время работы приложения. С оконными агрегациями — только записи, попавшие в данное временное окно.
+
+| Запрос | Без окон | С окнами |
+|--------|----------|----------|
+| Количество транзакций | Всего с начала времён | За последние 5 минут |
+| Ошибки | Всего накоплено | В минуту / в час |
+| Активные сессии | Невозможно определить | Сессии с активностью в последние 30 минут |
+
+Время в Kafka Streams — это **event time** (timestamp самой записи), не wall clock time обработки. Это важно: запись с timestamp из прошлого попадёт в "прошлое" окно, а не в "текущее".
+
+---
+
+## Tumbling Window — фиксированное, без перекрытия
+
+Tumbling window — простейший тип. Фиксированный размер, записи не перекрываются. Поток делится на смежные окна фиксированного размера.
+
+```java
+KTable<Windowed<String>, Long> errorsByMinute = errors
+    .groupByKey()
+    .windowedBy(
+        TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(1))
+    )
+    .count(Materialized.as("errors-by-minute"));
+```
+
+**Границы окон:** `[0:00, 1:00)`, `[1:00, 2:00)`, `[2:00, 3:00)` ...
+
+Запись с timestamp 0:37 принадлежит только окну `[0:00, 1:00)`. Ровно одному окну. Это ключевое свойство tumbling window.
+
+**Использование:**
+- Подсчёт ошибок в минуту / транзакций в час
+- Агрегация метрик по временным периодам
+- Биллинг с фиксированными периодами
+
+<DiagramContainer title="Tumbling vs Hopping: одни и те же события, разные окна" color="emerald">
+  <div className="space-y-6 p-2">
+    <div className="text-sm text-slate-400 mb-1">События: A@0:30, B@1:20, C@1:50, D@2:40</div>
+    <FlowRow>
+      <DataBox
+        label="Tumbling 2 мин"
+        tooltip="[0:00-2:00): события A, B, C — count=3. [2:00-4:00): событие D — count=1. Каждое событие строго в одном окне. Простая, предсказуемая агрегация."
+      >
+        {'[0-2): A,B,C | [2-4): D'}
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="Hopping 2 мин / advance 1 мин"
+        tooltip="[0:00-2:00): A,B,C — count=3. [1:00-3:00): B,C — count=2. [2:00-4:00): D — count=1. Событие B принадлежит сразу двум окнам. Более сглаженные метрики."
+      >
+        {'[0-2): A,B,C | [1-3): B,C | [2-4): D'}
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+---
+
+## Hopping Window — фиксированное, с перекрытием
+
+Hopping window имеет фиксированный размер, но окна **перекрываются**: окно сдвигается на `advanceBy` интервал, меньший, чем размер окна.
+
+```java
+KTable<Windowed<String>, Long> rolling5min = clicks
+    .groupByKey()
+    .windowedBy(
+        TimeWindows
+            .ofSizeWithNoGrace(Duration.ofMinutes(5))
+            .advanceBy(Duration.ofMinutes(1))
+    )
+    .count();
+```
+
+**Семантика:** Запись с timestamp 3:30 принадлежит окнам `[0:00-5:00)`, `[1:00-6:00)`, `[2:00-7:00)`, `[3:00-8:00)` — всем окнам, которые "включают" этот момент времени.
+
+**Trade-off по сравнению с tumbling:**
+- Больше выходных записей (одна запись → несколько обновлений в разных окнах)
+- Больше state (перекрывающиеся окна = больший WindowStore)
+- Сглаженные метрики (нет "перескока" на границе окна)
+
+**Использование:**
+- Скользящее среднее (rolling average) за последние N минут, обновляемое каждую минуту
+- Мониторинг: "количество запросов за последние 5 минут" с обновлением раз в минуту
+
+---
+
+## Session Window — динамическое, по активности
+
+Session window не имеет фиксированного размера. Окно формируется вокруг **активности**: записи, поступающие в пределах `inactivityGap` друг от друга, попадают в одну сессию.
+
+```java
+KTable<Windowed<String>, Long> sessions = userEvents
+    .groupByKey()
+    .windowedBy(
+        SessionWindows.ofInactivityGapWithNoGrace(Duration.ofMinutes(30))
+    )
+    .count();
+```
+
+**Правила session window:**
+- Два события в пределах 30 минут — **одна сессия**
+- Разрыв > 30 минут — **разные сессии**
+- **Session merging:** если позднее приходит событие, которое "мостит" два ранее закрытых окна (timestamp между ними), сессии **объединяются** в одну
+
+Пример с inactivityGap=10 мин:
+- 10:00, 10:07, 10:15 → одна сессия [10:00, 10:15]
+- 10:30 → новая сессия [10:30, 10:30]
+- 10:38 → обновление → [10:30, 10:38]
+
+**Использование:**
+- Длительность пользовательских сессий на сайте
+- Группировка кликов в интерактивные сессии
+- Анализ активности с переменной интенсивностью
+
+---
+
+## Sliding Window — запись-центричное
+
+Sliding window (Kafka 2.7+) кардинально отличается от hopping. Вместо выравнивания по wall clock, каждое событие определяет **своё собственное окно**: включаются все записи с тем же ключом, чей timestamp находится в пределах `timeDifference` от данной записи.
+
+```java
+KTable<Windowed<String>, Long> dedup = events
+    .groupByKey()
+    .windowedBy(
+        SlidingWindows.ofTimeDifferenceWithNoGrace(Duration.ofMinutes(5))
+    )
+    .count();
+```
+
+**Основное применение:** JoinWindows в stream-stream joins (не самостоятельно для агрегации):
+
+```java
+// JoinWindows: найти соответствующую пару в пределах 5 минут
+KStream<String, Enriched> joined = orders.join(
+    payments,
+    (order, payment) -> enrich(order, payment),
+    JoinWindows.ofTimeDifferenceWithNoGrace(Duration.ofMinutes(5))
+);
+```
+
+**Использование:**
+- Stream-stream joins (поиск пар событий в окне)
+- Дедупликация: обнаружить дублирующиеся события в пределах 5 минут
+
+---
+
+## WindowingDiagram
+
+<WindowingDiagram />
+
+---
+
+## Grace Period — запаздывающие записи
+
+Реальные системы: данные от IoT-устройств, мобильных приложений, региональных ДЦ приходят с задержкой. Событие с timestamp 10:03 может прийти в 10:08, когда окно `[10:00-10:05)` уже "закрылось".
+
+Grace period определяет, **как долго после закрытия окна** принимаются запоздавшие записи.
+
+```java
+// Okно 5 минут, grace 30 секунд
+TimeWindows tumblingWithGrace = TimeWindows
+    .ofSizeAndGrace(Duration.ofMinutes(5), Duration.ofSeconds(30));
+
+// Без grace — записи после закрытия окна отбрасываются
+TimeWindows noGrace = TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(5));
+```
+
+<Callout type="warning">
+Grace period по умолчанию в Kafka 3.x+ составляет 24 часа. Это означает, что окно остаётся "открытым" для поздних записей целые сутки. Для high-throughput приложений это создаёт огромное количество state: WindowStore хранит данные для 24 часов открытых окон. Всегда явно устанавливайте grace period: .ofSizeAndGrace(size, Duration.ofSeconds(30)).
+</Callout>
+
+**Записи после grace period:** отбрасываются без обработки. Kafka Streams не выдаёт ошибку — запись просто игнорируется. Мониторинг: `kafka_streams_task_dropped_records_total` метрика.
+
+---
+
+## Suppress — финальный результат
+
+По умолчанию windowed aggregation **эмитирует промежуточный результат** при поступлении каждой новой записи в окно. Для окна с 1000 записями потребитель выходного топика увидит 1000 обновлений (1, 2, 3, ..., 1000).
+
+`Suppress` изменяет это поведение: только **финальный результат** после закрытия окна.
+
+```java
+KTable<Windowed<String>, Long> finalCounts = stream
+    .groupByKey()
+    .windowedBy(TimeWindows.ofSizeAndGrace(Duration.ofMinutes(5), Duration.ofSeconds(10)))
+    .count()
+    .suppress(
+        Suppressed.untilWindowCloses(BufferConfig.unbounded())
+    );
+```
+
+<Callout type="tip">
+Suppress = финальный результат вместо промежуточных обновлений. Без suppress потребитель выходного топика видит десятки или сотни обновлений для каждого окна по мере поступления данных. С suppress — ровно одно сообщение после закрытия окна. Компромисс: suppress добавляет latency (нужно ждать закрытия окна + grace period) и буферизует данные в памяти.
+</Callout>
+
+**BufferConfig варианты:**
+- `BufferConfig.unbounded()` — буферизует в памяти без ограничений (риск OOM при большом state)
+- `BufferConfig.maxBytes(bytes).shutdownWhenFull()` — при превышении лимита — штатное завершение
+- `BufferConfig.maxRecords(count).emitEarlyWhenFull()` — при превышении — эмитировать досрочно
+
+---
+
+## WindowedSerde — сериализация ключей окон
+
+После windowed aggregation ключ записи становится составным: `Windowed<K>`, содержащим исходный ключ и временные границы окна.
+
+```java
+// Сериализация Windowed<String> ключей для записи в топик
+stream
+    .groupByKey()
+    .windowedBy(TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(5)))
+    .count()
+    .toStream()
+    .to("windowed-counts",
+        Produced.with(
+            WindowedSerdes.timeWindowedSerdeFrom(Serdes.String(), 5 * 60 * 1000L),
+            Serdes.Long()
+        ));
+```
+
+В выходном топике ключи имеют вид: `user-42@1706694000000/1706694300000` (ключ@начало_окна/конец_окна).
+
+<KnowledgeCheck
+  question="У вас поток кликов пользователей. Нужно считать количество кликов за 10-минутные интервалы. Данные приходят с задержкой до 2 минут. Какой тип окна выбрать, какой grace period установить, и нужен ли Suppress? Объясните каждое решение."
+  answer="Тип окна: Tumbling Window (TimeWindows.ofSizeAndGrace). Обоснование: нужны фиксированные 10-минутные периоды без перекрытия — это tumbling. Если нужно скользящее обновление каждую минуту — тогда hopping, но условие не указывает этого. Grace period: минимум 2 минуты (Duration.ofMinutes(2)), лучше с запасом: 5 минут. Обоснование: данные приходят с задержкой до 2 минут, значит записи могут прийти через 2 минуты после закрытия окна. Grace period должен покрывать эту задержку. Без grace эти записи будут отброшены. Suppress: зависит от потребителя. Если потребитель хочет видеть только финальный счётчик после закрытия — добавить Suppress.untilWindowCloses(). Если потребитель может обрабатывать промежуточные обновления (например, real-time dashboard) — Suppress не нужен. Итоговый код: TimeWindows.ofSizeAndGrace(Duration.ofMinutes(10), Duration.ofMinutes(2))."
+/>

@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "07-kafka-streams/06-module-summary",
+  "moduleId": "07-kafka-streams",
+  "_meta": {
+    "idPrefix": "kafka-m07-06",
+    "description": "Use IDs: kafka-m07-06-q1, q2, q3 for MC; kafka-m07-06-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m07-06-q1",
+      "type": "multiple-choice",
+      "question": "Kafka Streams приложение с 3 инстансами и state store 'order-counts'. Клиент отправляет HTTP GET на инстанс 1, запрашивая count для customer_id='cust-777'. StreamsMetadata показывает, что 'cust-777' принадлежит инстансу 3. Какова архитектура обработки этого запроса?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Инстанс 1 не может обслужить запрос — возвращает 404. Клиент должен самостоятельно обнаружить инстанс 3 и повторить запрос"
+        },
+        {
+          "id": "b",
+          "text": "Инстанс 1 использует StreamsMetadata.queryMetadataForKey() для обнаружения инстанса 3, делает RPC (HTTP) запрос к инстансу 3, получает результат и возвращает клиенту — весь routing прозрачен"
+        },
+        {
+          "id": "c",
+          "text": "Инстанс 1 читает данные напрямую из changelog-топика для восстановления state нужного ключа без запроса к инстансу 3"
+        },
+        {
+          "id": "d",
+          "text": "GlobalKTable на инстансе 1 содержит полную копию state store — запрос выполняется локально без routing"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Interactive Queries с multi-instance routing: (1) streams.queryMetadataForKey(storeName, 'cust-777', keySerializer) возвращает StreamsMetadata с hostInfo инстанса 3. (2) Инстанс 1 делает HTTP запрос к инстансу 3 (через встроенный HTTP-клиент или REST client). (3) Инстанс 3 выполняет store.get('cust-777') локально — этот ключ находится в его state store. (4) Инстанс 3 возвращает результат инстансу 1, который передаёт его клиенту. Клиент видит единый endpoint. Инфраструктуру RPC между инстансами разработчик строит самостоятельно — Kafka Streams предоставляет только StreamsMetadata для обнаружения.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m07-06-q2",
+      "type": "multiple-choice",
+      "question": "Команда включила processing.guarantee=exactly_once_v2 для финансового приложения. После развёртывания наблюдается снижение пропускной способности на 8% и увеличение latency. Какой механизм создаёт этот overhead?",
+      "options": [
+        {
+          "id": "a",
+          "text": "EOS-v2 требует синхронной записи в state store вместо асинхронной — это основной источник latency"
+        },
+        {
+          "id": "b",
+          "text": "EOS-v2 использует Kafka transactions: каждый commit = транзакция, включающая consume offset commit + produce в output + changelog update, подтверждённая transactionCoordinator. Это добавляет round-trip к брокеру для commit coordination"
+        },
+        {
+          "id": "c",
+          "text": "EOS-v2 создаёт дополнительные repartition топики для каждой операции, удваивая количество I/O"
+        },
+        {
+          "id": "d",
+          "text": "EOS-v2 отключает batching и увеличивает число network requests в 10x для гарантии порядка"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "EOS-v2 (exactly_once_v2) использует Kafka transactions. Каждый commit interval: (1) транзакция начинается автоматически. (2) Все produce операции (в output топики, в changelog) участвуют в транзакции. (3) Commit = atomically: commitSync для consumed offsets + endTransaction(commit) к transactionCoordinator. transactionCoordinator должен подтвердить commit перед тем как Streams продолжит. Это добавляет network round-trip к transactionCoordinator. Overhead: ~5-10% throughput снижение и дополнительный latency на commit interval. EOS-v2 значительно эффективнее EOS-v1 (по одной транзакции на task вместо одной на поток), но overhead остаётся.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m07-06-q3",
+      "type": "multiple-choice",
+      "question": "Когда следует использовать Processor API вместо DSL? Выберите наиболее полное и корректное описание сценариев.",
+      "options": [
+        {
+          "id": "a",
+          "text": "Processor API нужен только для производительности — он быстрее DSL в 2-3 раза для любых операций"
+        },
+        {
+          "id": "b",
+          "text": "Processor API нужен для: кастомных таймеров (schedule с STREAM_TIME или WALL_CLOCK_TIME), условной пересылки в несколько дочерних процессоров, прямого доступа к нескольким state stores в одном processor, сложной логики не выражаемой через DSL операторы"
+        },
+        {
+          "id": "c",
+          "text": "Processor API нужен для windowed операций — DSL не поддерживает windowing"
+        },
+        {
+          "id": "d",
+          "text": "Processor API нужен для join операций с более чем двумя источниками — DSL поддерживает join только двух потоков"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Processor API предоставляет низкоуровневый контроль, недоступный через DSL: (1) context.schedule() — таймеры, вызываемые по stream time или wall clock time, полезны для периодических flush или heartbeat независимо от data flow. (2) context.forward(record, childName) — условная пересылка в именованные дочерние процессоры (DSL не поддерживает именованную маршрутизацию). (3) context.getStateStore(name) — прямой доступ к нескольким store в одном processor. (4) Любая логика, требующая доступа к ProcessorContext вне стандартных трансформаций. DSL полностью поддерживает windowing и joins — Processor API не нужен для этих задач.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m07-06-q4",
+      "type": "true-false",
+      "question": "ksqlDB — это полностью независимый продукт от Kafka Streams. Внутри ksqlDB использует собственный движок обработки потоков, не связанный с Kafka Streams.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. ksqlDB компилирует SQL-запросы в Kafka Streams топологии и запускает их внутри своего сервера. ksqlDB IS Kafka Streams под капотом. Все концепции полностью разделены: state stores (RocksDB + changelog), windowing (tumbling/hopping/session), joins (co-partitioning требования), exactly-once (processing.guarantee) — это одни и те же механизмы Kafka Streams. Именно поэтому понимание Kafka Streams (Модуль 07) является обязательной предпосылкой для понимания ksqlDB (Модуль 08). ksqlDB добавляет только SQL front-end, REST API, и сервер управления поверх Kafka Streams runtime.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

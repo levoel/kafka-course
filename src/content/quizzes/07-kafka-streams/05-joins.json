@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "07-kafka-streams/05-joins",
+  "moduleId": "07-kafka-streams",
+  "_meta": {
+    "idPrefix": "kafka-m07-05",
+    "description": "Use IDs: kafka-m07-05-q1, q2, q3 for MC; kafka-m07-05-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m07-05-q1",
+      "type": "multiple-choice",
+      "question": "Что такое co-partitioning в контексте Kafka Streams joins, и какие три условия должны быть выполнены?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Co-partitioning — это процесс объединения двух топиков в один. Условия: одинаковый retention, одинаковый cleanup.policy, одинаковый replication.factor"
+        },
+        {
+          "id": "b",
+          "text": "Co-partitioning означает, что два топика партиционированы совместимо для join: (1) одинаковое число партиций, (2) одинаковый тип ключа, (3) одинаковая стратегия партиционирования — одни и те же ключи попадают в одни и те же партиции"
+        },
+        {
+          "id": "c",
+          "text": "Co-partitioning — опциональное требование для производительности, но не для корректности. Joins работают даже без co-partitioning, но медленнее"
+        },
+        {
+          "id": "d",
+          "text": "Co-partitioning требует только одинакового числа партиций. Стратегия партиционирования не влияет на корректность join"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Co-partitioning — строгое требование корректности (не производительности) для большинства joins. Три условия: (1) Одинаковое число партиций: если orders=12 партиций, customers должен иметь 12. (2) Одинаковый тип ключа: оба топика keyed by String (customer_id). (3) Одинаковая стратегия партиционирования: одни ключи → одни партиции. Kafka Streams назначает партицию N из обоих топиков одному task. Без co-partitioning: customer_id='C-1' попадает в partition 2 топика orders и partition 1 топика customers. Task 2 читает orders partition 2, но customers partition 1 обрабатывается task 1. Join никогда не встретит эту пару записей.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m07-05-q2",
+      "type": "multiple-choice",
+      "question": "У вас KStream заказов и небольшая GlobalKTable категорий продуктов (500 уникальных категорий). Нужно обогатить каждый заказ названием категории через поле order.category_id. Какой код корректен?",
+      "options": [
+        {
+          "id": "a",
+          "text": "orders.join(categoriesGlobalTable, (orderId, order) -> order.getCategoryId(), (order, category) -> new EnrichedOrder(order, category))"
+        },
+        {
+          "id": "b",
+          "text": "orders.join(categoriesKTable, (order, category) -> new EnrichedOrder(order, category)) — использовать KTable вместо GlobalKTable"
+        },
+        {
+          "id": "c",
+          "text": "orders.join(categoriesGlobalTable, (order, category) -> new EnrichedOrder(order, category)) — GlobalKTable join не требует keyMapper"
+        },
+        {
+          "id": "d",
+          "text": "orders.selectKey((k,v) -> v.getCategoryId()).join(categoriesKTable, joiner) — изменить ключ потока на category_id для co-partitioning"
+        }
+      ],
+      "correctAnswer": "a",
+      "explanation": "Stream-GlobalKTable join требует keyMapper — функцию, извлекающую ключ для поиска в GlobalKTable из записи KStream. В данном случае: (orderId, order) -> order.getCategoryId() извлекает category_id из заказа и использует его как ключ для lookup в categoriesGlobalTable. Это позволяет join по любому полю потока, не только по ключу. Вариант B неверен: KTable потребовал бы co-partitioning (orders keyed by order_id, categories keyed by category_id — разные ключи). Вариант C неверен: GlobalKTable join ОБЯЗАТЕЛЕН keyMapper (это его отличие от KTable join). Вариант D работает, но избыточен и вызывает ненужный repartitioning.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m07-05-q3",
+      "type": "multiple-choice",
+      "question": "Разработчик пишет stream-stream join для обнаружения мошенничества: заказ + платёж должны совпасть в пределах 5 минут. В production join пропускает ~15% пар заказ-платёж, которые визуально имеют совпадающие ключи и временные метки в пределах окна. В чём наиболее вероятная причина?",
+      "options": [
+        {
+          "id": "a",
+          "text": "JoinWindows слишком мал — нужно увеличить до 10 минут"
+        },
+        {
+          "id": "b",
+          "text": "Нарушение co-partitioning: топики orders и payments имеют разное число партиций. Записи с одним order_id попадают в разные tasks — join не находит совпадение даже при одинаковом ключе и timestamp в пределах окна"
+        },
+        {
+          "id": "c",
+          "text": "stream-stream join использует wall clock time, а не event time. 15% записей имеют сдвиг event time > 5 минут от wall clock"
+        },
+        {
+          "id": "d",
+          "text": "Kafka Streams нестабильно обрабатывает join при высоком throughput — нужно уменьшить num.stream.threads"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Нарушение co-partitioning — наиболее вероятная причина пропуска части join. Если orders имеет 12 партиций, payments — 6: order_id='order-100' → hash('order-100') % 12 = partition 4 (обрабатывается task 4), hash('order-100') % 6 = partition 4 (обрабатывается task 4). Но для другого order_id: hash('order-256') % 12 = partition 8 (task 8), hash('order-256') % 6 = partition 2 (task 2). Task 8 никогда не увидит payments для 'order-256' — они находятся у task 2. Именно поэтому 15% пропадает: это записи, для которых hash % 12 и hash % 6 дают разные task assignments. Kafka Streams должен выбросить TopologyException, но при runtime нарушении это проявляется как пропущенные joins.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m07-05-q4",
+      "type": "true-false",
+      "question": "KTable-KTable foreign key join (Kafka 2.4+) требует co-partitioning по ключу join: таблица orders должна быть партиционирована по customer_id так же, как таблица customers.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. Именно это делает foreign key join революционным: он НЕ требует co-partitioning по полю join. Foreign key join позволяет соединить orders (keyed by order_id) с customers (keyed by customer_id) через поле order.customer_id — без изменения партиционирования orders. Kafka Streams внутренне создаёт subscription mechanism: при обновлении orders запись пересылается в repartition-топик с ключом = customer_id (foreign key extractor), затем lookup в customers выполняется уже с правильным ключом. Вся эта внутренняя маршрутизация прозрачна для разработчика. Обычный KTable-KTable join (без foreign key) ТРЕБУЕТ co-partitioning.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

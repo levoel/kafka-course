@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "07-kafka-streams/02-dsl-operations",
+  "moduleId": "07-kafka-streams",
+  "_meta": {
+    "idPrefix": "kafka-m07-02",
+    "description": "Use IDs: kafka-m07-02-q1, q2, q3 for MC; kafka-m07-02-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m07-02-q1",
+      "type": "multiple-choice",
+      "question": "Топология Kafka Streams: stream.map((k,v) -> KeyValue.pair(v.getRegion(), v)).groupByKey().count(). Разработчик замечает некорректные счётчики — некоторые регионы недосчитываются. В чём причина?",
+      "options": [
+        {
+          "id": "a",
+          "text": "count() не поддерживает String ключи — нужно использовать aggregate()"
+        },
+        {
+          "id": "b",
+          "text": "map() изменяет ключ (с исходного на region), но stream не помечается для repartitioning автоматически. groupByKey() не вызывает repartitioning, поэтому записи с одним region оказываются на разных tasks — счётчик разбит между инстансами"
+        },
+        {
+          "id": "c",
+          "text": "map() изменяет ключ и ВЫЗЫВАЕТ автоматический repartitioning — проблема в другом: нужно явно указать SerDes для нового ключа"
+        },
+        {
+          "id": "d",
+          "text": "groupByKey() после map() вызывает repartitioning, но с неправильным partitioner — нужно использовать groupBy() вместо groupByKey()"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Вариант C описывает правильное поведение, но предлагает неверное объяснение проблемы. Реальный ответ: map() ДЕЙСТВИТЕЛЬНО помечает поток как требующий repartitioning. Kafka Streams автоматически вставит repartition-топик перед groupByKey().count(). Проблема из варианта B (счётчики разбиты между инстансами) возникает только если groupByKey() вызван БЕЗ предшествующего map() на уже ошибочно ключованном потоке. В данном случае map() корректно инициирует repartitioning — это правильное поведение. Если счётчики некорректны, причина может быть в отсутствии SerDes для нового ключа String (что приводит к SerializationException). Правильный вариант: добавить Grouped.with(Serdes.String(), valueSerde) в groupByKey().",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m07-02-q2",
+      "type": "multiple-choice",
+      "question": "Нужно трансформировать поток транзакций: для каждой транзакции изменить формат суммы (умножить на 100, привести к Integer). Ключ не меняется. Какая операция наиболее эффективна и почему?",
+      "options": [
+        {
+          "id": "a",
+          "text": "map((k,v) -> KeyValue.pair(k, v.getAmount() * 100)) — явно возвращает тот же ключ"
+        },
+        {
+          "id": "b",
+          "text": "mapValues(v -> (int)(v.getAmount() * 100)) — трансформирует только значение, не трогает ключ, не вызывает repartitioning"
+        },
+        {
+          "id": "c",
+          "text": "selectKey((k,v) -> k).mapValues(v -> (int)(v.getAmount() * 100)) — явно подтверждает ключ перед трансформацией"
+        },
+        {
+          "id": "d",
+          "text": "flatMapValues(v -> List.of((int)(v.getAmount() * 100))) — flatMapValues поддерживает любые трансформации значений"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "mapValues() — правильный и наиболее эффективный выбор. Ключ не меняется → repartitioning не нужен → нет внутреннего repartition-топика → нет дополнительного network I/O и disk I/O. map() тоже даёт правильный результат (если явно вернуть тот же ключ), но Kafka Streams не может знать, что ключ не изменился — он всё равно помечает поток для возможного repartitioning. mapValues() явно сигнализирует: 'ключ гарантированно не изменился'. selectKey + mapValues — избыточно и вызывает repartitioning (selectKey всегда триггерит его). flatMapValues работает, но предназначен для 1→N трансформаций.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m07-02-q3",
+      "type": "multiple-choice",
+      "question": "Команда оптимизирует топологию: stream.map(expensiveKeyChange).filter(pred).groupBy(keyFn).count(). Профилирование показывает 3 repartition-топика вместо ожидаемых 2. Как реструктурировать для минимизации repartitioning?",
+      "options": [
+        {
+          "id": "a",
+          "text": "stream.filter(pred).map(expensiveKeyChange).groupBy(keyFn).count() — переместить filter перед map снижает объём данных перед repartitioning"
+        },
+        {
+          "id": "b",
+          "text": "stream.map(expensiveKeyChange).groupBy(keyFn).count().filter(pred) — перенести filter после агрегации"
+        },
+        {
+          "id": "c",
+          "text": "stream.map(expensiveKeyChange).filter(pred).groupByKey().count() — использовать groupByKey вместо groupBy"
+        },
+        {
+          "id": "d",
+          "text": "stream.filter(pred).selectKey(keyFn).groupByKey().count() — объединить map и selectKey, затем groupByKey не вызывает repartitioning"
+        }
+      ],
+      "correctAnswer": "d",
+      "explanation": "Анализ: map() → repartition 1. filter() → нет repartition. groupBy() → repartition 2. Итого 2 repartition-топика. Откуда берётся 3-й? Возможно, expensiveKeyChange в map() изменяет ключ, затем groupBy() снова меняет ключ — два разных repartition. Оптимизация D: filter(pred) → нет repartition. selectKey(keyFn) → пометить для repartitioning. groupByKey() → использует уже помеченный поток, материализует ОДИН repartition-топик. Итого 1 repartition. Вариант A тоже правильный с точки зрения 'filter before map' (меньше данных проходит через repartitioning), но не устраняет второй repartition от groupBy().",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m07-02-q4",
+      "type": "true-false",
+      "question": "groupByKey() в Kafka Streams ВСЕГДА вызывает repartitioning, так как перегруппировывает записи по ключу.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. groupByKey() НЕ вызывает repartitioning, если ключ не был изменён предшествующими операциями. groupByKey() группирует по существующему ключу потока. Если ключ не менялся (нет map(), selectKey(), flatMap() перед ним) — данные уже корректно партиционированы по ключу, repartitioning не нужен. Repartitioning вызывают операции, ИЗМЕНЯЮЩИЕ ключ: map(), selectKey(), flatMap(), groupBy(). groupBy() (в отличие от groupByKey()) всегда вызывает repartitioning, так как явно задаёт новый ключ группировки.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

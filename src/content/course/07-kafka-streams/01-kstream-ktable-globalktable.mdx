@@ -1,0 +1,247 @@
+---
+title: "KStream, KTable и GlobalKTable"
+description: "Три абстракции Kafka Streams — поток событий, таблица изменений и глобальная таблица. Stream-Table Duality"
+order: 1
+difficulty: "advanced"
+estimatedTime: 25
+topics: ["KStream", "KTable", "GlobalKTable", "Stream-Table Duality", "Changelog", "Kafka Streams DSL"]
+---
+
+# KStream, KTable и GlobalKTable
+
+Kafka Streams — это не кластер. Не отдельный сервис. Не инфраструктура. Kafka Streams — это **клиентская библиотека** (JAR-файл), которую вы добавляете в обычное JVM-приложение. Ваше приложение запускается, читает из Kafka, преобразует данные и пишет обратно в Kafka. Никаких дополнительных серверов. Никаких лицензий. Только зависимость в `pom.xml` и логика обработки потоков.
+
+Прежде чем писать код — необходимо понять три фундаментальные абстракции, на которых строится весь Kafka Streams DSL.
+
+---
+
+## Что такое Kafka Streams
+
+Архитектурная единица Kafka Streams — **топология**. Топология — это направленный ациклический граф (DAG) процессоров:
+
+- **Source Processor** — читает записи из Kafka-топика. Точка входа топологии.
+- **Stream Processor** — трансформирует, фильтрует, агрегирует записи. Узлы обработки.
+- **Sink Processor** — записывает результаты в Kafka-топик. Точка выхода.
+
+Каждое Kafka Streams приложение идентифицируется параметром `application.id`. Этот ID выполняет двойную роль: он становится идентификатором consumer group (для чтения входных топиков) и префиксом внутренних топиков (repartition, changelog). Все инстансы с одним `application.id` образуют один streaming-кластер, разделяя партиции между собой.
+
+<StreamsTopologyDiagram />
+
+<Callout type="note">
+Kafka Streams — это клиентская библиотека, не кластер. Ваше приложение с Kafka Streams — это обычный JVM-процесс, который читает из Kafka и пишет в Kafka. Масштабирование = запуск дополнительных инстансов с одним application.id. Kafka автоматически перераспределяет партиции между инстансами через consumer group protocol.
+</Callout>
+
+---
+
+## KStream — поток событий
+
+`KStream` представляет **поток записей с INSERT-семантикой**. Каждая запись — это независимый факт. Запись с ключом `user-1` и значением `{"action": "click"}` — это отдельное событие, не связанное с предыдущими записями с тем же ключом.
+
+Аналогия: журнал транзакций. Каждая строка журнала — независимая запись. Пять записей с ключом `account-42` — это пять разных транзакций, не обновление одной записи.
+
+```java
+StreamsBuilder builder = new StreamsBuilder();
+
+// Создать KStream из топика "page-views"
+KStream<String, PageView> pageViews = builder.stream(
+    "page-views",
+    Consumed.with(Serdes.String(), pageViewSerde)
+);
+```
+
+Типичные данные для KStream:
+- События кликов пользователей
+- Транзакции (каждая транзакция — отдельное событие)
+- Логи и метрики (каждая запись — измерение в момент времени)
+- Показания IoT-датчиков
+
+---
+
+## KTable — таблица изменений
+
+`KTable` представляет **changelog-поток с UPSERT-семантикой**. Каждая запись — это обновление состояния для ключа. Последнее значение для каждого ключа — текущее состояние. Предыдущие значения для того же ключа устаревают.
+
+Аналогия: таблица в базе данных с upsert. Если в таблице `user_profiles` появляется запись `{user_id: "u-1", name: "Alice", email: "alice@example.com"}` — она создаёт или обновляет профиль пользователя `u-1`.
+
+```java
+// Создать KTable из топика "user-profiles"
+KTable<String, UserProfile> profiles = builder.table(
+    "user-profiles",
+    Consumed.with(Serdes.String(), profileSerde)
+);
+```
+
+Внутри KTable хранит своё состояние в **state store** — по умолчанию RocksDB на локальном диске. При перезапуске или сбое состояние восстанавливается из changelog-топика.
+
+Типичные данные для KTable:
+- Профили пользователей (ключ = user_id, значение = текущий профиль)
+- Инвентарь товаров (ключ = product_id, значение = текущий остаток)
+- Балансы аккаунтов (ключ = account_id, значение = текущий баланс)
+- Конфигурации (ключ = config_key, значение = текущее значение)
+
+---
+
+## Stream-Table Duality
+
+Потоки и таблицы — это **два представления одних и тех же данных**. Это центральная идея Kafka Streams.
+
+**Поток → Таблица:** Материализуйте поток, агрегируя записи по ключу. KStream с транзакциями → `groupByKey().aggregate()` → KTable с текущим балансом.
+
+**Таблица → Поток:** Каждое изменение в KTable превращается в запись в KStream. `kTable.toStream()` возвращает KStream, где каждая запись — это изменение в таблице.
+
+<DiagramContainer title="INSERT vs UPSERT: KStream и KTable с одними данными" color="violet">
+  <div className="space-y-6 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">Три записи поступают в систему: ключ A=1, ключ B=2, ключ A=3 (обновление)</div>
+    <FlowRow>
+      <FlowNode
+        variant="source"
+        tooltip="Входящие записи: (A,1), (B,2), (A,3). Эти же три записи будут интерпретированы по-разному KStream и KTable."
+      >
+        Входящие записи
+      </FlowNode>
+      <Arrow direction="right" label="fan-out" />
+      <div className="flex flex-col gap-4">
+        <FlowNode
+          variant="process"
+          tooltip="KStream (INSERT semantics): все три записи сохраняются независимо. (A,1), (B,2), (A,3) — три отдельных события. KStream не знает, что (A,1) и (A,3) связаны."
+        >
+          KStream: 3 записи
+        </FlowNode>
+        <FlowNode
+          variant="store"
+          tooltip="KTable (UPSERT semantics): (A,3) заменяет (A,1). Текущее состояние: A=3, B=2. KTable хранит только последнее значение для каждого ключа."
+        >
+          KTable: A=3, B=2
+        </FlowNode>
+      </div>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+---
+
+## GlobalKTable — глобальная таблица
+
+`GlobalKTable` — это KTable, реплицированная на **все** инстансы приложения. Обычная KTable партиционирована: инстанс 0 видит партиции 0-1, инстанс 1 — партиции 2-3. GlobalKTable: каждый инстанс загружает **весь** топик целиком.
+
+```java
+// Создать GlobalKTable из топика "countries"
+GlobalKTable<String, Country> countries = builder.globalTable(
+    "countries",
+    Consumed.with(Serdes.String(), countrySerde)
+);
+```
+
+Главное преимущество GlobalKTable: для join с KStream **не нужно co-partitioning**. Поскольку каждый инстанс имеет полную копию GlobalKTable, любая запись KStream может быть обогащена данными из GlobalKTable без привязки к партиции.
+
+<Callout type="warning">
+GlobalKTable загружает ВСЁ содержимое топика в память каждого инстанса. Для топика с миллионами записей это может потребовать гигабайты RAM. Используйте GlobalKTable только для справочных данных (коды стран, конфигурации). Для больших таблиц используйте обычный KTable join (с обязательным co-partitioning).
+</Callout>
+
+---
+
+## Сравнение: KStream vs KTable vs GlobalKTable
+
+<DiagramContainer title="Три абстракции: характеристики" color="slate">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <DataBox
+        label="KStream"
+        tooltip="INSERT semantics. Каждая запись — независимое событие. Не хранит состояние. Не требует state store. Источник: append-only события."
+      >
+        Поток событий (INSERT)
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="Партиционирование"
+        tooltip="Обрабатывает свои партиции. Инстанс с партицией N обрабатывает только записи этой партиции."
+      >
+        Своя партиция
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="Join"
+        tooltip="Для join с другим KStream или KTable требует co-partitioning: одинаковое число партиций и одинаковую стратегию партиционирования."
+      >
+        Co-partition required
+      </DataBox>
+    </FlowRow>
+    <FlowRow>
+      <DataBox
+        label="KTable"
+        tooltip="UPSERT semantics. Последнее значение для каждого ключа = текущее состояние. Требует state store (RocksDB). Источник: changelog топик."
+      >
+        Таблица изменений (UPSERT)
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="Партиционирование"
+        tooltip="Обрабатывает свои партиции. State store содержит только ключи своих партиций."
+      >
+        Своя партиция
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="Join"
+        tooltip="Для join с KStream требует co-partitioning. State store хранит только локальные партиции."
+      >
+        Co-partition required
+      </DataBox>
+    </FlowRow>
+    <FlowRow>
+      <DataBox
+        label="GlobalKTable"
+        tooltip="UPSERT semantics на всех инстансах. Весь топик реплицируется на каждый инстанс. Нет co-partitioning ограничений."
+      >
+        Глобальная таблица (UPSERT, все)
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="Партиционирование"
+        tooltip="Каждый инстанс хранит полную копию всех партиций. Нет разделения — каждый инстанс = вся таблица."
+      >
+        Все партиции на каждом
+      </DataBox>
+      <Arrow direction="right" />
+      <DataBox
+        label="Join"
+        tooltip="Не требует co-partitioning. KStream любой партиции может обогащаться данными GlobalKTable без переназначения."
+      >
+        Нет ограничений
+      </DataBox>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+| Характеристика | KStream | KTable | GlobalKTable |
+|----------------|---------|--------|--------------|
+| Семантика | INSERT | UPSERT | UPSERT |
+| State Store | Нет | Да (локальный) | Да (полная копия) |
+| Для join | Co-partitioning | Co-partitioning | Не нужен |
+| Память | Минимум | Пропорционально партиции | Весь топик на каждом инстансе |
+| Типичные данные | Клики, транзакции, логи | Профили, инвентарь, балансы | Коды стран, тарифы, конфиги |
+| Masштабируемость | Горизонтально (по партициям) | Горизонтально (по партициям) | Ограничена размером топика |
+
+---
+
+## Как выбрать абстракцию
+
+**Используйте KStream когда:**
+- Каждое событие — независимый факт (транзакция, лог, клик)
+- Вас интересует история событий, а не только текущее состояние
+- Нужно обрабатывать каждое изменение отдельно
+
+**Используйте KTable когда:**
+- Вас интересует текущее состояние для каждого ключа
+- Данные обновляются (профили пользователей, инвентарь)
+- Нужен join с потоком с co-partitioning (исходный топик с правильным числом партиций)
+
+**Используйте GlobalKTable когда:**
+- Данные небольшие (тысячи или миллионы записей, не сотни миллионов)
+- Нужен join без co-partitioning ограничений
+- Данные — справочные (коды, конфигурации, тарифы)
+
+<KnowledgeCheck
+  question="У вас топик с обновлениями курсов валют, где ключ — пара валют (USD/EUR). Вы хотите обогатить поток транзакций текущим курсом. Поток транзакций имеет 12 партиций. Топик с курсами валют содержит около 500 уникальных пар и обновляется каждые 10 секунд. Какую абстракцию использовать для курсов валют и почему?"
+  answer="KTable или GlobalKTable — оба подходят, но с разными компромиссами. GlobalKTable предпочтительнее здесь: 500 пар валют — это крошечный набор данных (несколько килобайт), поэтому загрузка полной копии на каждый инстанс не создаёт проблем с памятью. GlobalKTable устраняет требование co-partitioning: топик с курсами может иметь любое число партиций независимо от 12 партиций топика транзакций. Если бы данных были миллионы записей, правильным выбором был бы KTable с co-partitioning (обеспечить одинаковое число партиций для обоих топиков)."
+/>

@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "07-kafka-streams/03-state-stores",
+  "moduleId": "07-kafka-streams",
+  "_meta": {
+    "idPrefix": "kafka-m07-03",
+    "description": "Use IDs: kafka-m07-03-q1, q2, q3 for MC; kafka-m07-03-q4 for TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m07-03-q1",
+      "type": "multiple-choice",
+      "question": "Kafka Streams приложение использует stateful aggregate() для подсчёта статистики. После ребалансировки один инстанс начинает обрабатывать новые партиции. Какова роль changelog-топика в этом процессе?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Changelog-топик не используется при ребалансировке — инстанс начинает агрегацию с нуля для новых партиций"
+        },
+        {
+          "id": "b",
+          "text": "Changelog-топик содержит историю всех изменений state store. Новый инстанс читает changelog с начала (или с checkpoint) и воспроизводит его локально — восстанавливает state store до актуального состояния перед обработкой новых записей"
+        },
+        {
+          "id": "c",
+          "text": "Changelog-топик используется только при полном падении приложения, не при ребалансировке между живыми инстансами"
+        },
+        {
+          "id": "d",
+          "text": "Новый инстанс копирует state store напрямую от предыдущего инстанса по сети без участия changelog-топика"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Changelog-топик — это механизм fault tolerance для state stores. При ЛЮБОМ переназначении задач (ребалансировка, масштабирование, сбой) новый инстанс использует changelog для восстановления state store: читает changelog от начала (cold start) или от checkpoint (если RocksDB данные частично актуальны). Changelog имеет cleanup.policy=compact: хранит только последнее значение для каждого ключа. Это минимизирует размер changelog при большом числе обновлений. Без changelog любой сбой или ребалансировка означал бы потерю накопленного состояния.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m07-03-q2",
+      "type": "multiple-choice",
+      "question": "Приложение Kafka Streams обрабатывает 50 ГБ данных агрегации. Инженер выбирает между in-memory и RocksDB state store. Какую конфигурацию выбрать и почему?",
+      "options": [
+        {
+          "id": "a",
+          "text": "In-memory store — он быстрее RocksDB и 50 ГБ можно разместить в heap увеличив -Xmx до 60 ГБ"
+        },
+        {
+          "id": "b",
+          "text": "RocksDB (default) — хранит данные на диске, не ограничен размером heap. 50 ГБ на диске с SSD даёт приемлемую производительность. При рестарте не нужен полный replay changelog если локальные данные актуальны"
+        },
+        {
+          "id": "c",
+          "text": "In-memory store с increased heap — любой state store дублирует данные в changelog, поэтому разница только в скорости"
+        },
+        {
+          "id": "d",
+          "text": "Нет разницы — Kafka Streams автоматически выбирает оптимальный тип хранилища в зависимости от размера данных"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "RocksDB обязателен для 50 ГБ состояния. In-memory store при 50 ГБ потребует 60+ ГБ heap (50 ГБ данных + overhead JVM, объекты Java, GC). JVM с heap > 32 ГБ теряет compressed oops оптимизацию, GC паузы становятся критичными (Full GC на 50 ГБ = секунды до минут). RocksDB: хранит данные в файлах на диске (state.dir), использует block cache для горячих данных (настраивается через RocksDBConfigSetter). Главное преимущество при рестарте: если RocksDB данные актуальны — нет полного replay changelog, только дельта.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m07-03-q3",
+      "type": "multiple-choice",
+      "question": "Kafka Streams приложение без standby replicas. State store содержит 20 ГБ данных в RocksDB. Инстанс 2 падает (disk failure — все локальные данные потеряны). Сколько примерно времени займёт восстановление до возобновления обработки? Сеть: 1 Gbit/s.",
+      "options": [
+        {
+          "id": "a",
+          "text": "Несколько секунд — ребалансировка выполняется быстро, данные берутся из памяти других инстансов"
+        },
+        {
+          "id": "b",
+          "text": "Около 2-3 минут: 20 ГБ / (1 Gbit/s / 8 bits per byte) = 160 секунд только на чтение changelog, плюс время ребалансировки и воспроизведения записей в RocksDB"
+        },
+        {
+          "id": "c",
+          "text": "Мгновенно — другие инстансы принимают нагрузку без восстановления state для их новых партиций"
+        },
+        {
+          "id": "d",
+          "text": "Точно 24 часа — Kafka changelog по умолчанию имеет retention 24 часа, нужно дождаться следующего retention window"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Вычисление: 20 ГБ state * 8 bits / (1 Gbit/s) = 160 секунд только для сетевой передачи из Kafka changelog. Плюс: время session.timeout (10 сек) до обнаружения сбоя, время ребалансировки (несколько секунд), время записи в RocksDB (SSD: 500+ MB/s = ещё ~40 секунд). Итого: 3-5 минут реалистично. Всё это время задачи для партиций упавшего инстанса НЕ обрабатывают новые записи — накапливается lag. С num.standby.replicas=1 standby уже имеет актуальную копию state — восстановление занимает секунды.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m07-03-q4",
+      "type": "true-false",
+      "question": "RocksDB state store в Kafka Streams переживает перезапуск приложения: если state.dir содержит актуальные данные, после рестарта не требуется полный replay changelog-топика.",
+      "correctAnswer": "true",
+      "explanation": "Истина. RocksDB персистирует данные на диск в директорию state.dir. При рестарте Kafka Streams: (1) читает local checkpoint file из state.dir — этот файл содержит offset последней записи в changelog, которая была применена к RocksDB. (2) Сравнивает checkpoint offset с текущим end offset changelog-топика. (3) Если есть дельта — воспроизводит только записи ПОСЛЕ checkpoint (не весь changelog). Это 'incremental restoration' в отличие от полного replay. Если RocksDB данные повреждены или отсутствуют (disk failure) — выполняется полный replay. В-memory store не имеет этого преимущества: каждый рестарт = полный replay.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

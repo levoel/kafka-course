@@ -1,0 +1,417 @@
+{
+  "lessonSlug": "07-kafka-streams/_exam",
+  "moduleId": "07-kafka-streams",
+  "examTitle": "Экзамен: Kafka Streams",
+  "passThreshold": 70,
+  "_meta": {
+    "idPrefix": "kafka-m07-exam",
+    "description": "15 analytical/applied scenario-based questions covering all 6 content lessons of Module 07. Kafka Streams is ~30% of CCDAK exam weight."
+  },
+  "questions": [
+    {
+      "id": "kafka-m07-exam-q1",
+      "type": "multiple-choice",
+      "question": "Приложение обрабатывает события входа пользователей и должно хранить количество активных сессий для каждого user_id. Новое событие входа увеличивает счётчик, событие выхода уменьшает. Какую абстракцию использовать для событий входа/выхода, и какую — для текущего числа сессий?",
+      "options": [
+        {
+          "id": "a",
+          "text": "KTable для событий (хранит последнее событие per user), KStream для счётчиков — счётчик эмитируется как поток обновлений"
+        },
+        {
+          "id": "b",
+          "text": "KStream для событий входа/выхода (каждое событие — независимый факт INSERT), затем groupByKey().aggregate() возвращает KTable с текущим счётчиком сессий per user_id"
+        },
+        {
+          "id": "c",
+          "text": "GlobalKTable для событий — события реплицируются на все инстансы, каждый считает агрегат независимо"
+        },
+        {
+          "id": "d",
+          "text": "KStream для обоих — потоки событий входа и выхода merge()-ются, count() считает все события"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "KStream (INSERT semantics) — правильная абстракция для потока событий: каждое событие входа или выхода — независимый факт. KTable — для текущего состояния: groupByKey().aggregate() на KStream событий создаёт KTable, где для каждого user_id хранится текущий счётчик. Aggregate функция: для LOGIN → count+1, для LOGOUT → count-1. KTable содержит только последнее значение для каждого ключа — текущее число сессий. Это классическая демонстрация Stream-Table Duality: бесконечный поток событий материализован в конечную таблицу текущего состояния.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 1: KStream, KTable и GlobalKTable — Stream-Table Duality"
+    },
+    {
+      "id": "kafka-m07-exam-q2",
+      "type": "multiple-choice",
+      "question": "Топология: stream.map((k,v) -> KeyValue.pair(v.getRegion(), v)).groupByKey().count(). После деплоя инженер замечает, что count() для одного региона распределён между несколькими инстансами — суммарный счётчик некорректен. Что произошло и как исправить?",
+      "options": [
+        {
+          "id": "a",
+          "text": "count() не поддерживает агрегацию для региональных ключей. Нужно использовать aggregate() с custom accumulator"
+        },
+        {
+          "id": "b",
+          "text": "map() изменил ключ, поэтому Kafka Streams вставил repartition-топик после map(). Но groupByKey() не ждёт завершения repartitioning — часть записей обработана старым ключом. Исправление: добавить explicit Grouped SerDes: .groupByKey(Grouped.with(Serdes.String(), valueSerde))"
+        },
+        {
+          "id": "c",
+          "text": "Проблема в SerDes: без явного указания SerDes для нового ключа String, repartition-топик использует default SerDes, что приводит к некорректному партиционированию. Исправление: groupByKey(Grouped.with(Serdes.String(), valueSerde))"
+        },
+        {
+          "id": "d",
+          "text": "groupByKey() после map() вызывает повторный repartitioning по исходному ключу, переопределяя ключ region обратно. Нужно использовать groupBy((k,v) -> k) вместо groupByKey()"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "map() меняет ключ и автоматически помечает поток для repartitioning. Kafka Streams вставляет repartition-топик. Однако без явного SerDes для нового ключа (теперь это регион, тот же тип String но семантически другой), Kafka Streams может использовать неподходящий default SerDes или выбросить SerializationException при записи в repartition-топик. Корректный код: .groupByKey(Grouped.with(Serdes.String(), valueSerde)). Это явно объявляет SerDes для repartition-топика и для state store. Repartitioning работает правильно, записи с одним регионом попадают в один task, count() корректен.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 2: DSL Operations — разделы 'map vs mapValues' и 'Repartitioning'"
+    },
+    {
+      "id": "kafka-m07-exam-q3",
+      "type": "multiple-choice",
+      "question": "RocksDB state store содержит 20 ГБ данных. Инстанс Kafka Streams падает, standby replicas не настроены. Что определяет время восстановления до возобновления обработки сообщений?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Только время ребалансировки consumer group (session.timeout.ms) — state восстанавливается мгновенно из локального RocksDB"
+        },
+        {
+          "id": "b",
+          "text": "Время восстановления = время session timeout (обнаружение сбоя) + время ребалансировки + время чтения changelog: 20 ГБ / скорость сети. При 1 Gbit/s: ~160 секунд только чтение changelog плюс запись в новый локальный RocksDB"
+        },
+        {
+          "id": "c",
+          "text": "Время восстановления фиксировано = commit.interval.ms, так как state сохраняется при каждом commit"
+        },
+        {
+          "id": "d",
+          "text": "Время восстановления = 0, если новый инстанс находится на том же хосте — RocksDB файлы остались на диске"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Без standby replicas восстановление включает: (1) Обнаружение сбоя: session.timeout.ms ≈ 10-30 секунд. (2) Ребалансировка: несколько секунд. (3) Восстановление state: новый инстанс не имеет локального RocksDB (другой хост или диск упал). Читает changelog с offset 0 (или с последнего checkpoint). 20 ГБ / (1 Gbit/s / 8 = 125 МБ/с) ≈ 160 секунд только сетевое время. Плюс запись в RocksDB (SSD: 500+ МБ/с ≈ 40 сек дополнительно). Итого: 3-5 минут в реалистичном сценарии. Всё это время задачи упавшего инстанса не обрабатывают новые записи — растёт consumer lag. Вариант D частично верен: если диск не упал и инстанс поднимается на том же хосте — дельта-replay, значительно быстрее.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 3: State Stores — разделы 'Процесс восстановления' и 'Standby Replicas'"
+    },
+    {
+      "id": "kafka-m07-exam-q4",
+      "type": "multiple-choice",
+      "question": "Tumbling window 10 минут, grace period = 0 (ofSizeWithNoGrace). Запись с event timestamp 10:09:55 поступает на обработку в момент wall clock 10:11:30. Какое окно её получит и будет ли она принята?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Принята в окно [10:10-10:20) — используется wall clock time обработки (10:11:30)"
+        },
+        {
+          "id": "b",
+          "text": "Принята в окно [10:00-10:10) — event timestamp 10:09:55 попадает в это окно. Окно ещё не закрылось для Kafka Streams, обрабатывающего по event time"
+        },
+        {
+          "id": "c",
+          "text": "Отброшена — grace period = 0, окно [10:00-10:10) закрылось в 10:10:00. Запись с event timestamp 10:09:55 пришла в 10:11:30 (после закрытия + grace=0)"
+        },
+        {
+          "id": "d",
+          "text": "Принята в окно [10:00-10:10) только если stream time не продвинулся за 10:10:00"
+        }
+      ],
+      "correctAnswer": "d",
+      "explanation": "Kafka Streams использует event time (timestamp записи), но window закрытие определяется через stream time — максимальный event timestamp, наблюдённый в потоке. С grace=0: окно [10:00-10:10) закрывается когда stream time > 10:10. Если между временем 10:09:55 и 10:11:30 в поток поступили другие записи с timestamp > 10:10 — stream time продвинулся за 10:10, окно закрылось, запись с 10:09:55 будет отброшена (grace=0). Если stream time всё ещё ≤ 10:10 — запись принята в [10:00-10:10). На практике в production потоке с регулярными записями stream time обычно продвигается быстро — запись с опозданием 1:35 (10:09:55 vs обработка в 10:11:30) скорее всего будет отброшена при grace=0.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 4: Windowing — разделы 'Grace Period' и 'Tumbling Window'"
+    },
+    {
+      "id": "kafka-m07-exam-q5",
+      "type": "multiple-choice",
+      "question": "KStream-KTable join: поток orders (12 партиций, keyed by order_id) и таблица customers (6 партиций, keyed by customer_id). Попытка создать топологию. Что произойдёт при запуске приложения?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Топология создаётся, но join работает некорректно — записи молча пропускаются при несовпадении партиций"
+        },
+        {
+          "id": "b",
+          "text": "TopologyException при построении топологии: 'topics are not co-partitioned' — Kafka Streams обнаруживает нарушение co-partitioning при builder.build()"
+        },
+        {
+          "id": "c",
+          "text": "Kafka Streams автоматически создаёт repartition-топик для выравнивания партиций — join работает корректно без ошибок"
+        },
+        {
+          "id": "d",
+          "text": "Топология создаётся успешно, но streams.start() выбрасывает исключение при попытке назначить задачи"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Kafka Streams проверяет co-partitioning при построении топологии (builder.build() или при создании KafkaStreams). Если исходные топики имеют разное число партиций — выбрасывается TopologyException с описанием нарушения. Это fail-fast поведение: лучше узнать о проблеме при деплое, чем получать некорректные результаты в production. Автоматический repartition (вариант C) добавляется только для операций, ИЗМЕНЯЮЩИХ ключ (map, selectKey, groupBy) — не для устранения несовпадения числа партиций входных топиков. Исправление: пересоздать customers с 12 партициями, или использовать repartition() в DSL.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 5: Joins — раздел 'Co-partitioning: фундаментальное требование'"
+    },
+    {
+      "id": "kafka-m07-exam-q6",
+      "type": "multiple-choice",
+      "question": "Разработчик использует GlobalKTable для топика 'products' содержащего 500 миллионов записей (средний размер 200 байт). Приложение развёрнуто на 10 инстансах с 16 ГБ heap каждый. Какая проблема возникнет?",
+      "options": [
+        {
+          "id": "a",
+          "text": "GlobalKTable загрузит 500 млн * 200 байт = 100 ГБ на КАЖДЫЙ из 10 инстансов. Heap 16 ГБ недостаточен — OutOfMemoryError на каждом инстансе при startup"
+        },
+        {
+          "id": "b",
+          "text": "GlobalKTable распределит 100 ГБ равномерно по 10 инстансам — каждый хранит 10 ГБ, что укладывается в 16 ГБ heap"
+        },
+        {
+          "id": "c",
+          "text": "GlobalKTable автоматически переключается на RocksDB при превышении heap — хранит данные на диске"
+        },
+        {
+          "id": "d",
+          "text": "Проблема только в сети: 100 ГБ нужно передать каждому инстансу при старте — медленный startup, но работает"
+        }
+      ],
+      "correctAnswer": "a",
+      "explanation": "GlobalKTable реплицирует ВЕСЬ топик на КАЖДЫЙ инстанс без исключений. 500 миллионов записей * 200 байт = 100 ГБ. Это 100 ГБ на каждом из 10 инстансов — не распределено. JVM с heap 16 ГБ при попытке загрузить 100 ГБ данных: OutOfMemoryError. Даже если GlobalKTable использует RocksDB для хранения (что зависит от реализации) — 100 ГБ на каждом инстансе потребует 100 ГБ дискового пространства per инстанс. Правильное решение: использовать обычный KTable (партиционирован, каждый инстанс хранит 10 ГБ) с co-partitioning, или KStream-GlobalKTable только для реально маленьких справочников (тысячи-сотни тысяч записей).",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 1: KStream, KTable и GlobalKTable — раздел 'GlobalKTable'"
+    },
+    {
+      "id": "kafka-m07-exam-q7",
+      "type": "multiple-choice",
+      "question": "processing.guarantee=exactly_once_v2 настроен. Kafka Streams обрабатывает транзакцию: читает из 'payments', обогащает данными из state store, пишет в 'enriched-payments'. В момент commit инстанс падает ПОСЛЕ записи в output-топик, но ДО commit consumed offset. Что произойдёт при восстановлении?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Запись в 'enriched-payments' видна потребителям немедленно. После восстановления запись обрабатывается повторно — дублирование"
+        },
+        {
+          "id": "b",
+          "text": "EOS-v2 использует транзакции: запись в output-топик и commit consumed offset — атомарны. Если commit не произошёл — транзакция откатывается. Output-топик не содержит незафиксированных данных. После восстановления запись обрабатывается ровно один раз"
+        },
+        {
+          "id": "c",
+          "text": "Запись в 'enriched-payments' видна только после commit consumed offset — нет транзакционной изоляции между produce и offset commit"
+        },
+        {
+          "id": "d",
+          "text": "EOS-v2 применяется только к state stores, но не к output-топикам — дублирование в 'enriched-payments' возможно"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "EOS-v2 оборачивает весь unit of work в Kafka транзакцию: (1) Начало транзакции. (2) Produce записей в output-топик (внутри транзакции — не видны потребителям с isolation.level=read_committed). (3) Обновление state store + changelog. (4) Commit: atomically — endTransaction(COMMIT) + commitSync для consumed offsets. Если падение ПОСЛЕ шага 2 но ДО шага 4: транзакция остаётся в PENDING состоянии, coordinator обнаруживает abandoned transaction и абортирует её. Записи в output-топик откатываются — не видны потребителям с read_committed. После восстановления запись обрабатывается с того же consumed offset — exactly once.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 6: Итоги — раздел 'EOS-v2: Exactly-Once Semantics'"
+    },
+    {
+      "id": "kafka-m07-exam-q8",
+      "type": "multiple-choice",
+      "question": "Hopping window: size=10 минут, advance=2 минуты. Событие с timestamp 13:05. Перечислите ВСЕ окна, которым принадлежит это событие.",
+      "options": [
+        {
+          "id": "a",
+          "text": "Только [13:00-13:10) — событие принадлежит одному окну, начинающемуся в ближайшую границу"
+        },
+        {
+          "id": "b",
+          "text": "[13:00-13:10), [13:02-13:12) — два окна, так как advance=2 минуты"
+        },
+        {
+          "id": "c",
+          "text": "[12:56-13:06), [12:58-13:08), [13:00-13:10), [13:02-13:12), [13:04-13:14) — пять окон. Количество окон = size/advance = 10/2 = 5"
+        },
+        {
+          "id": "d",
+          "text": "[13:00-13:10), [13:02-13:12), [13:04-13:14) — три окна после timestamp события"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Для hopping window событие принадлежит всем окнам, которые 'накрывают' его timestamp. Окна выровнены по wall clock с шагом advance=2 минуты: ..., [12:50-13:00), [12:52-13:02), [12:54-13:04), [12:56-13:06), [12:58-13:08), [13:00-13:10), [13:02-13:12), [13:04-13:14), [13:06-13:16), ... Из них 13:05 покрыт: [12:56-13:06) ✓ (13:05 < 13:06), [12:58-13:08) ✓, [13:00-13:10) ✓, [13:02-13:12) ✓, [13:04-13:14) ✓. [13:06-13:16) — начало 13:06 > 13:05, не покрывает. Итого 5 окон = size/advance = 10/2. Это главная причина, почему hopping window генерирует в 5 раз больше output записей чем tumbling для тех же данных.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 4: Windowing — раздел 'Hopping Window'"
+    },
+    {
+      "id": "kafka-m07-exam-q9",
+      "type": "multiple-choice",
+      "question": "Kafka Streams приложение с 4 инстансами и state store 'session-counts'. Клиент запрашивает инстанс 2 для ключа 'session-XYZ', но данные находятся на инстансе 4. Какой механизм обрабатывает cross-instance query и какую инфраструктуру должен предоставить разработчик?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Kafka Streams автоматически маршрутизирует запрос к инстансу 4 через встроенный RPC механизм — разработчик ничего не делает"
+        },
+        {
+          "id": "b",
+          "text": "Инстанс 2 использует streams.queryMetadataForKey() для обнаружения инстанса 4 (host:port). Разработчик должен: (1) реализовать HTTP-сервер на каждом инстансе, (2) при получении запроса — проверять metadata и делать RPC к нужному инстансу, (3) передать application.server в StreamsConfig для регистрации host:port"
+        },
+        {
+          "id": "c",
+          "text": "GlobalKTable автоматически реплицирует state store на все инстансы — любой инстанс может ответить на любой запрос"
+        },
+        {
+          "id": "d",
+          "text": "Interactive queries не поддерживают multi-instance deployment — нужно читать результаты из output-топика"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Kafka Streams предоставляет только механизм обнаружения: streams.queryMetadataForKey(storeName, key, serializer) возвращает StreamsMetadata с HostInfo инстанса, владеющего ключом. Весь RPC инфраструктуру строит разработчик: (1) application.server=host:port в StreamsConfig — регистрирует адрес инстанса в Kafka для обнаружения коллегами. (2) HTTP-сервер (Javalin, Spring Boot, Micronaut) на каждом инстансе — принимает запросы. (3) Логика: если ключ локальный → store.get(key), если нет → HTTP GET к нужному инстансу. Это намеренное разделение: Kafka Streams не диктует transport протокол или framework — разработчик выбирает сам.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 6: Итоги — раздел 'Interactive Queries'"
+    },
+    {
+      "id": "kafka-m07-exam-q10",
+      "type": "multiple-choice",
+      "question": "Разработчик добавил Suppress.untilWindowCloses(BufferConfig.unbounded()) после windowed count(). Через 25 часов после деплоя никакого вывода нет. Почему? Какова корневая причина и исправление?",
+      "options": [
+        {
+          "id": "a",
+          "text": "unbounded() буфер переполнен — нужно установить maxBytes или maxRecords лимит"
+        },
+        {
+          "id": "b",
+          "text": "По умолчанию Kafka Streams 3.x+ устанавливает grace period = 24 часа. Suppress ждёт window_end + grace_period = window_end + 24h. Окна закрываются только через сутки. Исправление: явно указать короткий grace: TimeWindows.ofSizeAndGrace(windowSize, Duration.ofSeconds(30))"
+        },
+        {
+          "id": "c",
+          "text": "Suppress несовместим с tumbling windows — работает только с session windows"
+        },
+        {
+          "id": "d",
+          "text": "Kafka Streams не эмитирует результаты пока не завершится полный replay changelog — нужно дождаться завершения startup"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Это критическая ловушка, часто встречающаяся в production. В Kafka Streams 3.x+ default grace period изменился с 0 до 24 часов. untilWindowCloses() ждёт stream time > window_end + grace_period. При grace=24h: окно [10:00-10:05) закроется только когда stream time превысит 10:05 следующего дня. До этого Suppress удерживает все промежуточные результаты в буфере. После 25 часов — некоторые старые окна возможно начнут закрываться. Исправление: TimeWindows.ofSizeAndGrace(Duration.ofMinutes(5), Duration.ofSeconds(30)) — grace 30 секунд. Окна начнут закрываться через 30 секунд после завершения, Suppress эмитирует финальные результаты.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 4: Windowing — разделы 'Grace Period' и 'Suppress'"
+    },
+    {
+      "id": "kafka-m07-exam-q11",
+      "type": "multiple-choice",
+      "question": "Session window с inactivityGap=10 минут. События для user_1: 10:00, 10:08, 10:25, 10:30. Сколько сессий создано и каковы их временные границы?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Одна сессия [10:00-10:30] — все события в пределах 30 минут"
+        },
+        {
+          "id": "b",
+          "text": "Три сессии: [10:00-10:00], [10:08-10:08], [10:25-10:30] — каждое событие запускает новую сессию"
+        },
+        {
+          "id": "c",
+          "text": "Две сессии: [10:00-10:08] и [10:25-10:30]. Разрыв 10:08→10:25=17 минут > inactivityGap 10 минут → новая сессия"
+        },
+        {
+          "id": "d",
+          "text": "Две сессии: [10:00-10:00] и [10:08-10:30] — события 10:25 и 10:30 расширяют сессию 10:08"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Анализ с inactivityGap=10 минут: 10:00 → новая сессия S1=[10:00, 10:00]. 10:08 → 10:08-10:00=8 мин ≤ 10 мин → расширяет S1 → S1=[10:00, 10:08]. 10:25 → 10:25-10:08=17 мин > 10 мин → разрыв! Новая сессия S2=[10:25, 10:25]. 10:30 → 10:30-10:25=5 мин ≤ 10 мин → расширяет S2 → S2=[10:25, 10:30]. Итог: 2 сессии — [10:00-10:08] и [10:25-10:30]. Session merging: если бы пришло событие в 10:16 (между сессиями), оно 'мостило' бы S1 и S2 (10:16-10:08=8 мин < gap, 10:25-10:16=9 мин < gap) — все события объединились бы в одну сессию.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 4: Windowing — раздел 'Session Window'"
+    },
+    {
+      "id": "kafka-m07-exam-q12",
+      "type": "multiple-choice",
+      "question": "KTable-KTable foreign key join: orders (keyed by order_id) join customers (keyed by customer_id) через order.customer_id. Требует ли этот join co-partitioning? Какой внутренний механизм Kafka Streams использует для корректной работы?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Да, требует co-partitioning: orders должен быть перепартиционирован по customer_id перед join"
+        },
+        {
+          "id": "b",
+          "text": "Нет, не требует co-partitioning. Kafka Streams создаёт внутренний subscription mechanism: при обновлении orders → foreign key (customer_id) извлекается → запись перенаправляется в internal repartition topic с ключом customer_id → lookup в customers выполняется на правильном task"
+        },
+        {
+          "id": "c",
+          "text": "Нет, не требует co-partitioning, потому что GlobalKTable неявно используется для одной из сторон"
+        },
+        {
+          "id": "d",
+          "text": "Да, требует co-partitioning по order_id (не по customer_id) — Kafka Streams обрабатывает foreign key трансляцию на уровне сериализации"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "KTable-KTable foreign key join (Kafka 2.4+) — единственный join, не требующий co-partitioning по join-ключу. Внутренний механизм: (1) Обновление в orders (keyed by order_id): foreign key extractor извлекает customer_id. (2) Kafka Streams создаёт internal subscription topic, куда пишет запись с ключом customer_id. (3) Tasks, ответственные за customers по ключу customer_id, получают эту запись. (4) Lookup в customers store выполняется. (5) Результат собирается и эмитируется в output KTable. Всё это прозрачно — разработчик пишет только orders.join(customers, foreignKeyExtractor, joiner). Это позволяет join таблицы по любому полю без изменения схемы партиционирования.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 5: Joins — раздел 'Foreign Key Join'"
+    },
+    {
+      "id": "kafka-m07-exam-q13",
+      "type": "multiple-choice",
+      "question": "Разработчик настроил state.dir=/tmp/kafka-streams и развернул 4 инстанса Kafka Streams приложения на одной физической машине. После запуска наблюдаются corrupt state и неожиданные исключения. В чём причина?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Kafka Streams не поддерживает несколько инстансов на одной машине"
+        },
+        {
+          "id": "b",
+          "text": "Все 4 инстанса используют один и тот же state.dir=/tmp/kafka-streams. Каждый инстанс читает и пишет в те же RocksDB файлы. Конкурентный доступ нескольких JVM к RocksDB файлам вызывает файловые конфликты и корруптирование данных"
+        },
+        {
+          "id": "c",
+          "text": "RocksDB не поддерживает одновременное открытие файлов из разных процессов на Linux — нужен NFS"
+        },
+        {
+          "id": "d",
+          "text": "Kafka Streams требует уникальный application.id для каждого инстанса — у всех 4 инстансов одинаковый application.id"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "state.dir — это корневая директория для ВСЕХ state stores данного приложения. При одинаковом state.dir все 4 инстанса пытаются открыть и записывать в одни и те же RocksDB файлы: /tmp/kafka-streams/{application.id}/. RocksDB использует file locking, поэтому первый инстанс успешно открывает файлы, остальные получают LockException или работают с poврежденными данными. Исправление: уникальный state.dir per инстанс: /tmp/kafka-streams/instance-0/, /tmp/kafka-streams/instance-1/ и т.д. Или использовать Docker/containers с изолированными filesystem для каждого инстанса. В production: разные хосты или разные mount points.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 3: State Stores — раздел 'RocksDB State Store'"
+    },
+    {
+      "id": "kafka-m07-exam-q14",
+      "type": "multiple-choice",
+      "question": "Когда Processor API является правильным выбором вместо Kafka Streams DSL? Выберите наиболее точный и полный ответ.",
+      "options": [
+        {
+          "id": "a",
+          "text": "Processor API всегда предпочтительнее DSL — DSL является синтаксическим сахаром с overhead"
+        },
+        {
+          "id": "b",
+          "text": "Processor API нужен когда DSL недостаточен: кастомные таймеры (schedule с punctuate), условная пересылка в именованные дочерние процессоры (forward с childName), сложная логика с одновременным доступом к нескольким state stores, внешние lookups внутри processor"
+        },
+        {
+          "id": "c",
+          "text": "Processor API нужен только для windowing — DSL не поддерживает временные окна"
+        },
+        {
+          "id": "d",
+          "text": "Processor API нужен для joins с более чем двумя источниками — DSL поддерживает только бинарные joins"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "DSL (filter, map, aggregate, join, window) покрывает 90-95% use cases. Processor API нужен для специфических сценариев: (1) context.schedule(Duration, PunctuationType, callback) — периодические действия по stream time (продвигается с данными) или wall clock time (независимо от данных). Пример: flush accumulated data every 60 seconds wall clock. (2) context.forward(record, childName) — маршрутизация в именованные дочерние узлы топологии, недоступная в DSL. (3) Прямой доступ к нескольким store: context.getStateStore('store-a') и context.getStateStore('store-b') в одном processor с кастомной логикой сравнения. (4) Низкоуровневое управление commit, record metadata. DSL windowing и joins полностью реализованы — Processor API не нужен.",
+      "bloomLevel": "applied",
+      "studyHint": "Урок 6: Итоги — раздел 'Processor API'"
+    },
+    {
+      "id": "kafka-m07-exam-q15",
+      "type": "multiple-choice",
+      "question": "Topology.describe() возвращает описание топологии с sub-topologies: Sub-topology 0 имеет 3 source topics (orders: 12 партиций, customers: 12 партиций, config: 12 партиций). Sub-topology 1 имеет 1 source topic (repartition-internal: 6 партиций). Что можно заключить о параллелизме и количестве tasks?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Общее число tasks = 3 + 1 = 4, так как 4 топика источника"
+        },
+        {
+          "id": "b",
+          "text": "Sub-topology 0: max(12, 12, 12) = 12 tasks (по числу партиций максимального источника). Sub-topology 1: 6 tasks. Итого 18 tasks. Каждая task обрабатывается одним потоком — максимальный параллелизм достигается при num.stream.threads * инстансов ≥ 18"
+        },
+        {
+          "id": "c",
+          "text": "Tasks = число sub-topologies = 2, так как parallelism определяется числом sub-topologies"
+        },
+        {
+          "id": "d",
+          "text": "Sub-topology 0: 36 tasks (12*3 = все комбинации партиций источников), Sub-topology 1: 6 tasks"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Число tasks для sub-topology = max(partitions) среди всех source topics этой sub-topology. Sub-topology 0: max(12, 12, 12) = 12 tasks. Это означает 12 параллельных единиц обработки — каждая обрабатывает partition N из orders, customers, и config одновременно (co-partitioned). Sub-topology 1: 6 tasks (по числу партиций repartition-internal). Sub-topologies независимы — могут быть назначены на разные потоки/инстансы. Итого максимальный параллелизм = 12 + 6 = 18 tasks. Для полного использования параллелизма: развернуть инстансы с суммарным num.stream.threads ≥ 18. Repartition-internal топик (6 партиций vs 12 у входных) — это узкое место, снижающее параллелизм Sub-topology 1 вдвое.",
+      "bloomLevel": "analytical",
+      "studyHint": "Урок 1: KStream, KTable и GlobalKTable — раздел 'Topology Concepts'; Урок 6: Итоги"
+    }
+  ]
+}
