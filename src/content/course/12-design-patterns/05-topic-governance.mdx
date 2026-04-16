@@ -1,0 +1,296 @@
+---
+title: "Topic Naming и Governance"
+description: "Соглашения об именовании топиков, стратегии версионирования, политики retention по типу топика, управление созданием топиков и моделью владения."
+order: 5
+difficulty: "intermediate"
+estimatedTime: 25
+topics: ["Topic Naming", "Governance", "Versioning", "Retention Policy", "Topic Ownership", "auto.create.topics.enable"]
+free: false
+---
+
+# Topic Naming и Governance
+
+По мере роста Kafka-кластера количество топиков увеличивается: десятки, сотни, тысячи. Без явных соглашений об именовании и governance система превращается в хаос: `topic1`, `orders2`, `test-data-final-v3-FINAL`. Это реальная история каждой команды, которая начала работу без governance политики.
+
+Governance — это не бюрократия. Это набор простых правил, которые предотвращают дорогостоящие ошибки: несовместимые изменения схем, потерянные данные из-за неправильного retention, конфликты имён при масштабировании.
+
+---
+
+## Соглашения об именовании топиков
+
+Две основных конвенции, применяемых в production:
+
+**Domain-based naming:**
+
+```
+{domain}.{entity}.{event-type}
+
+Примеры:
+  orders.order.created
+  orders.order.cancelled
+  orders.order.shipped
+  payments.invoice.charged
+  payments.refund.initiated
+  inventory.product.reserved
+  inventory.warehouse.stock-updated
+  customers.customer.profile-updated
+```
+
+**Team-ownership naming:**
+
+```
+{team}.{service}.{entity}
+
+Примеры:
+  checkout.order-service.orders
+  payments.billing.invoices
+  warehouse.inventory-service.stock
+```
+
+**Рекомендуется domain-based** для большинства систем: он описывает контент, а не владельца. Команды меняются, домены остаются стабильнее.
+
+**Правила для имён:**
+
+- Только строчные буквы, цифры, дефис `-` и точка `.`.
+- Никаких подчёркиваний (зарезервированы для internal Kafka топиков типа `__consumer_offsets`).
+- Никаких пробелов, слешей, специальных символов.
+- Максимальная длина 249 символов (ограничение Kafka).
+- Окружение в имени: `prod.orders.order.created` vs `staging.orders.order.created` — или через отдельные кластеры.
+
+<DiagramContainer title="Таксономия именования топиков: domain-based" color="emerald">
+  <div className="space-y-4 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">Иерархия топиков по доменам. Одно соглашение для всей организации.</div>
+    <FlowRow>
+      <FlowNode
+        variant="source"
+        size="sm"
+        tooltip="Domain: orders. Все топики, связанные с жизненным циклом заказа. Владелец домена: команда Checkout. WRITE ACL: order-service. READ ACL: payment-service, analytics-service."
+      >
+        orders.*
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowColumn>
+        <DataBox
+          label="orders.order.created"
+          tooltip="Событие создания заказа. Партиций: 12. RF: 3. Retention: 7 days. Schema: OrderCreated.avsc. Producer: order-service. Consumers: payment-service (cg-payment), inventory-service (cg-inventory), analytics (cg-analytics)."
+        >
+          created, confirmed, cancelled, shipped
+        </DataBox>
+        <DataBox
+          label="payments.invoice.charged"
+          tooltip="Событие списания оплаты. Партиций: 6. RF: 3. Retention: 90 days (compliance). Schema: InvoiceCharged.avsc. FULL_TRANSITIVE compatibility — финансовые данные не должны терять поля."
+        >
+          charged, refunded, failed
+        </DataBox>
+        <DataBox
+          label="inventory.product.reserved"
+          tooltip="Событие резервирования товара на складе. Партиций: 24 (высокая нагрузка — много SKU). RF: 3. Retention: 3 days (операционные данные, долго не нужны). Schema: ProductReserved.avsc."
+        >
+          reserved, released, replenished
+        </DataBox>
+      </FlowColumn>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+---
+
+## Версионирование топиков: три стратегии
+
+Схемы данных меняются. Добавляются поля, удаляются deprecated, меняются типы. Как управлять версионированием?
+
+**Стратегия 1: Schema Registry версионирование.**
+
+Тот же топик, эволюция схемы через Schema Registry. Наиболее прозрачна для consumers:
+
+```
+Топик: orders.order.created
+Schema версия 1: {orderId, customerId, items[], totalAmount}
+Schema версия 2: {orderId, customerId, items[], totalAmount, discountCode}  (добавлено поле)
+Schema версия 3: {orderId, customerId, items[], totalAmount, discountCode, shippingAddress}
+```
+
+Добавление optional поля (с default) — backward compatible. Consumers, ожидающие версию 1, корректно десериализуют версию 2 (игнорируют неизвестное поле или получают default).
+
+**Требование:** `BACKWARD_TRANSITIVE` или `FULL_TRANSITIVE` совместимость в Schema Registry.
+
+**Стратегия 2: Topic versioning (suffix `v2`).**
+
+Новый топик для breaking changes:
+
+```
+orders.order.created      # v1 (deprecated, но ещё активен)
+orders.order.created.v2   # v2 (новая схема с breaking change)
+```
+
+Producers публикуют в v2. Consumers мигрируют группами. Старый топик отключается после полной миграции.
+
+- Преимущество: явная демаркация breaking change.
+- Недостаток: дублирование данных в период миграции, overhead управления двумя топиками.
+
+**Стратегия 3: Dual-publish.**
+
+Период миграции: producer публикует в оба топика одновременно. Consumer-ы читают либо из старого, либо из нового в зависимости от готовности:
+
+```java
+producer.send("orders.order.created", v1Event);      // старые consumers
+producer.send("orders.order.created.v2", v2Event);   // новые consumers
+// После полной миграции: убираем старый publish
+```
+
+Dual-publish — временная мера. Максимальная продолжительность: 1-2 спринта. Бессрочный dual-publish = технический долг.
+
+---
+
+## Политики retention по типу топика
+
+Разные топики требуют разных настроек retention в зависимости от их роли:
+
+```properties
+# Event топики (Orders, Payments, User actions)
+# Храним полную историю для replay и аудита
+log.retention.ms=-1                     # бесконечно
+log.cleanup.policy=delete               # удаление по retention, не compaction
+
+# Snapshot топики (current state of aggregates)
+# Только последнее состояние per key
+log.cleanup.policy=compact
+min.compaction.lag.ms=3600000           # 1 час до compaction
+min.cleanable.dirty.ratio=0.1
+
+# Command топики (saga commands, RPC-like messages)
+# Команды обрабатываются быстро, долго не нужны
+log.retention.ms=86400000              # 1 день
+log.cleanup.policy=delete
+
+# Dead Letter Topics (DLT) — необработанные/упавшие сообщения
+# Нужны для отладки, но не навсегда
+log.retention.ms=604800000             # 7 дней
+log.cleanup.policy=delete
+
+# Monitoring / Heartbeat топики
+# Краткосрочные операционные данные
+log.retention.ms=3600000               # 1 час
+log.cleanup.policy=delete
+```
+
+**Dead Letter Topic (DLT) конвенция:**
+
+Топик для сообщений, которые consumer не смог обработать после исчерпания retries:
+
+```
+{original-topic}.dlt
+
+Примеры:
+  orders.order.created.dlt
+  payments.invoice.charged.dlt
+```
+
+Алерт: количество сообщений в DLT должно быть 0. Рост DLT = сигнал о системной проблеме.
+
+---
+
+## Управление созданием топиков
+
+**`auto.create.topics.enable=false` в production — обязательное правило.**
+
+Что происходит при `auto.create.topics.enable=true`:
+
+```
+# Разработчик случайно опечатался
+producer.send("ordes.order.created", event);  // вместо "orders.order.created"
+```
+
+Kafka автоматически создаёт топик `ordes.order.created` с default настройками (partitions=1, retention=7 days). Данные идут не туда, event sourcing ломается, данные теряются. Обнаружение этой ошибки — часы или дни.
+
+При `auto.create.topics.enable=false`: produce в несуществующий топик немедленно выбрасывает `UnknownTopicOrPartitionException`. Ошибка обнаруживается в момент деплоя.
+
+**Централизованный процесс создания топиков:**
+
+```bash
+# Создание топика через kafka-topics.sh с явными параметрами
+kafka-topics.sh \
+  --bootstrap-server kafka:9092 \
+  --create \
+  --topic orders.order.created \
+  --partitions 12 \
+  --replication-factor 3 \
+  --config log.retention.ms=-1 \
+  --config log.cleanup.policy=delete \
+  --config min.insync.replicas=2
+
+# Установка метаданных для governance
+kafka-configs.sh \
+  --bootstrap-server kafka:9092 \
+  --entity-type topics \
+  --entity-name orders.order.created \
+  --alter \
+  --add-config 'confluent.topic.owner=checkout-team,confluent.topic.schema-subject=orders.order.created-value'
+```
+
+**Процесс approval:**
+
+1. Команда заводит заявку (ticket) на создание топика.
+2. Заявка включает: имя (проверяется на соответствие naming convention), partition count (обоснование по throughput), retention policy, ожидаемые consumers.
+3. Platform team проверяет и создаёт топик через IaC (Terraform, Strimzi KafkaTopic CR).
+4. Топик добавляется в корпоративный реестр топиков.
+
+---
+
+## Модель владения топиками
+
+Каждый топик должен иметь **явного владельца** — команду, ответственную за:
+
+- Схему данных (Schema Registry subject).
+- Retention policy.
+- Partition count (масштабирование).
+- SLA для consumers (гарантированная доступность, retention достаточный для replay).
+
+**ACL по топикам:**
+
+```bash
+# order-service: WRITE на свой топик
+kafka-acls.sh --bootstrap-server kafka:9092 \
+  --add --allow-principal User:order-service \
+  --operation Write --topic orders.order.created
+
+# payment-service: READ на топик orders
+kafka-acls.sh --bootstrap-server kafka:9092 \
+  --add --allow-principal User:payment-service \
+  --operation Read --topic orders.order.created \
+  --group cg-payment-orders
+
+# analytics-service: READ на множество топиков по паттерну
+kafka-acls.sh --bootstrap-server kafka:9092 \
+  --add --allow-principal User:analytics-service \
+  --operation Read --topic '*' \
+  --group cg-analytics
+```
+
+**Consumer contracts:** Владелец топика гарантирует обратную совместимость схемы и минимальный retention, достаточный для replay. Consumer сервисы регистрируют себя в реестре как подписчики. Владелец топика уведомляет зарегистрированных consumers перед breaking changes.
+
+---
+
+## Планирование числа партиций
+
+Ссылка на Модуль 10 (Production Ops) за детальными формулами capacity planning. Ключевые правила:
+
+- Число партиций >= max parallel consumers (consumer group size).
+- Увеличить партиции можно в любой момент — но порядок сообщений для существующих ключей нарушается при рехэшировании.
+- Уменьшить партиции нельзя (только пересоздать топик).
+- Начинайте с запасом: 12-24 партиций для высоконагруженных топиков.
+
+---
+
+## Ключевые выводы
+
+1. **Naming convention:** `{domain}.{entity}.{event-type}` — описывает контент, стабилен при изменении команд.
+2. **`auto.create.topics.enable=false`** в production — защита от случайных топиков с неправильными настройками.
+3. **Retention по типу:** Events (бесконечно), Snapshots (compact), Commands (1 день), DLT (7 дней), Monitoring (1 час).
+4. **Версионирование:** Schema Registry (backward-compatible changes) vs topic suffix v2 (breaking changes) vs dual-publish (миграция).
+5. **Владелец топика** — команда, которая управляет схемой, retention, partition count и consumer contracts.
+
+<KnowledgeCheck
+  question="Команда планирует миграцию схемы events с breaking change: поле 'amount' типа integer переименовывается в 'totalAmountCents' типа long. В Schema Registry стоит режим BACKWARD. Почему эта миграция требует нового топика, а не просто новой версии схемы?"
+  answer="Переименование поля в Avro — это breaking change: новая схема НЕ backward compatible со старой. Старые consumers, ожидающие поле 'amount', не смогут десериализовать новые сообщения с полем 'totalAmountCents'. Schema Registry с режимом BACKWARD отклонит такое изменение схемы, потому что оно нарушает backward compatibility. Правильная стратегия: (1) Создать новый топик orders.order.created.v2 с новой схемой. (2) Producer начинает dual-publish: старый топик (для v1 consumers) + новый топик (для v2 consumers). (3) Каждый consumer мигрирует на v2 в рамках своего цикла деплоя. (4) После полной миграции всех consumers: отключить старый топик и dual-publish. Альтернатива без нового топика: добавить 'totalAmountCents' как optional поле рядом с 'amount' (оба поля присутствуют) — это backward compatible. Consumers мигрируют, потом 'amount' помечается deprecated и удаляется через несколько релизов."
+/>

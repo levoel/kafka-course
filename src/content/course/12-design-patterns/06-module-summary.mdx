@@ -1,0 +1,72 @@
+---
+title: "Итоги модуля 12"
+description: "Сводная таблица паттернов проектирования с Kafka: какую проблему решает каждый паттерн и какая ключевая Kafka-фича его реализует."
+order: 6
+difficulty: "intermediate"
+estimatedTime: 10
+topics: ["Design Patterns", "Event Sourcing", "CQRS", "Outbox", "Saga", "Topic Governance"]
+free: false
+---
+
+# Итоги модуля 12: Design Patterns с Kafka
+
+Модуль 12 охватил пять архитектурных паттернов, которые решают принципиально разные задачи в event-driven системах на Kafka.
+
+---
+
+## Сводная таблица паттернов
+
+| Паттерн | Проблема | Kafka-фича | Ключевое ограничение |
+|---------|----------|------------|----------------------|
+| **Event Sourcing** | Нет истории изменений, нет audit trail, нельзя перестроить state | Append-only log, `log.retention.ms=-1`, ключ = aggregateId | Нет random access по aggregateId — нужна projection |
+| **CQRS** | Одна модель не оптимальна для read и write одновременно | Topics как event bus, consumer groups per projection, `auto.offset.reset=earliest` для rebuild | Eventual consistency — read model отстаёт от write |
+| **Transactional Outbox** | Dual-write: обновление DB и Kafka не атомарны | Debezium CDC читает outbox через WAL, EventRouter SMT маршрутизирует в топики | At-least-once — consumers обязаны быть идемпотентны |
+| **Saga (Хореография)** | Распределённая транзакция без 2PC, слабая связность | Domain event topics, consumer groups per subscription, idempotent producers | Трудно мониторить: нет единого view saga state |
+| **Saga (Оркестрация)** | Распределённая транзакция с централизованным контролем | Command/reply topics, transactional producer, compact saga.state topic | Orchestrator — потенциальная единая точка сбоя |
+| **Topic Governance** | Хаос топиков, несовместимые изменения, потеря данных | `auto.create.topics.enable=false`, Schema Registry, ACL per topic | Требует organizational buy-in (процесс approval) |
+
+---
+
+## Паттерны в связке: реальная архитектура
+
+Паттерны работают вместе, не по отдельности:
+
+```
+[Order Service]
+  |
+  +-- Event Sourcing: OrderCreated в orders.events (append-only)
+  +-- Outbox: атомарная запись в outbox таблицу, Debezium публикует в Kafka
+  |
+  +-> CQRS Read Side:
+  |     - KTable: in-memory lookup для /api/orders/{id}
+  |     - PostgreSQL: SQL queries, reports
+  |     - Elasticsearch: full-text search
+  |
+  +-> Saga Orchestrator:
+        - Choreography: OrderCreated -> Payment -> Inventory -> Notification
+        - или Orchestration: через command/reply topics
+```
+
+Все топики следуют naming convention `orders.order.created`, все схемы в Schema Registry, `auto.create.topics.enable=false`.
+
+---
+
+## Подготовка к Модулю 13
+
+Модуль 13 — капстоун-проект: полная e-commerce streaming система, которая объединяет **все паттерны из всего курса**:
+
+- Schema Registry (Модуль 06) + Event Sourcing (Модуль 12) — схемы событий с FULL_TRANSITIVE совместимостью.
+- Kafka Connect (Модуль 05) + CQRS (Модуль 12) — Debezium outbox + JDBC/ES Sink projections.
+- Kafka Streams (Модуль 07) + CQRS — KTable как read model, stream enrichment.
+- MirrorMaker 2 (Модуль 11) — репликация orders.* топиков в DC-2 для DR.
+- Security (Модуль 09) — SASL/SCRAM + ACL на все топики.
+- Production Ops (Модуль 10) — JMX мониторинг + capacity planning.
+
+Капстоун — это системный дизайн-задание: вам даётся набор требований, вы проектируете архитектуру и обосновываете каждое решение.
+
+---
+
+<KnowledgeCheck
+  question="Коллега предлагает использовать CQRS везде в новом проекте, потому что 'это масштабируется'. Какие три вопроса вы зададите, чтобы определить, оправдан ли CQRS в данном контексте?"
+  answer="(1) Асимметрична ли read/write нагрузка? (например, 10,000 reads/s vs 100 writes/s — CQRS оправдан, 100 reads/s vs 100 writes/s — overhead без benefit). (2) Нужно ли несколько разных read models из одних данных? (поиск + кэш + аналитика — CQRS даёт преимущество; один единственный view — не нужен). (3) Готова ли команда и продукт к eventual consistency? (если бизнес требует strong consistency 'пользователь должен видеть своё обновление немедленно' без дополнительной инженерии — CQRS добавит сложность без value). CQRS — паттерн для конкретных задач, не универсальный архитектурный выбор."
+/>
