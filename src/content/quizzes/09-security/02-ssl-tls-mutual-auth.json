@@ -1,0 +1,70 @@
+{
+  "lessonSlug": "09-security/02-ssl-tls-mutual-auth",
+  "moduleId": "09-security",
+  "_meta": {
+    "idPrefix": "kafka-m09-02",
+    "description": "Use IDs: kafka-m09-02-q1, q2, q3 for the three questions"
+  },
+  "questions": [
+    {
+      "id": "kafka-m09-02-q1",
+      "type": "multiple-choice",
+      "question": "Команда настраивает mTLS для Kafka-кластера. Брокер сконфигурирован с ssl.client.auth=required. Producer получает ошибку 'SSL handshake failed: peer not authenticated'. Конфигурация producer: security.protocol=SSL, ssl.truststore.location=... (корректный). ssl.keystore.location не указан. Почему ошибка и что исправить?",
+      "options": [
+        {
+          "id": "a",
+          "text": "ssl.truststore.password неверный — это всегда первая причина SSL handshake failure"
+        },
+        {
+          "id": "b",
+          "text": "ssl.client.auth=required означает, что брокер требует клиентский сертификат. Producer не предоставил ssl.keystore.location (свой keystore с private key + certificate). Брокер не может аутентифицировать клиента — отказывает в соединении. Исправление: добавить ssl.keystore.location, ssl.keystore.password, ssl.key.password с клиентским keystore."
+        },
+        {
+          "id": "c",
+          "text": "security.protocol=SSL не поддерживает mutual TLS — нужно SASL_SSL с ssl.client.auth"
+        },
+        {
+          "id": "d",
+          "text": "Ошибка в том, что producer не указал ssl.enabled.protocols=TLSv1.3 — handshake упал из-за несовместимости версий"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "ssl.client.auth=required — это mTLS (mutual TLS). В мTLS ОБЕ стороны предоставляют сертификат: брокер отправляет свой сертификат из keystore (клиент проверяет через truststore), И брокер запрашивает клиентский сертификат (CertificateRequest в TLS handshake). Если клиент не предоставляет сертификат (ssl.keystore.location не указан) — broker получает пустой Certificate message и выдаёт 'peer not authenticated'. Решение: предоставить клиентский keystore с сертификатом, подписанным CA из broker truststore. ssl.truststore у producer позволяет ему проверить брокерский сертификат — это один-way часть. Для mutual нужен и keystore у клиента.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m09-02-q2",
+      "type": "true-false",
+      "question": "ssl.endpoint.identification.algorithm=https обязателен в production Kafka-конфигурации, потому что без него клиент не проверяет CN/SAN сертификата брокера и уязвим к MITM-атаке (подмена брокера).",
+      "correctAnswer": "true",
+      "explanation": "Истина. ssl.endpoint.identification.algorithm=https включает hostname verification: после TLS handshake клиент проверяет, совпадает ли hostname брокера (из advertised.listeners) с CN или SAN в сертификате брокера. Без этой проверки (пустой string или отсутствует) злоумышленник может подменить брокер своим сервером: установить TLS-соединение (с любым сертификатом), перехватить данные, продолжить пересылку оригинальному брокеру — классический MITM. Клиент принял бы поддельный сертификат без проверки hostname. Начиная с Kafka 3.0 этот параметр включён по умолчанию (=https). Установить '' для отключения можно только при разработке с self-signed сертификатами на localhost.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m09-02-q3",
+      "type": "multiple-choice",
+      "question": "DevOps команда создаёт сертификаты для нового Kafka-кластера с 3 брокерами: broker1.example.com, broker2.example.com, broker3.example.com. Они создали один общий сертификат с CN=kafka-broker и импортировали его во все 3 keystore. После настройки clients получают 'ssl handshake failed: certificate does not match hostname'. В чём проблема и как правильно создать сертификат?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Нужно отключить hostname verification: ssl.endpoint.identification.algorithm= (пустая строка)"
+        },
+        {
+          "id": "b",
+          "text": "Каждый брокер должен иметь уникальный CN=broker1.example.com, CN=broker2.example.com, CN=broker3.example.com в своём сертификате. Один общий сертификат с CN=kafka-broker не совпадает ни с одним hostname."
+        },
+        {
+          "id": "c",
+          "text": "Создать один сертификат с SAN (Subject Alternative Name): dns:broker1.example.com,dns:broker2.example.com,dns:broker3.example.com. Тогда один сертификат покрывает все три брокера. При mTLS каждый брокер всё равно предоставляет этот сертификат, и hostname verification пройдёт."
+        },
+        {
+          "id": "d",
+          "text": "CN не участвует в hostname verification в современных JDK — ошибка в другом"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Hostname verification сравнивает hostname клиента (broker1.example.com) с CN или SAN сертификата. CN=kafka-broker не совпадает ни с одним из трёх broker hostname — отсюда ошибка. Два правильных подхода: (1) Wildcard CN: CN=*.example.com — покрывает broker1.example.com, broker2.example.com, broker3.example.com. Простой, но небезопасен если нужна изоляция. (2) SAN (Subject Alternative Name): keytool -ext SAN=dns:broker1.example.com,dns:broker2.example.com,dns:broker3.example.com — один сертификат с явным перечислением всех hostname. Вариант C правильный: SAN — лучшая практика. Современные JDK (Java 17+) фактически игнорируют CN при hostname verification в пользу SAN. Вариант A отключает защиту от MITM — недопустимо в production.",
+      "bloomLevel": "applied"
+    }
+  ]
+}

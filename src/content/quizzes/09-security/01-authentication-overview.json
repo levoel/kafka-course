@@ -1,0 +1,88 @@
+{
+  "lessonSlug": "09-security/01-authentication-overview",
+  "moduleId": "09-security",
+  "_meta": {
+    "idPrefix": "kafka-m09-01",
+    "description": "Use IDs: kafka-m09-01-q1, q2, q3 for the three questions"
+  },
+  "questions": [
+    {
+      "id": "kafka-m09-01-q1",
+      "type": "multiple-choice",
+      "question": "Команда настраивает Kafka-кластер в production. Архитектор выбирает между четырьмя security.protocol вариантами для внешнего listener (доступного из интернета). Какой вариант правильный и почему?",
+      "options": [
+        {
+          "id": "a",
+          "text": "PLAINTEXT — самый простой вариант, шифрование обеспечивается на уровне VPN"
+        },
+        {
+          "id": "b",
+          "text": "SASL_PLAINTEXT — SASL аутентификация достаточна, шифрование избыточно для internal API"
+        },
+        {
+          "id": "c",
+          "text": "SASL_SSL — SASL аутентификация и TLS шифрование. Клиенты аутентифицированы, трафик зашифрован. Единственный допустимый выбор для внешнего listener."
+        },
+        {
+          "id": "d",
+          "text": "SSL — шифрование без SASL. Клиенты не аутентифицируются, но трафик зашифрован"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "SASL_SSL — production standard для внешних listener. PLAINTEXT: никакой защиты, любой в сети читает данные и может produce/consume без ограничений. SASL_PLAINTEXT: аутентификация есть, но credentials (username/password в PLAIN, hash challenge в SCRAM) передаются по незашифрованному каналу — перехват трафика раскрывает или credentials, или позволяет MITM. SSL без SASL: шифрование есть, но клиент не аутентифицирован (если ssl.client.auth=none) — любой с доверенным сертификатом может подключиться. SASL_SSL комбинирует оба: клиент обязан пройти SASL аутентификацию, весь канал зашифрован TLS.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m09-01-q2",
+      "type": "multiple-choice",
+      "question": "В чём принципиальное отличие SASL/SCRAM от SASL/PLAIN в части хранения и передачи credentials в Kafka 4.0?",
+      "options": [
+        {
+          "id": "a",
+          "text": "SCRAM шифрует password перед отправкой AES-256, PLAIN отправляет в plaintext"
+        },
+        {
+          "id": "b",
+          "text": "SCRAM хранит credentials в KRaft metadata log как salted hash, позволяет динамическое управление без перезапуска. PLAIN хранит credentials в JAAS config файле как plaintext, ротация требует перезапуска брокера."
+        },
+        {
+          "id": "c",
+          "text": "SCRAM и PLAIN хранят credentials одинаково, разница только в алгоритме хеширования при передаче"
+        },
+        {
+          "id": "d",
+          "text": "PLAIN хранит credentials в ZooKeeper, SCRAM — в Kafka topic __scram_credentials"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Ключевые различия: SASL/PLAIN — credentials (username + password) хранятся в plaintext в JAAS config файле брокера (listener.name.*.plain.sasl.jaas.config). Добавление/удаление пользователей = изменение конфига + rolling restart. При handshake username и password передаются в base64 (не шифрование). SASL/SCRAM — credentials хранятся в KRaft metadata log (__cluster_metadata) как salted hash (bcrypt-подобный алгоритм). Управление через kafka-configs.sh без перезапуска: изменения применяются мгновенно. При handshake пароль НЕ передаётся — только salted challenge/response обмен (RFC 5802). В Kafka 4.0 ZooKeeper полностью удалён — SCRAM хранится исключительно в KRaft.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m09-01-q3",
+      "type": "multiple-choice",
+      "question": "Компания имеет Kafka-кластер с двумя listener: INTERNAL (порт 9092, внутренняя сеть) и EXTERNAL (порт 9094, для партнёрских API). Нужно: internal — быстрая аутентификация без TLS overhead (сеть изолирована network policy), external — максимальная безопасность с JWT-токенами и Keycloak. Какая конфигурация реализует это без перезапуска при добавлении клиентов?",
+      "options": [
+        {
+          "id": "a",
+          "text": "listeners=INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094; listener.security.protocol.map=INTERNAL:SASL_PLAINTEXT,EXTERNAL:SASL_SSL; INTERNAL использует SCRAM, EXTERNAL использует OAUTHBEARER"
+        },
+        {
+          "id": "b",
+          "text": "listeners=INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094; оба listener используют SASL_SSL с PLAIN, ротация паролей через kafka-configs.sh"
+        },
+        {
+          "id": "c",
+          "text": "Один listener SASL_SSL для всех: listeners=INTERNAL://0.0.0.0:9092; все клиенты используют OAUTHBEARER через Keycloak"
+        },
+        {
+          "id": "d",
+          "text": "listeners=INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094; listener.security.protocol.map=INTERNAL:PLAINTEXT,EXTERNAL:SASL_SSL; EXTERNAL использует PLAIN с JAAS"
+        }
+      ],
+      "correctAnswer": "a",
+      "explanation": "SASL_PLAINTEXT для INTERNAL: SASL аутентификация (SCRAM — динамическое управление без перезапуска) без TLS overhead. Приемлемо только в изолированной внутренней сети. SASL_SSL для EXTERNAL: шифрование TLS + OAUTHBEARER с Keycloak — JWT токены с коротким TTL, централизованное управление identity, добавление/отзыв доступа в Keycloak без касания Kafka. SCRAM на INTERNAL: добавление нового internal сервиса = kafka-configs.sh без перезапуска. OAUTHBEARER на EXTERNAL: добавление партнёра = создание Client в Keycloak. Вариант D ошибочен: INTERNAL:PLAINTEXT (без аутентификации вообще) — плохая практика даже во внутренней сети. Вариант B ошибочен: PLAIN не даёт динамического управления (перезапуск при добавлении).",
+      "bloomLevel": "analytical"
+    }
+  ]
+}

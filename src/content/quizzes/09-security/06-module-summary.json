@@ -1,0 +1,62 @@
+{
+  "lessonSlug": "09-security/06-module-summary",
+  "moduleId": "09-security",
+  "_meta": {
+    "idPrefix": "kafka-m09-06",
+    "description": "Use IDs: kafka-m09-06-q1, q2 for the two questions"
+  },
+  "questions": [
+    {
+      "id": "kafka-m09-06-q1",
+      "type": "multiple-choice",
+      "question": "DevOps инженер готовит Kafka-кластер к production. Проводит security review и обнаруживает следующую конфигурацию: security.protocol=SASL_SSL, sasl.mechanism=SCRAM-SHA-256, authorizer.class.name=org.apache.kafka.metadata.authorizer.StandardAuthorizer, allow.everyone.if.no.acl.found=true, ssl.endpoint.identification.algorithm=. Какие два параметра КРИТИЧЕСКИ неверны для production?",
+      "options": [
+        {
+          "id": "a",
+          "text": "security.protocol=SASL_SSL и sasl.mechanism=SCRAM-SHA-256 — SCRAM устарел, нужен OAUTHBEARER"
+        },
+        {
+          "id": "b",
+          "text": "allow.everyone.if.no.acl.found=true (разрешает всё всем без ACL) и ssl.endpoint.identification.algorithm= (отключает hostname verification, MITM возможен). Оба создают критические уязвимости."
+        },
+        {
+          "id": "c",
+          "text": "StandardAuthorizer — нужно использовать AclAuthorizer для Kafka 4.0"
+        },
+        {
+          "id": "d",
+          "text": "security.protocol=SASL_SSL и SCRAM корректны. Нет критических ошибок."
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Две критических ошибки: (1) allow.everyone.if.no.acl.found=true: при значении true любой аутентифицированный пользователь, для которого нет явного ACL, получает полный доступ ко всем ресурсам. Это означает, что новый сервис без ACL автоматически имеет права admin. В production ОБЯЗАТЕЛЬНО false — deny by default. (2) ssl.endpoint.identification.algorithm= (пустая строка): отключает hostname verification. Клиент не проверяет, что CN/SAN сертификата брокера совпадает с hostname. MITM-атака становится возможной: злоумышленник может подменить брокер сервером с любым TLS-сертификатом. ОБЯЗАТЕЛЬНО https. SCRAM-SHA-256, StandardAuthorizer, SASL_SSL — всё корректно для production.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m09-06-q2",
+      "type": "multiple-choice",
+      "question": "Архитектор проектирует security модель для нового Kafka-кластера (Kafka 4.0 KRaft, 5 микросервисов, compliance SOC 2). Расставьте по приоритету: (A) Включить TLS шифрование, (B) Настроить ACL с deny-by-default, (C) Включить audit logging, (D) Установить quotas. Какой порядок реализации правильный и почему?",
+      "options": [
+        {
+          "id": "a",
+          "text": "D → C → B → A: сначала quotas (performance), потом audit (observability), потом ACL, потом TLS"
+        },
+        {
+          "id": "b",
+          "text": "A → B → C → D: TLS шифрование (защита канала) → ACL deny-by-default (авторизация) → Audit logging (compliance и observability) → Quotas (operational stability). Каждый шаг строится на предыдущем."
+        },
+        {
+          "id": "c",
+          "text": "B → A → D → C: сначала ACL (самое важное), потом TLS, потом quotas, потом audit"
+        },
+        {
+          "id": "d",
+          "text": "Порядок не важен — все настройки независимы"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Правильный порядок: A → B → C → D — это defence in depth снизу вверх: (A) TLS шифрование первично: без шифрования канала SASL credentials (даже SCRAM challenge) передаются по сети в потенциально читаемом виде. TLS — фундамент. (B) ACL с deny-by-default: после аутентификации нужна авторизация. allow.everyone.if.no.acl.found=false — обязательно до добавления первого пользователя. Иначе на этапе настройки всё открыто. (C) Audit logging: когда TLS + ACL работают, нужна observability — кто, куда, когда. SOC 2 требует audit trail. (D) Quotas: финальный слой operational stability. Важно, но не блокирует compliance — SOC 2 не требует quotas явно. Quotas нужны когда появляются реальные workloads с реальными данными о нагрузке.",
+      "bloomLevel": "analytical"
+    }
+  ]
+}

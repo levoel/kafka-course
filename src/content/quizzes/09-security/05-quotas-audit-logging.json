@@ -1,0 +1,88 @@
+{
+  "lessonSlug": "09-security/05-quotas-audit-logging",
+  "moduleId": "09-security",
+  "_meta": {
+    "idPrefix": "kafka-m09-05",
+    "description": "Use IDs: kafka-m09-05-q1, q2, q3 for the three questions"
+  },
+  "questions": [
+    {
+      "id": "kafka-m09-05-q1",
+      "type": "multiple-choice",
+      "question": "Kafka-кластер с num.io.threads=8. Для пользователя alice установлен request_percentage=25. Сколько реального I/O thread capacity получает alice, и что это означает для её запросов?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Alice получает 25% от суммарной ёмкости 8 I/O потоков — 2 полных потока"
+        },
+        {
+          "id": "b",
+          "text": "Alice получает 25% от одного I/O потока. При 8 потоках это 25% × 1 поток = 3.125% от суммарной ёмкости. Request_percentage ограничивает не суммарную ёмкость, а долю в одном потоке."
+        },
+        {
+          "id": "c",
+          "text": "request_percentage=25 означает, что alice может отправить не более 25 запросов в секунду"
+        },
+        {
+          "id": "d",
+          "text": "Alice получает 25% от каждого из 8 потоков — broker распределяет её запросы равномерно"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "request_percentage квота — это процент от времени ОДНОГО I/O потока, не от суммы всех потоков. При num.io.threads=8: alice может использовать 25% времени одного потока. Суммарная ёмкость кластера = 8 потоков × 100% = 800 'единиц'. Alice получает 25 'единиц' = 25/800 = 3.125% суммарной ёмкости. Это важное ограничение request_percentage: для реального rate limiting по throughput используйте producer_byte_rate и consumer_byte_rate — они измеряют фактический объём данных. request_percentage полезен для ограничения клиентов, генерирующих много мелких запросов (AdminClient операции, metadata requests) без большого объёма данных.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m09-05-q2",
+      "type": "multiple-choice",
+      "question": "Monitoring team получает алерт: producer-app превышает квоту и получает throttling. JMX метрика ThrottleTimeMs.Mean для producer-app = 2500ms. Что это означает для producer-app и какой эффект на latency?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Producer-app не может отправить данные в течение 2500ms после каждого запроса — среднее время паузы 2.5 секунды"
+        },
+        {
+          "id": "b",
+          "text": "Broker отклоняет 2500 сообщений в секунду — throttling = dropping messages"
+        },
+        {
+          "id": "c",
+          "text": "ThrottleTimeMs.Mean=2500ms означает, что broker возвращает throttle_time_ms=2500 в ответах. Kafka client паузирует отправку на 2.5 секунды. Эффективная produce latency = processing time + 2500ms throttle. Это значительная деградация — producer работает значительно медленнее квоты."
+        },
+        {
+          "id": "d",
+          "text": "2500ms — это среднее время обработки ProduceRequest брокером, нормально для большого batch"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "ThrottleTimeMs — это время задержки, которое broker добавляет к каждому response когда клиент превышает квоту. Механизм: (1) Client отправляет ProduceRequest. (2) Broker обрабатывает и записывает данные. (3) Broker возвращает ProduceResponse с throttle_time_ms=2500 в header. (4) Kafka client (встроенная логика) читает throttle_time_ms и паузирует следующую отправку на 2500ms. Данные НЕ теряются и НЕ отклоняются — они просто замедляются. ThrottleTimeMs.Mean=2500ms означает, что producer-app стабильно превышает квоту: broker постоянно throttle-ит его. Нормальное значение в production: 0ms или близко к 0. 2500ms — серьёзный сигнал: либо увеличить квоту, либо уменьшить produce rate в приложении.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m09-05-q3",
+      "type": "multiple-choice",
+      "question": "Security incident: подозрение, что сервис 'rogue-analytics' пытается несанкционированно читать данные из топика 'payments'. Kafka-кластер настроен с StandardAuthorizer, allow.everyone.if.no.acl.found=false, authorizer log включён. Как расследовать инцидент?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Остановить брокер, проверить данные топика 'payments' на наличие аномальных consumer offsets"
+        },
+        {
+          "id": "b",
+          "text": "Искать в kafka-authorizer.log записи вида 'Principal = User:rogue-analytics is Denied Operation = Read ... Topic:LITERAL:payments'. Если записи есть — попытки зафиксированы и отклонены. Если записей нет — сервис не пытался. Дополнительно: проверить ALLOW Read записи для авторизованных пользователей на payments."
+        },
+        {
+          "id": "c",
+          "text": "Запустить kafka-consumer-groups.sh --describe для payments consumer groups — увидим если rogue-analytics в group"
+        },
+        {
+          "id": "d",
+          "text": "Проверить network traffic на брокере через tcpdump — перехватить попытки подключения"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "kafka.authorizer.logger записывает КАЖДОЕ авторизационное решение — включая DENIED операции. При allow.everyone.if.no.acl.found=false любая попытка от rogue-analytics без ACL будет DENIED и залогирована: '[timestamp] INFO Principal = User:rogue-analytics is Denied Operation = Read from host = X.X.X.X on resource = Topic:LITERAL:payments'. Это ключевое преимущество audit log: атаки видны даже если они не успешны. Алгоритм расследования: (1) grep kafka-authorizer.log 'rogue-analytics' 'payments' — ищем попытки. (2) grep 'is Denied' 'payments' — все отклонённые попытки доступа к payments за период. (3) Проанализировать host IP — определить источник. Вариант A (остановить брокер) — неприемлемо. Вариант C (consumer-groups) покажет только УСПЕШНОЕ участие в group.",
+      "bloomLevel": "analytical"
+    }
+  ]
+}

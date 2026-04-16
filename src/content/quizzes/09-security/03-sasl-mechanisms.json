@@ -1,0 +1,114 @@
+{
+  "lessonSlug": "09-security/03-sasl-mechanisms",
+  "moduleId": "09-security",
+  "_meta": {
+    "idPrefix": "kafka-m09-03",
+    "description": "Use IDs: kafka-m09-03-q1, q2, q3, q4 for the four questions"
+  },
+  "questions": [
+    {
+      "id": "kafka-m09-03-q1",
+      "type": "multiple-choice",
+      "question": "Какой формат JAAS-конфигурации рекомендуется для production Kafka 4.0 и почему inline предпочтительнее отдельного файла?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Отдельный файл /etc/kafka/jaas.conf, переданный через -Djava.security.auth.login.config. Файл обеспечивает разделение конфигурации и проще версионировать."
+        },
+        {
+          "id": "b",
+          "text": "Inline в server.properties через listener.name.<listener>.<mechanism>.sasl.jaas.config. Один источник конфигурации, проще управлять через Kubernetes ConfigMap, изменения в одном файле, не нужен отдельный файловый монтаж."
+        },
+        {
+          "id": "c",
+          "text": "Environment variable KAFKA_SASL_JAAS_CONFIG — позволяет передать credentials без хранения в файлах"
+        },
+        {
+          "id": "d",
+          "text": "Оба варианта идентичны, выбор произвольный"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Inline JAAS config (listener.name.sasl_ssl.plain.sasl.jaas.config=...) предпочтительнее по нескольким причинам: (1) Единый источник конфигурации: всё в server.properties или в Kubernetes ConfigMap без дополнительного файла. (2) Per-listener гранулярность: разные механизмы для разных listener задаются отдельными ключами — нет риска смешения контекстов. (3) Kubernetes-friendly: один ConfigMap монтируется как server.properties — не нужен отдельный Volume для jaas.conf. (4) Переменные подстановки: можно использовать ${env:ENV_VAR} в inline config для credentials из Secret. Отдельный файл (-Djava.security.auth.login.config) работает, но требует синхронизации двух файлов и дополнительного файлового монтажа в containers.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m09-03-q2",
+      "type": "multiple-choice",
+      "question": "Kafka-кластер использует SASL/PLAIN. Команда безопасности требует: новый сервис 'analytics' должен получить доступ к Kafka не позже 5 минут после создания тикета, без останова других клиентов. Как удовлетворить требование?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Добавить user_analytics=analytics-secret в JAAS config всех брокеров и выполнить rolling restart брокеров (по одному). Доступ доступен после рестарта последнего брокера — ~10-15 минут при 3 брокерах."
+        },
+        {
+          "id": "b",
+          "text": "Мигрировать кластер на SASL/SCRAM: (1) добавить SCRAM к enabled mechanisms, (2) rolling restart брокеров, (3) создать SCRAM credential для analytics через kafka-configs.sh. После этого новые сервисы добавляются мгновенно без рестарта."
+        },
+        {
+          "id": "c",
+          "text": "Создать отдельный PLAIN listener только для analytics с другим JAAS config — изменение одного listener не требует рестарта других"
+        },
+        {
+          "id": "d",
+          "text": "Перезапустить только один брокер с новым JAAS config — клиент переподключится к другому брокеру и не заметит"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "SASL/PLAIN принципиально не поддерживает динамическое добавление пользователей: credentials hardcoded в JAAS config = rolling restart для каждого изменения. При 3 брокерах rolling restart занимает 10-20 минут и нарушает условие '5 минут'. Правильное решение: миграция на SCRAM. После миграции: kafka-configs.sh --alter --add-config 'SCRAM-SHA-256=[iterations=8192,password=analytics-secret]' --entity-type users --entity-name analytics — работает мгновенно без рестарта. Вариант D (рестарт одного брокера) создаёт риск недоступности партиций, leader которых на этом брокере, и не решает фундаментальную проблему — нужно будет рестартовать все остальные брокеры для синхронизации конфига.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m09-03-q3",
+      "type": "multiple-choice",
+      "question": "Архитектор проектирует Kafka-кластер для fintech-стартапа. Требования: (1) клиенты на Kubernetes, (2) используют Keycloak для SSO, (3) сервис-аккаунты должны автоматически получать и обновлять credentials, (4) при увольнении разработчика доступ должен отзываться в течение минут. Какой SASL-механизм оптимален?",
+      "options": [
+        {
+          "id": "a",
+          "text": "SASL/SCRAM-SHA-512 — максимальная безопасность хеширования, динамическое управление через kafka-configs.sh"
+        },
+        {
+          "id": "b",
+          "text": "SASL/PLAIN с Vault — HashiCorp Vault генерирует dynamic secrets для каждого клиента"
+        },
+        {
+          "id": "c",
+          "text": "SASL/OAUTHBEARER с Keycloak — JWT токены получаются через client_credentials flow, Keycloak является IdP, при отзыве client credentials в Keycloak токены не обновляются (TTL истекает), интеграция с Kubernetes через Secrets"
+        },
+        {
+          "id": "d",
+          "text": "SASL/GSSAPI с Kerberos — enterprise-стандарт для финансовых систем"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "SASL/OAUTHBEARER + Keycloak оптимален для данных требований: (1) Kubernetes-native: service accounts получают client_id/client_secret из Kubernetes Secret, Kafka client автоматически обменивает их на JWT через Keycloak token endpoint. (2) SSO интеграция: Keycloak уже используется для SSO — единый identity provider. (3) Автоматическое обновление: Kafka client OAuthBearerLoginCallbackHandler автоматически обновляет токен до истечения TTL — нет ручного вмешательства. (4) Немедленный отзыв: отключить client в Keycloak — новые токены не выдаются, текущие истекают в течение TTL (обычно 5-60 минут). SCRAM не имеет интеграции с Keycloak и не решает SSO требование. GSSAPI требует Kerberos инфраструктуры которой нет. PLAIN с Vault решает dynamic secrets но не SSO.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m09-03-q4",
+      "type": "multiple-choice",
+      "question": "Брокер настроен с SASL/SCRAM. Новый пользователь создан: kafka-configs.sh --alter --add-config 'SCRAM-SHA-256=[...]' --entity-name newuser. Через 30 секунд клиент с newuser/password пытается подключиться и получает SaslAuthenticationException. Что является наиболее вероятной причиной?",
+      "options": [
+        {
+          "id": "a",
+          "text": "SCRAM credentials требуют перезапуска брокера для применения — изменение через kafka-configs.sh не вступает в силу немедленно"
+        },
+        {
+          "id": "b",
+          "text": "Клиент использует sasl.mechanism=PLAIN в конфиге вместо sasl.mechanism=SCRAM-SHA-256. Механизм клиента не совпадает с ожидаемым брокера — аутентификация невозможна."
+        },
+        {
+          "id": "c",
+          "text": "kafka-configs.sh --bootstrap-server указал только один брокер, а клиент подключается к другому брокеру, который ещё не получил обновление"
+        },
+        {
+          "id": "d",
+          "text": "SCRAM-SHA-256 требует 30-секундного propagation delay в KRaft — нужно подождать минуту"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Самая частая ошибка при настройке SCRAM: клиент использует неверный механизм в sasl.mechanism. Брокер настроен на SCRAM-SHA-256, но если клиент отправляет sasl.mechanism=PLAIN (или неверный SCRAM вариант) — брокер не находит matching механизм и выдаёт SaslAuthenticationException с сообщением вида 'PLAIN is not enabled' или механизм rejected. SCRAM credentials в Kafka 4.0 применяются через KRaft metadata log — они реплицируются на все брокеры автоматически через Raft consensus, без перезапуска и с минимальной задержкой (миллисекунды, не секунды). Вариант C (propagation через bootstrap-server) неверен: kafka-configs.sh работает через AdminClient который записывает в metadata log — все брокеры получают обновление автоматически.",
+      "bloomLevel": "applied"
+    }
+  ]
+}

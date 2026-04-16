@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "09-security/04-authorization-acls",
+  "moduleId": "09-security",
+  "_meta": {
+    "idPrefix": "kafka-m09-04",
+    "description": "Use IDs: kafka-m09-04-q1, q2, q3, q4 for the four questions"
+  },
+  "questions": [
+    {
+      "id": "kafka-m09-04-q1",
+      "type": "multiple-choice",
+      "question": "В Kafka 4.0 KRaft-кластере команда пытается установить authorizer.class.name=kafka.security.authorizer.AclAuthorizer. Что произойдёт при запуске брокера?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Брокер запустится, но ACL не будут применяться — класс игнорируется"
+        },
+        {
+          "id": "b",
+          "text": "Брокер не запустится: AclAuthorizer был ZooKeeper-based и удалён в Kafka 4.0. ClassNotFoundException при старте. Правильный класс: org.apache.kafka.metadata.authorizer.StandardAuthorizer."
+        },
+        {
+          "id": "c",
+          "text": "Брокер запустится с предупреждением о deprecated классе, ACL будут работать в compatibility mode"
+        },
+        {
+          "id": "d",
+          "text": "Брокер запустится и переключится на StandardAuthorizer автоматически, выведя WARNING в log"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "AclAuthorizer (kafka.security.authorizer.AclAuthorizer) — это ZooKeeper-era class. Он хранил ACL в ZooKeeper znodes и требовал ZooKeeper. В Kafka 4.0 ZooKeeper полностью удалён (KRaft-only) вместе с классами, зависящими от ZooKeeper. Попытка использовать AclAuthorizer вызывает ClassNotFoundException или NoClassDefFoundError при старте брокера. Правильный класс для Kafka 4.0 KRaft: org.apache.kafka.metadata.authorizer.StandardAuthorizer. Он хранит ACL в __cluster_metadata KRaft log и реплицируется через Raft consensus. Это критическое изменение при миграции с Kafka 3.x на 4.0: нужно обновить authorizer.class.name.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m09-04-q2",
+      "type": "multiple-choice",
+      "question": "Consumer 'inventory-reader' получает AuthorizationException при попытке consume из топика 'inventory'. ACL на кластере: (1) Topic:Read на 'inventory' для User:inventory-reader (LITERAL). (2) Больше ACL нет. allow.everyone.if.no.acl.found=false. Что нужно добавить для корректной работы?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Topic:Write на 'inventory' — consumer нужны права записи для коммита offset"
+        },
+        {
+          "id": "b",
+          "text": "Group:Read на consumer group 'inventory-reader-group' + Topic:Describe на 'inventory'. Consumer не может join group без Group:Read и не может получить metadata без Topic:Describe."
+        },
+        {
+          "id": "c",
+          "text": "Cluster:Read для inventory-reader — глобальное право чтения"
+        },
+        {
+          "id": "d",
+          "text": "Topic:Read уже есть — ошибка в другом, возможно неверный bootstrap-server"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "Kafka consumer требует минимум три ACL: (1) Topic:Read — разрешает FetchRequest (читать данные). ЕСТЬ. (2) Topic:Describe — разрешает MetadataRequest (узнать partition layout, leader). БЕЗ Describe consumer не знает к какому брокеру обращаться — TopicAuthorizationException при metadata refresh. НЕТ. (3) Group:Read — разрешает JoinGroup, SyncGroup, OffsetCommit, OffsetFetch. БЕЗ Group:Read consumer не может присоединиться к consumer group и commit offsets. НЕТ. Оба отсутствующих ACL нужно добавить. Topic:Write для consumer бессмысленен — consumer не produce. Cluster:Read не существует как самостоятельная операция.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m09-04-q3",
+      "type": "multiple-choice",
+      "question": "Payments platform имеет 5 сервисов, каждый пишет в свои топики: payments-gateway пишет в payments.gateway.*, payments-processor в payments.processor.*, и т.д. Текущий подход: LITERAL ACL для каждого топика. При добавлении нового топика нужно вручную добавлять ACL. Предложите масштабируемую стратегию.",
+      "options": [
+        {
+          "id": "a",
+          "text": "Дать payments-gateway Write на ALL topics (*)— проще чем поддерживать отдельные ACL"
+        },
+        {
+          "id": "b",
+          "text": "Использовать PREFIXED ACL: User:payments-gateway получает Write + Describe на топик 'payments.gateway.' с resource-pattern-type=prefixed. Любой новый топик payments.gateway.* автоматически покрывается без добавления ACL."
+        },
+        {
+          "id": "c",
+          "text": "Создать super.users для каждого payments сервиса — они bypass all ACL checks"
+        },
+        {
+          "id": "d",
+          "text": "Использовать wildcard LITERAL ACL: --topic '*' — покрывает все топики"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "PREFIXED ACL — правильное решение для service namespace ownership. Один PREFIXED ACL на 'payments.gateway.' покрывает payments.gateway.transactions, payments.gateway.events, payments.gateway.deadletter и любые будущие топики без изменения ACL. kafka-acls.sh --add --allow-principal User:payments-gateway --operation Write --operation Describe --topic 'payments.gateway.' --resource-pattern-type prefixed. Аналогично для каждого сервиса свой prefix. Преимущества: (1) Zero-touch добавление новых топиков — ACL уже есть. (2) Чёткие ownership границы — payments-gateway не может писать в payments.processor.*. (3) Аудит прост: один ACL = один сервис. Вариант A (Write на ALL) нарушает принцип минимальных привилегий — payments-gateway мог бы случайно перезаписать данные других сервисов. Вариант C (super.users) полностью обходит авторизацию.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m09-04-q4",
+      "type": "true-false",
+      "question": "В Kafka ACL DENY-правило имеет приоритет над ALLOW-правилом: если для principal существуют и ALLOW Write, и DENY Write на один и тот же топик, операция будет запрещена.",
+      "correctAnswer": "true",
+      "explanation": "Истина. В Kafka StandardAuthorizer DENY всегда побеждает ALLOW — это принцип explicit denial. Если для User:compromised-app существуют ACL: ALLOW Write на topic 'orders' AND DENY Write на topic 'orders' (или DENY All на topic '*') — операция будет DENIED. Это позволяет использовать DENY ACL для инцидент-реагирования: kafka-acls.sh --add --deny-principal User:compromised-app --operation All --topic '*' --resource-pattern-type prefixed мгновенно блокирует все операции скомпрометированного аккаунта, даже если у него есть множество ALLOW ACL. Это быстрее и безопаснее, чем удалять все ALLOW ACL по одному.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}
