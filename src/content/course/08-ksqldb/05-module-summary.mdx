@@ -151,6 +151,34 @@ docker run -d \
 
 ---
 
+---
+
+## Будущее ksqlDB: индустриальный сдвиг к Apache Flink
+
+Любой, кто строит новый streaming-проект в 2026 году, обязан учитывать один факт: **Confluent в 2024–2025 годах фактически свернул активную разработку ksqlDB и сделал ставку на Apache Flink**. Это не формальный EOL — ksqlDB всё ещё поставляется в Confluent Platform 8.x, патчи безопасности выпускаются — но это стратегический сдвиг, который меняет рекомендованный путь для новых пайплайнов.
+
+**Хронология сдвига.** В январе 2023 Confluent купил Immerok — стартап, основанный изначальной командой коммитеров Apache Flink. Через несколько месяцев был запущен **Confluent Cloud for Apache Flink** как first-class managed-сервис: глубокая интеграция Kafka topic = Flink table, Schema Registry как catalog, единый governance-слой. На Kafka Summit и Current 2024–2025 продуктовый roadmap сосредоточен вокруг Flink SQL Workspaces, Tableflow (Iceberg-output), AI-агентов поверх Flink. ksqlDB на тех же мероприятиях упоминается всё реже.
+
+**Что это значит технически.** Apache Flink (с релизом Flink 2.0 в 2025 году) утвердился как индустриальный стандарт streaming SQL. У него более полный SQL-диалект (SQL:2016 features, true sliding windows, MATCH_RECOGNIZE для CEP), значительно более широкий connector-ecosystem (поверх Kafka — также Kinesis, Pulsar, Iceberg, Delta Lake, Hudi, JDBC CDC), горизонтальное масштабирование лучше чем у ksqlDB, и активное community Apache Software Foundation. Open-source репозиторий ksqlDB наблюдает резкое падение коммитов с 2024 года.
+
+<Callout type="warning">
+Это не значит, что ksqlDB сегодня сломан или его нельзя использовать. Существующие production-пайплайны на ksqlDB продолжают работать. Но для **новых** проектов рекомендация индустрии однозначна: смотрите в сторону Flink SQL. Если ваша команда выбирает между Flink и ksqlDB для проекта 2026 года — Flink почти всегда правильный выбор.
+</Callout>
+
+**Migration considerations для существующих ksqlDB-пайплайнов.** Если у вас уже работает ksqlDB и встаёт вопрос миграции:
+
+- **CSAS/CTAS-запросы** в ksqlDB концептуально транслируются в `CREATE TABLE AS SELECT` Flink SQL, но синтаксис отличается: `EMIT CHANGES` в ksqlDB → continuous query семантика в Flink (по умолчанию). `WINDOW TUMBLING (SIZE 1 HOUR)` → `TUMBLE(TABLE, DESCRIPTOR(rowtime), INTERVAL '1' HOUR)`.
+- **State stores.** ksqlDB использует RocksDB через Kafka Streams. Flink использует свой RocksDB-state-backend. При миграции state не переносится автоматически — нужно либо backfill из source-топиков, либо параллельный запуск с переключением.
+- **UDF / UDAF / UDTF.** Java UDF из ksqlDB не запускаются в Flink без переписывания: разные API (`@Udf` аннотация в ksqlDB → `ScalarFunction`/`TableFunction`/`AggregateFunction` в Flink Table API).
+- **Pull queries** (точечные lookup'ы по materialized table) в Flink заменяются на **Lookup joins** или внешний key-value store, в который Flink пишет результат агрегации.
+- **Incremental migration**. Реалистичный путь: запускайте Flink параллельно с ksqlDB на тех же source-топиках, переводите downstream-консьюмеров на Flink-output, постепенно выводите ksqlDB-запросы из эксплуатации. Полная одномоментная миграция почти всегда перебор.
+
+**Когда ksqlDB всё ещё имеет смысл.** Маленькая команда, уже сидящая на Confluent Platform, с простыми SQL-трансформациями и нежеланием поднимать Flink-кластер. Прототипы и spike-проекты — `kafka-streams-app + ksqlDB` действительно дают скорость от идеи к рабочему пайплайну. Существующие production-пайплайны, которые работают и не требуют новых фич — мигрировать просто ради миграции не нужно.
+
+**Где смотреть дальше.** Confluent Cloud for Apache Flink documentation (`docs.confluent.io/cloud/current/flink`), Apache Flink SQL reference, Flink Forward 2025 talks по миграции с ksqlDB, и опубликованные case-studies компаний Riskified и Booking — они описывали свои миграции в публичных блогах.
+
+---
+
 ## Что дальше
 
 **Модуль 09: Security** — TLS, SASL, ACL, RBAC. Защита Kafka-кластера, Schema Registry, Kafka Connect и ksqlDB. Аутентификация продюсеров и консьюмеров. Authorization через ACL и Confluent RBAC.
