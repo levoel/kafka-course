@@ -458,6 +458,13 @@ Share groups не заменяют consumer groups, а дополняют их. 
 
 Share groups (KIP-932) — крупнейшее изменение consumer-модели Kafka за десятилетие. Broker берёт на себя отслеживание delivery state каждой записи в скользящем окне; партиции назначаются нескольким consumer'ам кооперативно; per-record acknowledgment даёт ACCEPT/RELEASE/REJECT с встроенной poison message protection. Это закрывает целый класс queue use-case'ов — task queues, work distribution, retry с DLQ — для которых раньше приходилось ставить рядом RabbitMQ. Цена — отказ от ordering, дополнительная нагрузка на broker и независимость offset-пространства от обычных consumer groups. В Kafka 4.2 (февраль 2026) фича объявлена production-ready.
 
+<CrossCourseRef
+  courseId="spark-course"
+  lessonSlug="09-structured-streaming/06b-transform-with-state"
+  label="Spark transformWithState: альтернативный stateful pattern"
+  preview="Как Spark Structured Streaming держит per-key state с TTL и timers — параллельное решение для другого класса задач (windowed aggregations, sessions) поверх Kafka source."
+/>
+
 <KnowledgeCheck
   question="Топик `payments-events` имеет 4 партиции, по нему читает share group из 16 consumer'ов. Один из consumer'ов вызывает release() на запись из-за timeout downstream-сервиса. Что произойдёт дальше с этой записью?"
   answer="Запись вернётся из состояния Acquired в состояние Available, broker инкрементирует её delivery_count на единицу. Запись снова станет доступной для доставки — её может получить ЛЮБОЙ из 16 consumer'ов share group (включая того же, который её release'нул, но с большой вероятностью — другой, так как координатор балансирует распределение). Если delivery_count в итоге достигнет group.share.delivery.attempt.limit (по умолчанию 5), broker автоматически переведёт запись в состояние Archived и больше не будет её доставлять — это встроенная защита от poison message, не требующая ручной DLQ-логики."

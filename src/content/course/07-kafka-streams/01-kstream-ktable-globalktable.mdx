@@ -245,3 +245,17 @@ GlobalKTable загружает ВСЁ содержимое топика в па
   question="У вас топик с обновлениями курсов валют, где ключ — пара валют (USD/EUR). Вы хотите обогатить поток транзакций текущим курсом. Поток транзакций имеет 12 партиций. Топик с курсами валют содержит около 500 уникальных пар и обновляется каждые 10 секунд. Какую абстракцию использовать для курсов валют и почему?"
   answer="KTable или GlobalKTable — оба подходят, но с разными компромиссами. GlobalKTable предпочтительнее здесь: 500 пар валют — это крошечный набор данных (несколько килобайт), поэтому загрузка полной копии на каждый инстанс не создаёт проблем с памятью. GlobalKTable устраняет требование co-partitioning: топик с курсами может иметь любое число партиций независимо от 12 партиций топика транзакций. Если бы данных были миллионы записей, правильным выбором был бы KTable с co-partitioning (обеспечить одинаковое число партиций для обоих топиков)."
 />
+
+<CrossCourseRef
+  courseId="spark-course"
+  lessonSlug="09-structured-streaming/01-streaming-fundamentals"
+  label="Spark Structured Streaming: основы"
+  preview="Альтернативный stream-processing движок поверх того же Kafka source — micro-batch модель vs Kafka Streams record-at-a-time. Полезно сравнить trade-offs."
+/>
+
+<CrossCourseRef
+  courseId="spark-course"
+  lessonSlug="09-structured-streaming/06b-transform-with-state"
+  label="Spark transformWithState: stateful processing"
+  preview="Spark 4.0 Arbitrary State API v2 — параллель с Kafka Streams Processor API. Сравнение моделей state store, TTL и timers."
+/>

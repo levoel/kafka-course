@@ -277,3 +277,10 @@ event_producer = KafkaProducer(
   question="Продюсер настроен с linger.ms=100 и batch.size=65536 (64 KB). В течение 30 мс в батч поступило 70 KB данных (больше batch.size). Когда батч будет отправлен?"
   answer="Батч отправится НЕМЕДЛЕННО при достижении batch.size=65536 байт, не дожидаясь истечения linger.ms=100 мс. Условия отправки работают по принципу ИЛИ: выполнение любого из них (batch.size ИЛИ linger.ms истёк) триггерит отправку. Так как 65536 байт был достигнут на ~27-й мс (65536 / 70000 * 30 мс), батч уйдёт немедленно. Параметр linger.ms — это верхняя граница ожидания для НЕПОЛНЫХ батчей, но не задержка перед отправкой полных батчей."
 />
+
+<CrossCourseRef
+  courseId="python-course"
+  lessonSlug="09-file-io-formats/05-compression-formats"
+  label="Compression: gzip, zstd, snappy, lz4"
+  preview="Как устроены алгоритмы сжатия в Python (gzip/lzma/zstandard) — параллель к compression.type=zstd в Kafka producer."
+/>

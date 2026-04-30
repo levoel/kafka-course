@@ -309,3 +309,17 @@ Sink connector использует стандартный Kafka consumer под
   question="Sink connector записывает данные в PostgreSQL с insert.mode=insert. Worker crashes на полпути через пакет из 500 записей — 300 записей уже записано в базу, offset не закоммичен. После перезапуска задача снова получит тот же пакет из 500 записей. Что произойдёт с 300 уже записанными строками?"
   answer="При insert.mode=insert произойдёт дублирование: 300 строк будут вставлены повторно. Если у таблицы есть UNIQUE или PRIMARY KEY constraint — 300 INSERT завершатся ошибкой constraint violation, и весь пакет может упасть с ошибкой (поведение зависит от конфигурации error.tolerance). Решение: использовать insert.mode=upsert с pk.mode=record_key. Upsert через INSERT ... ON CONFLICT DO UPDATE идемпотентен: повторная запись той же строки обновляет её, а не создаёт дубликат. Это позволяет безопасно обрабатывать пакет повторно при at-least-once семантике."
 />
+
+<CrossCourseRef
+  courseId="clickhouse-course"
+  lessonSlug="11-ingestion-patterns/06-materialized-postgresql-mysql"
+  label="ClickHouse: MaterializedPostgreSQL/MySQL"
+  preview="Альтернативный CDC-путь без Kafka — встроенный в ClickHouse engine читает Postgres logical replication / MySQL binlog. Сравните с Kafka Connect Sink для Postgres."
+/>
+
+<CrossCourseRef
+  courseId="clickhouse-course"
+  lessonSlug="11-ingestion-patterns/11-clickpipes"
+  label="ClickPipes: managed CDC в ClickHouse Cloud"
+  preview="ClickPipes Postgres CDC GA (PeerDB) — managed-альтернатива самописному Kafka Connect → ClickHouse pipeline'у."
+/>

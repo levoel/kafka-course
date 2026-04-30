@@ -188,6 +188,13 @@ decoded = AvroDeserializer().decode(encoded)
 
 <CrossCourseRef courseId="debezium" lessonSlug="05-module-5/07-schema-registry-avro" title="Schema Registry и Avro в CDC-контексте" />
 
+<CrossCourseRef
+  courseId="storage-formats"
+  lessonSlug="04-avro/02-schema-type-system"
+  label="Avro: type system на уровне формата"
+  preview="Primitive и complex типы Avro, default values, union semantics — фундамент, на котором стоит Confluent Schema Registry."
+/>
+
 <KnowledgeCheck
   question="Сколько байт составляет overhead Confluent Wire Format на каждое сообщение, и что содержат эти байты?"
   answer="Ровно 5 байт: 1 байт magic byte (всегда 0x00, идентифицирует SR-encoded сообщение) + 4 байта schema ID в big-endian формате (int32). Этот минимальный overhead позволяет десериализатору найти нужную схему в Schema Registry по ID — без необходимости включать полное описание схемы в каждое сообщение."

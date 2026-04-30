@@ -383,3 +383,17 @@ Upcasting применяется при чтении, не изменяя хра
   question="Агрегат 'Account' имеет 200,000 событий. Event replay занимает 45 секунд при каждом запросе. Какова правильная архитектурная реакция на эту проблему, и какие два топика Kafka будут задействованы в решении?"
   answer="Правильная реакция — введение снапшотов. Решение: (1) Топик events (cleanup.policy=delete, log.retention.ms=-1) — полный event log. (2) Топик snapshots (cleanup.policy=compact) — хранит только последний снапшот для каждого aggregateId. При загрузке агрегата: читаем снапшот (state при version=N) из snapshots, затем читаем только события после version N из events. Вместо 200,000 событий — только события после последнего снапшота. Снапшот создаётся каждые 500-1000 событий. Итог: replay занимает миллисекунды, а не секунды."
 />
+
+<CrossCourseRef
+  courseId="sd-data-engineer"
+  lessonSlug="04-stream-processing/01-kafka-architecture"
+  label="System Design: Kafka в архитектуре data-platform"
+  preview="Как Kafka вписывается в общий стрим-стек на уровне system design — рядом с Flink, Iceberg и downstream-сервисами."
+/>
+
+<CrossCourseRef
+  courseId="sd-data-engineer"
+  lessonSlug="02-pipeline-patterns/02-lambda-kappa-medallion"
+  label="Lambda/Kappa/Medallion patterns"
+  preview="Где Event Sourcing-логика встаёт в Kappa-архитектуру и как медальонная схема (bronze → silver → gold) сочетается с replayable event log."
+/>

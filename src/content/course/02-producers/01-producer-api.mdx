@@ -253,3 +253,10 @@ finally:
   question="Программист вызывает producer.send() в цикле для 10 000 записей, но НЕ вызывает flush() и close(). Что произойдёт с записями, которые остались в буфере Record Accumulator?"
   answer="Записи в буфере будут потеряны. send() помещает записи в внутренний буфер Record Accumulator — они не отправляются мгновенно. Sender Thread отправляет батчи асинхронно. Без flush() есть гарантия, что какое-то количество записей ещё не ушло на брокер в момент завершения программы. Без close() ресурсы не освобождаются и буфер не очищается. Правильный паттерн: flush() для ожидания отправки всех буферизованных сообщений, close() для освобождения ресурсов. В production всегда используют try/finally для вызова close()."
 />
+
+<CrossCourseRef
+  courseId="python-course"
+  lessonSlug="11-logging-monitoring/02-structured-logging"
+  label="Structured logging в Python"
+  preview="Как Python-сервис логирует JSON-события — это естественный источник для Kafka producer'а в pipeline'е structured logs → Kafka → ClickHouse/Flink."
+/>

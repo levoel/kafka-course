@@ -222,3 +222,10 @@ LinkedIn, создавшая Kafka, описывает её роль так: Kaf
   question="В чём главное отличие Kafka от традиционных message broker (RabbitMQ, ActiveMQ)?"
   answer="Kafka хранит сообщения как неизменяемый append-only commit log. Потребители читают сообщения, но не удаляют их — каждая группа потребителей ведёт свой offset. Это позволяет replay, несколько независимых consumer groups, и длительное хранение данных. Традиционные брокеры удаляют сообщение после подтверждения потребителем."
 />
+
+<CrossCourseRef
+  courseId="sd-data-engineer"
+  lessonSlug="04-stream-processing/01-kafka-architecture"
+  label="System Design: Kafka в стрим-архитектуре"
+  preview="Где Kafka стоит в общей архитектуре real-time data-platform — рядом с Flink, ClickHouse, Iceberg и downstream-потребителями."
+/>

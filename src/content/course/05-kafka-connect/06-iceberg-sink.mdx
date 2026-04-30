@@ -427,3 +427,10 @@ CALL system.remove_orphan_files(table => 'analytics.user_events');
   question="Команда переходит с PostgreSQL на streaming-lakehouse: события из БД должны попадать в Iceberg-таблицу с поддержкой UPDATE и DELETE (не только INSERT), потому что строки в источнике обновляются. Какие два настройки Iceberg Sink Connector обязательно нужны и какой формат Iceberg-таблицы это создаёт?"
   answer="Нужны iceberg.tables.cdc-field=op (или другое поле) и iceberg.tables.upsert-mode-enabled=true. cdc-field указывает поле сообщения, содержащее тип операции (insert / update / delete) — обычно из Debezium envelope. upsert-mode-enabled включает merge-on-read семантику: коннектор для UPDATE генерирует equality delete (по primary key) + новый data file, для DELETE — только equality delete. Таблица становится merge-on-read форматом: data files (новые или обновлённые строки) + delete files (маркеры удалений). Reader (Spark/Trino) при чтении применяет deletes к data files на лету. Это медленнее append-only, но позволяет CDC pattern. Production-tip: запускайте rewrite_data_files регулярно с опцией delete-file-threshold — это переписывает файлы и применяет deletes физически, восстанавливая read performance. Без compaction merge-on-read деградирует быстро при большом числе апдейтов."
 />
+
+<CrossCourseRef
+  courseId="storage-formats"
+  lessonSlug="12-iceberg/01-catalog-architecture-metadata"
+  label="Iceberg catalog: REST, Polaris, Lakekeeper"
+  preview="Как устроены REST-каталоги Iceberg и почему они стали production-default'ом для streaming-lakehouse в 2025–2026."
+/>

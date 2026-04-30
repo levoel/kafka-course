@@ -177,3 +177,10 @@ GET /config
   question="Команда хочет зарегистрировать новую версию схемы, которая добавляет обязательное поле без значения по умолчанию. При каком режиме совместимости Schema Registry примет эту регистрацию?"
   answer="Только при режиме NONE. Все остальные режимы (BACKWARD, FORWARD, FULL и их TRANSITIVE-варианты) отклоняют добавление обязательного поля без default: BACKWARD — потому что новый reader не может прочитать старые данные без этого поля; FORWARD — потому что старый reader не знает как обработать обязательное поле, которого нет в его схеме; FULL — нарушает оба условия. NONE единственный режим без проверок."
 />
+
+<CrossCourseRef
+  courseId="storage-formats"
+  lessonSlug="04-avro/04-schema-resolution"
+  label="Avro schema resolution: writer's vs reader's schema"
+  preview="Как Avro формально определяет совместимость на уровне типов — alias, default values, union promotion. Это математика, лежащая под BACKWARD/FORWARD/FULL."
+/>
