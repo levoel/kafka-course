@@ -23,6 +23,13 @@
     { "id": "13-capstone", "title": "Capstone Project" }
   ],
   "tags": ["kafka", "streaming", "distributed-systems", "data-engineering", "kraft"],
+  "prerequisites": {
+    "courses": [
+      {"slug": "python-course", "level": "required"},
+      {"slug": "storage-formats", "level": "recommended"}
+    ],
+    "external": []
+  },
   "estimatedHours": 40,
   "pricing": {
     "type": "paid",
