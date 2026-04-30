@@ -1,0 +1,358 @@
+---
+title: "Streaming Lakehouse паттерн"
+description: "Унификация Kafka log (transient) и Lakehouse (permanent) через Iceberg/Paimon: Tableflow, Iceberg Sink Connector, Debezium server. Когда применять, anti-patterns, реальные архитектуры Netflix и Pinterest."
+order: 6
+difficulty: "advanced"
+estimatedTime: 35
+topics: ["Streaming Lakehouse", "Iceberg", "Paimon", "Tableflow", "Iceberg Sink Connector", "Stream-Table Duality", "Compaction"]
+free: false
+---
+
+# Streaming Lakehouse паттерн
+
+До 2024 года data-инфраструктура крупных компаний жила в двух мирах. Один мир — **Kafka log**: мутабельный stream событий, retention 7 дней, миллионы сообщений в секунду, потребители — операционные сервисы. Другой мир — **Lakehouse** (Iceberg / Delta / Hudi): неизменяемые таблицы на S3 / GCS, retention годы, terabytes данных, потребители — Spark, Trino, DuckDB, ClickHouse. Между этими мирами стоял **Kafka Connect ETL**: батч-загрузка раз в час, дублирование данных, lag 30-60 минут, отдельные команды на эксплуатацию.
+
+Streaming Lakehouse — это паттерн, который **сливает оба мира в одну таблицу**. Kafka-топик и Iceberg-таблица становятся двумя представлениями одного и того же данных. Producer пишет в Kafka, через минуты те же сообщения уже в Iceberg, доступны для SQL-запросов из Trino. Никакого дополнительного pipeline. Никакого дублирования.
+
+В этом уроке: что такое stream-table duality, какие есть три способа реализации (Iceberg Sink Connector, Tableflow, Debezium Server), почему Apache Paimon это другая философия, и какие production-ловушки убивают наивные внедрения.
+
+---
+
+## Контекст: Kafka log vs Lakehouse
+
+Чтобы понять паттерн, начнём с фундаментального различия двух подсистем.
+
+| Свойство | Kafka log | Lakehouse (Iceberg / Delta) |
+|----------|-----------|----------------------------|
+| **Назначение** | Transient transport: события в реальном времени | Permanent storage: историческая аналитика |
+| **Retention** | Часы / дни (обычно 7 дней) | Годы / навсегда |
+| **Хранилище** | SSD на брокерах (дорого) | Object storage S3 / GCS (дёшево) |
+| **Format** | Avro / Protobuf / JSON в сегментах `.log` | Parquet / ORC в snapshot-based таблицах |
+| **Query** | Sequential read с offset | Random access, predicate pushdown, time-travel |
+| **Throughput** | Миллионы сообщений / сек / partition | Зависит от числа файлов и compaction |
+| **Latency** | Миллисекунды | Минуты (commit interval) — часы (batch ETL) |
+| **Consumers** | Сервисы (микросервисы, stream processing) | Аналитики (Spark, Trino, DuckDB, BI) |
+
+Классический ETL-подход: пишем в Kafka, через 30-60 минут JDBC/S3 Sink Connector батчем сливает в Lakehouse. **Проблемы:** дублирование данных (одни события живут в двух местах), drift схем (Kafka schema vs Iceberg schema), часовой lag для аналитики, отдельный pipeline для эксплуатации. Streaming Lakehouse решает это через **унифицированную абстракцию**.
+
+---
+
+## Stream-Table Duality: фундамент паттерна
+
+Stream-Table Duality — концепция, известная ещё со времён Kafka Streams: stream может быть представлен как table, и наоборот. Изменения, применяемые к таблице, материализуются как stream. Stream и table — две стороны одной монеты.
+
+Iceberg добавляет к этой дуальности новый уровень: **одни и те же данные могут одновременно быть таблицей и stream-ом**. Через snapshot references один потребитель читает таблицу как unbounded stream (новые snapshot-ы как новые события), второй — как point-in-time bounded таблицу, третий — как ветвь от общего предка.
+
+```
+Producer → Kafka topic "orders.created"
+              │
+              │  (zero-copy materialization)
+              ▼
+          Iceberg table "warehouse.orders_created"
+              │
+              ├─ Trino: SELECT * WHERE created_at > '2026-04-01'
+              ├─ Spark structured streaming: readStream...
+              ├─ DuckDB: SELECT count(*) FROM orders_created
+              └─ Operational consumer: продолжает читать топик
+```
+
+Ключевая идея: **топик и таблица — это один источник правды**. Не копия данных, а то же данное в двух представлениях.
+
+---
+
+## Архитектура: три способа реализации
+
+Реализовать Streaming Lakehouse можно тремя путями. Выбор зависит от того, **где живут ваши данные** (Confluent Cloud / самохост) и **какую гарантию** вы хотите получить.
+
+<DiagramContainer title="Streaming Lakehouse: три способа материализации Kafka-топиков в Iceberg/Delta" color="emerald">
+  <div className="space-y-4 p-2">
+    <div className="text-sm text-slate-400 text-center mb-2">Producers пишут в Kafka. Один из трёх механизмов материализует топики в Iceberg/Delta. Аналитики читают через Trino/Spark/DuckDB.</div>
+    <FlowRow>
+      <FlowNode
+        variant="source"
+        size="sm"
+        tooltip="Producers — операционные сервисы (order-service, payment-service). Пишут события в Kafka с обычной producer API. НЕ ЗНАЮТ о существовании Lakehouse-материализации — это полностью прозрачно."
+      >
+        Producers
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="pipeline"
+        size="sm"
+        tooltip="Kafka cluster. Topics: orders.created, payments.charged. Schema Registry с Avro/Protobuf. Retention 7 дней — Lakehouse даёт permanent storage, не нужно держать долго в Kafka."
+      >
+        Kafka
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowColumn>
+        <DataBox
+          label="Iceberg Sink Connector"
+          tooltip="Self-managed путь. Apache Iceberg Sink Connector работает в Kafka Connect cluster. Buffer-ит сообщения в памяти, commit-ит в Iceberg каждые N секунд. Поддерживает: exactly-once, schema evolution из Schema Registry, multi-table fan-out (одна тема → несколько таблиц), DebeziumTransform SMT для CDC. Работает с любым REST-каталогом: Polaris, Lakekeeper, Nessie."
+        >
+          самохост Connect
+        </DataBox>
+        <DataBox
+          label="Confluent Tableflow"
+          tooltip="Managed путь в Confluent Cloud. Один клик — топик становится Iceberg/Delta таблицей. Confluent сам управляет materialization, schema evolution, snapshot publishing в catalog (AWS Glue, Polaris, Snowflake Horizon), table maintenance (compaction, snapshot expiry). Roadmap: bidirectional — Iceberg table → Kafka topic."
+        >
+          managed
+        </DataBox>
+        <DataBox
+          label="Debezium Server / Iceberg Sink"
+          tooltip="CDC-first путь. Debezium читает WAL базы данных, отправляет change events напрямую в Iceberg (минуя Kafka в самом простом сценарии) или через Kafka + Iceberg Sink Connector. Полезно для outbox-паттерна (урок 03): outbox-таблица → Debezium → Iceberg-таблица events."
+        >
+          CDC pattern
+        </DataBox>
+      </FlowColumn>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="catalog"
+        size="sm"
+        tooltip="Iceberg / Delta tables. Storage: S3 / GCS / ADLS. Format: Parquet файлы + JSON manifest. Catalog: Apache Polaris / Lakekeeper / Unity / Nessie / AWS Glue. Snapshot-based: каждый commit создаёт новый immutable snapshot — time travel из коробки."
+      >
+        Iceberg / Delta
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowColumn>
+        <DataBox
+          label="Spark"
+          tooltip="Spark structured streaming читает таблицу как unbounded stream. Batch-jobs читают как обычную таблицу. ETL и ML pipelines."
+        >
+          ETL / ML
+        </DataBox>
+        <DataBox
+          label="Trino / Presto"
+          tooltip="Trino — основной SQL-engine для ad-hoc аналитики на Iceberg. Predicate pushdown, partition pruning, time-travel queries: SELECT ... FOR VERSION AS OF snapshot_id."
+        >
+          ad-hoc SQL
+        </DataBox>
+        <DataBox
+          label="DuckDB / ClickHouse"
+          tooltip="DuckDB — local analytics без отдельной инфраструктуры. ClickHouse — Iceberg engine появился в 24.x: внешние таблицы, federated queries. Аналитика прямо на S3."
+        >
+          local / OLAP
+        </DataBox>
+      </FlowColumn>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+### Способ 1: Iceberg Sink Connector
+
+Apache Iceberg Sink Connector (Apache 2.0, codebase в `apache/iceberg`) — community-maintained sink для Kafka Connect. Работает в любом self-managed Kafka Connect кластере.
+
+```properties
+connector.class=org.apache.iceberg.connect.IcebergSinkConnector
+topics=orders.created,orders.cancelled,payments.charged
+iceberg.catalog=rest
+iceberg.catalog.uri=https://polaris.example.com/api/catalog
+iceberg.tables.dynamic-enabled=true
+iceberg.tables.route-field=topic
+iceberg.tables.auto-create-enabled=true
+iceberg.tables.evolve-schema-enabled=true
+iceberg.control.commit.interval-ms=300000
+```
+
+**Гарантии:** exactly-once через двухфазный commit (Kafka offsets + Iceberg snapshot — одна транзакция). **Schema evolution:** автоматический — добавление колонок из Avro-схемы. **Multi-table fan-out:** одна тема → несколько Iceberg-таблиц по полю в payload.
+
+### Способ 2: Confluent Tableflow
+
+Tableflow — managed-функция Confluent Cloud (GA в 2025). В одном клике любой топик объявляется Iceberg или Delta таблицей. Никакого Kafka Connect — Confluent делает всё под капотом.
+
+**Что Tableflow делает автоматически:**
+
+1. **Schematization:** конвертация Avro/Protobuf в Iceberg schema.
+2. **Type conversions:** Avro `logicalType: timestamp-micros` → Iceberg `timestamp`.
+3. **Schema evolution:** добавление новых колонок из Schema Registry.
+4. **CDC stream materialization:** для топиков с Debezium events применяется upsert семантика, поддерживается merge-on-read.
+5. **Catalog publishing:** регистрация таблицы в AWS Glue, Apache Polaris, Snowflake Horizon, Unity Catalog.
+6. **Table maintenance:** периодическая compaction, snapshot expiry, orphan files cleanup.
+
+Roadmap (2026): **bidirectional** — Iceberg-таблица как источник для Kafka-топика. Изменения в таблице (например, dbt-модель) материализуются обратно в стрим.
+
+### Способ 3: Debezium Server / Iceberg Sink (CDC-first)
+
+Debezium Server — standalone-процесс Debezium без Kafka Connect. Читает WAL базы данных и пишет change events напрямую в указанный sink (включая Iceberg). Полезно когда:
+
+- Источник — реляционная БД (Postgres, MySQL).
+- Нужен outbox-паттерн с Lakehouse как destination для аналитики.
+- Не хочется содержать отдельный Kafka Connect кластер.
+
+```yaml
+debezium.sink.type=iceberg
+debezium.sink.iceberg.catalog-name=rest
+debezium.sink.iceberg.warehouse=s3://lakehouse/warehouse
+debezium.sink.iceberg.table-namespace=cdc_events
+debezium.source.connector.class=io.debezium.connector.postgresql.PostgresConnector
+```
+
+В каноническом сценарии **Debezium Server + Iceberg + REST catalog** даёт полный CDC pipeline без Kafka в роли промежуточного storage.
+
+---
+
+## Apache Paimon vs Iceberg streaming write
+
+Apache Paimon (выпущенный из Alibaba как Flink Table Store, перешёл в Apache top-level в 2024) — **streaming-first** табличный формат. Iceberg V3 (2026) добавил streaming-write capabilities, но архитектурная философия принципиально иная.
+
+| Свойство | Apache Paimon | Apache Iceberg V3 |
+|----------|---------------|-------------------|
+| **Origin** | Flink-native, LSM-tree | Batch-first, добавил streaming в V3 |
+| **Storage layout** | LSM-tree (memtable + sorted runs) | Snapshot-based с manifest files |
+| **Streaming write latency** | 1-5 минут (theoretical: секунды) | ≥ 1 час recommended (snapshot commit overhead) |
+| **Update / upsert** | Native через primary key + LSM merge | Merge-on-read (Iceberg V2) или copy-on-write |
+| **Compaction** | Continuous (background, triggered by Flink) | Manual / scheduled job |
+| **Engine support** | Flink (нативный), Spark, Trino | Spark, Flink, Trino, Presto, DuckDB, ClickHouse |
+| **Use case** | Real-time CDC dashboards, IoT, минута-latency аналитика | Большинство analytical workloads, time-travel, schema evolution |
+
+**Когда Paimon:**
+
+- Источник — Flink job с CDC (например, MySQL → Paimon через Flink CDC connector).
+- Требуется sub-minute latency для аналитики.
+- Высокая частота upserts (primary key обновляется тысячи раз / сек).
+
+**Когда Iceberg:**
+
+- Multi-engine аналитика (Spark + Trino + DuckDB + ClickHouse одновременно).
+- Schema evolution и time-travel — главные требования.
+- Streaming-write — вторичный сценарий, latency несколько минут приемлема.
+
+В production реальных компаний нередко **оба формата живут параллельно**: Paimon для real-time dashboards, Iceberg для исторической аналитики.
+
+---
+
+## Decision Tree: Streaming Lakehouse vs классический Kafka Connect ETL
+
+<DiagramContainer title="Когда применять Streaming Lakehouse vs батч-ETL" color="amber">
+  <div className="space-y-4 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="source"
+        size="sm"
+        tooltip="Стартовая точка — есть Kafka топик, нужно сделать данные доступными для аналитики (SQL queries, BI dashboards)."
+      >
+        Kafka topic → нужна аналитика
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowColumn>
+        <DataBox
+          label="Latency требование?"
+          tooltip="Главный вопрос — сколько времени бизнес готов ждать данных. < 5 минут → streaming. < 1 час → batch допустим."
+        >
+          critical decision
+        </DataBox>
+      </FlowColumn>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode variant="pipeline" size="sm" tooltip="Latency < 5 минут. Нужна streaming-материализация. Tableflow если Confluent Cloud, Iceberg Sink Connector если самохост.">
+        &lt; 5 min → Streaming Lakehouse
+      </FlowNode>
+      <FlowNode variant="catalog" size="sm" tooltip="Latency 5-60 минут. Streaming Lakehouse — overkill. Достаточно классического Kafka Connect S3/JDBC Sink с batch interval 5-15 минут.">
+        5-60 min → batch sink
+      </FlowNode>
+      <FlowNode variant="policy" size="sm" tooltip="Latency > 1 час. Самый простой путь — Airflow / dbt incremental refresh с чтением Kafka через Spark batch.">
+        &gt; 1 hour → batch ETL
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode variant="process" size="sm" tooltip="Дополнительное измерение: нужны ли upserts (primary key updates)? Если да — Paimon или Iceberg V2 merge-on-read. Если только append-only events — простой Iceberg.">
+        Upserts? → Paimon / Iceberg V2 MoR
+      </FlowNode>
+      <FlowNode variant="classification" size="sm" tooltip="Multi-engine аналитика? Spark + Trino + DuckDB одновременно — Iceberg. Только Flink — Paimon допустим.">
+        Multi-engine? → Iceberg
+      </FlowNode>
+      <FlowNode variant="stakeholder" size="sm" tooltip="Source — реляционная БД с CDC? — Debezium Server + Iceberg Sink. Source — Kafka топик из микросервиса? — Tableflow / Iceberg Sink Connector.">
+        CDC source? → Debezium path
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+**Критерии для Streaming Lakehouse:**
+
+1. **Latency** аналитики важна (< 5 мин).
+2. **Объём** топика большой (> 10K msg/s) — батч-ETL создаст backpressure.
+3. **Schema evolution** регулярная — нужна автоматизация.
+4. **Multi-consumer:** одни и те же данные нужны и operational consumer, и аналитикам.
+
+**Критерии для классического Kafka Connect ETL:**
+
+1. Latency 30+ мин допустима.
+2. Простые трансформации, можно отложить до dbt.
+3. Команда уже умеет эксплуатировать Kafka Connect — переход на Iceberg Sink не даст benefit.
+
+---
+
+## Real-world examples
+
+### Netflix
+
+Netflix обрабатывает ~500 миллиардов событий в день (~1.3 PB / day, peak 8M events/sec). Тысячи Kafka топиков, тысячи Flink streaming jobs. Архитектура: events → Kafka → Iceberg (через Flink streaming write + Iceberg sink) → Trino / Spark для ad-hoc и ML. Bronze (raw events), Silver (cleansed), Gold (aggregated) layers — медальная архитектура поверх Iceberg. Lakehouse даёт **streaming responsiveness и batch learning на одном фундаменте**.
+
+### Pinterest
+
+Pinterest публиковал в 2023-2024 inженерные блоги о миграции с lambda-архитектуры (Kafka → Druid для real-time + Kafka → Hive для batch) на единый Iceberg layer. Driver — устранение дублирования данных и **single source of truth** для аналитики и ML feature stores.
+
+### Confluent / Snowflake
+
+Совместная архитектура: Kafka топики → Tableflow → Iceberg в Snowflake Horizon Catalog → Snowflake compute читает Iceberg напрямую (no copy). Маркетируется как **zero-ETL streaming аналитика**. Реальная ценность — устранение JDBC sink и Snowpipe pipelines.
+
+### Sortable
+
+Sortable (ad-tech) — публичный кейс использования Iceberg Sink Connector. CDC из Postgres + bid-events из Kafka → Iceberg на S3 → Trino. Уменьшение data-lag с 1 часа (Airflow + S3 Sink) до 5 минут.
+
+---
+
+## Anti-patterns
+
+### Small files problem
+
+Streaming write создаёт много мелких файлов: каждые 1-5 минут commit → новый Parquet файл. Через неделю — десятки тысяч файлов в одной partition. Query performance деградирует катастрофически: Trino сканирует thousands of file headers вместо чтения данных.
+
+**Решение:** регулярная **compaction**. Iceberg `rewrite_data_files` процедура переписывает мелкие файлы в большие (target 128 MB - 1 GB). Запускайте по расписанию (Airflow / dbt) или непрерывно (Tableflow делает автоматически). **Если средний размер файла < 10 MB — compaction слишком редкая.**
+
+```sql
+CALL system.rewrite_data_files(
+  table => 'warehouse.orders_created',
+  options => map('target-file-size-bytes', '536870912'),  -- 512 MB
+  where => 'created_at > current_date - interval ''7'' day'
+);
+```
+
+### Schema evolution conflicts
+
+Kafka Schema Registry (BACKWARD compatibility) и Iceberg schema evolution имеют **разные правила**. Iceberg позволяет добавлять/удалять/переименовывать колонки по ID, Schema Registry — по имени. Если producer добавил колонку `discount_pct`, а Iceberg sink не настроен на `evolve-schema-enabled=true` — sink упадёт на первом сообщении с новой схемой.
+
+**Решение:** включить schema evolution в sink (`iceberg.tables.evolve-schema-enabled=true`), валидировать compatibility в CI: ваш Avro-схема должна быть compatible **и** для Schema Registry **и** для текущей Iceberg-схемы.
+
+### Retention mismatch
+
+Kafka retention 7 дней. Iceberg retention "навсегда". Если sink lag > 7 дней (например, отвалился connector) — данные в Kafka удалятся до того, как попали в Iceberg. **Permanent loss.**
+
+**Решение:** мониторинг sink lag, alert при lag > 50% от Kafka retention. Для критичных данных Kafka retention минимум 14-30 дней или включить Tiered Storage.
+
+### Snapshot explosion
+
+Streaming write создаёт snapshot каждые 1-5 минут. Через год — десятки тысяч snapshot. Metadata files (manifest list, manifest) разрастаются, query planning замедляется.
+
+**Решение:** регулярный snapshot expiry (`expire_snapshots`), оставляйте только последние 7-30 дней snapshot для time-travel. Tableflow делает автоматически.
+
+### CDC + Iceberg V1
+
+Iceberg V1 — append-only, не поддерживает row-level deletes. Если ваш source — CDC (UPDATE / DELETE из Postgres), нужен **Iceberg V2 с merge-on-read** или **Apache Paimon с primary key tables**. На V1 upserts реализуются как append + последующая dedup-job — медленно и дорого.
+
+---
+
+## Cross-references
+
+- **Storage formats** (этот курс не покрывает глубоко, но смежный контент в data-engineering направлениях): различия Avro, Protobuf, Parquet, ORC. Для Streaming Lakehouse важно: producers пишут Avro в Kafka, sink конвертирует в Parquet для Iceberg.
+- **Debezium + Iceberg Sink** (Wave 2 контент): полная CDC-цепочка Postgres → Debezium → Kafka → Iceberg Sink Connector → Iceberg на S3.
+- **Iceberg REST catalogs** (sd-data-engineer Wave 2): Apache Polaris, Lakekeeper, Nessie, Unity Catalog OSS — выбор catalog зависит от scale, governance модели и multi-engine требований.
+- **Transactional Outbox** (урок 03 этого модуля): Streaming Lakehouse — естественное продолжение outbox для аналитики. Outbox-таблица → Debezium → Iceberg-таблица events.
+- **CQRS** (урок 02): Iceberg как один из read-models для аналитических запросов.
+
+---
+
+<KnowledgeCheck
+  question="Команда строит real-time dashboard для платежей: latency требование 1 минута, источник — Kafka topic 'payments.charged' (Avro, 50K msg/s), потребители — Trino + Spark + DuckDB. CDO предлагает классический S3 Sink Connector с batch interval 5 минут + Hive metastore. Какие три проблемы возникнут с этим подходом и какое решение подходит лучше?"
+  answer="Проблемы классического S3 Sink + Hive: (1) Latency 5 минут — не укладывается в требование 1 минута. (2) S3 Sink создаёт raw-файлы без table-format гарантий: нет atomic commits, читатели могут увидеть partial-write. (3) Hive metastore не поддерживает schema evolution из Schema Registry автоматически — каждое изменение Avro-схемы потребует ручного ALTER TABLE в Hive, неизбежен дрифт. (4) Hive не поддерживает row-level операции и time-travel — для дашборда платежей это критично. Лучше: Streaming Lakehouse с Iceberg Sink Connector (или Tableflow если Confluent Cloud) + REST catalog (Polaris / Lakekeeper). Iceberg даёт: (а) atomic snapshot commits каждую минуту, (б) schema evolution из Schema Registry автоматически, (в) multi-engine из коробки — Trino + Spark + DuckDB читают тот же Iceberg, (г) compaction job в фоне сливает мелкие файлы в большие, (д) snapshot expiry для контроля metadata size. Дополнительно: для критичных платежей включить Kafka retention 14+ дней — Iceberg как destination не должен быть единственной точкой отказа в случае sink lag."
+/>

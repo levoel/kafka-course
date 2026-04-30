@@ -1,16 +1,16 @@
 ---
 title: "Итоги модуля 12"
 description: "Сводная таблица паттернов проектирования с Kafka: какую проблему решает каждый паттерн и какая ключевая Kafka-фича его реализует."
-order: 6
+order: 7
 difficulty: "intermediate"
 estimatedTime: 10
-topics: ["Design Patterns", "Event Sourcing", "CQRS", "Outbox", "Saga", "Topic Governance"]
+topics: ["Design Patterns", "Event Sourcing", "CQRS", "Outbox", "Saga", "Topic Governance", "Streaming Lakehouse"]
 free: false
 ---
 
 # Итоги модуля 12: Design Patterns с Kafka
 
-Модуль 12 охватил пять архитектурных паттернов, которые решают принципиально разные задачи в event-driven системах на Kafka.
+Модуль 12 охватил шесть архитектурных паттернов, которые решают принципиально разные задачи в event-driven системах на Kafka.
 
 ---
 
@@ -24,6 +24,7 @@ free: false
 | **Saga (Хореография)** | Распределённая транзакция без 2PC, слабая связность | Domain event topics, consumer groups per subscription, idempotent producers | Трудно мониторить: нет единого view saga state |
 | **Saga (Оркестрация)** | Распределённая транзакция с централизованным контролем | Command/reply topics, transactional producer, compact saga.state topic | Orchestrator — потенциальная единая точка сбоя |
 | **Topic Governance** | Хаос топиков, несовместимые изменения, потеря данных | `auto.create.topics.enable=false`, Schema Registry, ACL per topic | Требует organizational buy-in (процесс approval) |
+| **Streaming Lakehouse** | Дублирование данных Kafka↔Lakehouse, lag батч-ETL, schema drift | Iceberg Sink Connector / Tableflow, stream-table duality, REST catalog | Требует compaction и snapshot expiry — иначе small files и metadata explosion |
 
 ---
 
