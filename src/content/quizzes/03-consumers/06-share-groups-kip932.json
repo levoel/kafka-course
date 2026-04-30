@@ -1,0 +1,96 @@
+{
+  "lessonSlug": "03-consumers/06-share-groups-kip932",
+  "moduleId": "03-consumers",
+  "_meta": {
+    "idPrefix": "kafka-m03-06",
+    "description": "Use IDs: kafka-m03-06-q1, q2, q3, q4 for MC/TF"
+  },
+  "questions": [
+    {
+      "id": "kafka-m03-06-q1",
+      "type": "multiple-choice",
+      "question": "Топик имеет 4 партиции. Команда хочет запустить 32 параллельных worker'а на медленную ML-инференс-задачу (по 5 секунд на запись), при этом порядок обработки записей не важен. Какой подход даст максимальную пропускную способность?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Consumer group из 32 consumer'ов — Kafka сама распределит нагрузку"
+        },
+        {
+          "id": "b",
+          "text": "Consumer group из 4 consumer'ов (по числу партиций), потому что больше всё равно бесполезно"
+        },
+        {
+          "id": "c",
+          "text": "Share group из 32 consumer'ов — broker через acquisition lock распределит записи между ними кооперативно, несколько consumer'ов будут читать одну partition"
+        },
+        {
+          "id": "d",
+          "text": "Создать новый топик с 32 партициями и переместить туда данные через MirrorMaker"
+        }
+      ],
+      "correctAnswer": "c",
+      "explanation": "Share group (KIP-932) снимает ограничение «1 partition = 1 consumer». В share group несколько consumer'ов могут читать одну partition одновременно — broker через acquisition lock гарантирует, что одна запись не будет обработана дважды. С 32 worker'ами все будут активны: партиций 4, на каждую назначено по 8 consumer'ов, они кооперативно разбирают записи. Consumer group из 32 (вариант a) активирует только 4 — остальные 28 простаивают (потолок параллелизма = число партиций). Вариант d работает, но требует repartitioning'а топика и нарушает downstream-логику. С KIP-932 это всё не нужно.",
+      "bloomLevel": "applied"
+    },
+    {
+      "id": "kafka-m03-06-q2",
+      "type": "multiple-choice",
+      "question": "Worker share group получил запись и вызвал consumer.acknowledge(record, AcknowledgeType.RELEASE) после поймания TimeoutException. Что произойдёт с этой записью?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Запись помечается как обработанная и переходит в Acknowledged — RELEASE это синоним ACCEPT"
+        },
+        {
+          "id": "b",
+          "text": "Запись возвращается в состояние Available, broker инкрементирует delivery_count; запись может быть доставлена другому consumer'у того же share group; при достижении group.share.delivery.attempt.limit (по умолчанию 5) автоматически архивируется"
+        },
+        {
+          "id": "c",
+          "text": "Запись сразу архивируется и больше не доставляется — это эквивалент REJECT"
+        },
+        {
+          "id": "d",
+          "text": "Worker'у выкидывается исключение, потому что нельзя release'ить уже acquired запись"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "RELEASE — это явный сигнал о транзиентной ошибке (timeout, недоступность downstream). Запись возвращается в Available и снова попадает в пул для доставки. Broker инкрементирует delivery_count при каждом RELEASE (а также при истечении acquisition lock). Когда delivery_count достигает group.share.delivery.attempt.limit (5 по умолчанию), broker автоматически переводит запись в Archived — это встроенная защита от poison message. ACCEPT (a) переводит в Acknowledged, REJECT (c) — в Archived. Bесконечный retry-loop невозможен в принципе.",
+      "bloomLevel": "conceptual"
+    },
+    {
+      "id": "kafka-m03-06-q3",
+      "type": "multiple-choice",
+      "question": "Где persists состояние in-flight записей share group и как broker восстанавливает его при перезапуске?",
+      "options": [
+        {
+          "id": "a",
+          "text": "В __consumer_offsets — share group использует тот же топик, что и обычные consumer groups, только с другим ключом"
+        },
+        {
+          "id": "b",
+          "text": "В новом внутреннем топике __share_group_state в виде записей ShareSnapshot (полный снапшот) и ShareUpdate (инкрементальные изменения); Share Coordinator при перезапуске проигрывает свою партицию топика и восстанавливает in-memory state"
+        },
+        {
+          "id": "c",
+          "text": "Состояние не persist'ится — при перезапуске broker'а все in-flight записи теряются, share group начинает с чистого состояния"
+        },
+        {
+          "id": "d",
+          "text": "В отдельной RocksDB на каждом broker'е, синхронизация через KRaft Raft-лог"
+        }
+      ],
+      "correctAnswer": "b",
+      "explanation": "KIP-932 вводит новый внутренний топик __share_group_state, ключуемый по (group, topicId, partition). Share Coordinator (новая broker-side компонента, отдельная от Group Coordinator) пишет туда два типа записей: ShareSnapshot (полный самодостаточный снапшот состояния share-partition) и ShareUpdate (инкрементальные изменения). При перезапуске broker, ставший лидером партиции __share_group_state, проигрывает её от последнего snapshot и восстанавливает in-memory state — после чего готов обслуживать share-group RPC. Назначения consumer'ов на partition'ы при этом НЕ persist'ятся, только эпохи — оптимизация объёма записываемых данных.",
+      "bloomLevel": "analytical"
+    },
+    {
+      "id": "kafka-m03-06-q4",
+      "type": "true-false",
+      "question": "Share groups (KIP-932) гарантируют упорядоченную обработку записей внутри одной partition, как и обычные consumer groups.",
+      "correctAnswer": "false",
+      "explanation": "Ложь. Share groups явно отказываются от ordering guarantees. Внутри одной partition несколько consumer'ов share group разбирают записи параллельно через acquisition lock — порядок их обработки не определён. Это принципиальное отличие от consumer groups, где правило «1 partition = 1 consumer» гарантирует строгий порядок per-partition. Share groups — про задачи, где порядок не важен, а важна elastic пропускная способность с per-record retry (task queues, work distribution, ML inference, webhook delivery). Для ordering-sensitive нагрузок (event sourcing, CDC, обновления балансов) по-прежнему нужны consumer groups.",
+      "bloomLevel": "conceptual"
+    }
+  ]
+}

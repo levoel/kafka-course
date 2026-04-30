@@ -1,0 +1,474 @@
+---
+title: "Share Groups (KIP-932): queue semantics в Kafka"
+description: "Кооперативное чтение из одной партиции, per-record acknowledgment, RabbitMQ-like очереди в Kafka 4.2"
+order: 6
+difficulty: "advanced"
+estimatedTime: 30
+topics: ["KIP-932", "Share Groups", "KafkaShareConsumer", "queue semantics", "AcknowledgeType", "share coordinator"]
+---
+
+# Share Groups (KIP-932): queue semantics в Kafka
+
+Десятилетие Kafka жила с одним правилом: **одна партиция — один consumer внутри группы**. Это правило давало упорядоченность, простую модель offset и линейное масштабирование, но закрывало целый класс use-case'ов — task queues, work distribution, медленный per-message processing. Команды, которым нужны были очереди, ставили рядом RabbitMQ или SQS. KIP-932 «Queues for Kafka» закрывает этот пробел: вводит новый тип группы — **share group** — где несколько consumer'ов кооперативно читают из одной партиции, а acknowledgment работает на уровне отдельной записи. Preview появился в Kafka 4.0 (март 2025), GA — в Kafka 4.2 (февраль 2026).
+
+---
+
+## Зачем это нужно: ограничения consumer groups
+
+Классическая модель consumer groups устроена так: координатор группы назначает каждую партицию ровно одному consumer'у. Это даёт упорядоченное чтение в пределах партиции и гарантирует, что один offset продвигается одной сущностью. Но как только нагрузка на конкретное сообщение становится тяжёлой и неравномерной — модель ломается.
+
+<DiagramContainer title="Проблемы consumer groups для queue-like нагрузок" color="amber">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Slow consumer head-of-line blocking: один consumer обрабатывает запись 10 секунд (ML inference, внешний API). Все следующие записи в его партиции ждут — даже если другие consumer'ы простаивают."
+      >
+        Head-of-line blocking
+      </FlowNode>
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Жёсткий потолок параллелизма: количество одновременно работающих consumer'ов не может превышать число партиций. Если партиций 8, а ты хочешь 50 worker'ов — никак. Нужен реpartitioning топика, что меняет порядок и всю downstream-логику."
+      >
+        Параллелизм ограничен числом партиций
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Дисбаланс по партициям: если producer использует hash-партиционирование по key, одна горячая partition получает 80% трафика. Другие consumer'ы простаивают, тот, кому досталась горячая partition, захлёбывается."
+      >
+        Дисбаланс «горячих» партиций
+      </FlowNode>
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Нет per-record retry: при exception consumer должен либо коммитить и терять сообщение, либо не коммитить и блокировать весь partition. Custom DLQ требует ручной реализации со всеми её багами."
+      >
+        Нет per-record acknowledgment
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+Для классического event streaming эти ограничения — фича, а не баг: они дают порядок и предсказуемость. Но для task queue, где порядок не важен, а важно «выгрести очередь как можно быстрее с retry на сбоях» — это лишние оковы.
+
+<Callout type="note">
+До KIP-932 распространённый workaround выглядел так: создать топик с большим количеством партиций (256, 512), а потом надеяться, что хеш ключа ляжет равномерно. Это работает плохо: partition skew, перебалансировки на каждом scale-out, неудобство при изменении масштаба.
+</Callout>
+
+---
+
+## Архитектура: broker-side delivery state
+
+Главное архитектурное отличие share groups от consumer groups — **где живёт состояние delivery**. В consumer groups координация в основном клиентская: лидер группы вычисляет назначения, клиенты сами трекают offset, broker лишь хранит коммиты. В share groups broker берёт на себя гораздо больше: он отслеживает delivery state каждой отдельной записи в скользящем окне in-flight сообщений.
+
+<DiagramContainer title="Жизненный цикл записи в share group" color="blue">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="input"
+        size="md"
+        tooltip="Available: запись лежит в логе, готова к доставке. Все записи между SPSO (share-partition start offset) и SPEO (end offset) — потенциально доступны. Записи после SPEO ещё не вошли в окно."
+      >
+        Available
+      </FlowNode>
+      <Arrow direction="right" label="poll()" />
+      <FlowNode
+        variant="process"
+        size="md"
+        tooltip="Acquired: запись доставлена консьюмеру и заблокирована для других на время acquisition lock (по умолчанию share.record.lock.duration.ms=30000, 30 секунд). Другие consumer'ы того же share group не получат эту запись, пока lock жив."
+      >
+        Acquired (locked, 30s)
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="monitoring"
+        size="sm"
+        tooltip="ACCEPT: успешная обработка. Запись переходит в Acknowledged, broker увеличивает share-partition start offset (SPSO), запись больше никогда не будет доставлена."
+      >
+        ACCEPT → Acknowledged
+      </FlowNode>
+      <FlowNode
+        variant="monitoring"
+        size="sm"
+        tooltip="RELEASE: транзиентная ошибка (timeout, недоступность downstream). Запись возвращается в Available, increment delivery_count. Может быть доставлена другому consumer'у того же share group."
+      >
+        RELEASE → Available (retry)
+      </FlowNode>
+      <FlowNode
+        variant="monitoring"
+        size="sm"
+        tooltip="REJECT: невосстановимая ошибка (poison message, schema corruption). Запись сразу архивируется, не пытаемся доставлять снова. Аналог переноса в DLQ."
+      >
+        REJECT → Archived
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Lock expiration: consumer не успел вызвать acknowledge/release/reject за 30 секунд (умер, завис, GC pause). Broker автоматически возвращает запись в Available с increment delivery_count. Защита от потерянных in-flight записей."
+      >
+        Lock истёк → Available + delivery_count++
+      </FlowNode>
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Достигнут лимит delivery_attempts (по умолчанию group.share.delivery.attempt.limit=5). Запись архивируется автоматически — защита от poison message, который никто не может обработать."
+      >
+        delivery_count ≥ limit → Archived
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+Скользящее окно in-flight записей живёт между двумя offset'ами:
+
+- **SPSO (Share-Partition Start Offset)** — всё до этого offset уже Acknowledged или Archived;
+- **SPEO (Share-Partition End Offset)** — верхняя граница окна; записи выше ещё не вошли в делёжку.
+
+Окно ограничено по размеру (по умолчанию 200 записей на share-partition, регулируется `group.share.record.lock.partition.limit`), чтобы broker не хранил неограниченный delivery state в памяти.
+
+### Share Coordinator и `__share_group_state`
+
+Состояние share group персистится в новом внутреннем топике — `__share_group_state`. Записи в нём ключуются по `(group, topicId, partition)`. **Share Coordinator** — broker, который ведёт партицию состояния для конкретной share-partition; он же обслуживает RPC от share consumer'ов.
+
+Coordinator пишет два типа записей:
+
+- **ShareSnapshot** — полный самодостаточный снапшот состояния share-partition (SPSO, in-flight записи, их состояния и delivery counts);
+- **ShareUpdate** — инкрементальное изменение: «такая-то запись перешла в Acknowledged», «вот это — в Archived».
+
+При перезапуске broker'а coordinator проигрывает партицию `__share_group_state` от последнего snapshot и восстанавливает in-memory state. Назначения consumer'ов на partition'ы **не персистятся** — только эпохи, чтобы детектировать «зомби» координаторов.
+
+<Callout type="info">
+Share Coordinator — это отдельная сущность от Group Coordinator (который остался обслуживать consumer groups). В Kafka 4.2 broker может одновременно быть Group Coordinator для одних групп и Share Coordinator для других — share groups и consumer groups сосуществуют на одном кластере и могут читать одни и те же топики.
+</Callout>
+
+---
+
+## Acknowledgment-модель: ACCEPT, RELEASE, REJECT, RENEW
+
+KafkaShareConsumer работает в двух режимах: implicit (записи автоматически акают на следующем `poll()`) и explicit (приложение само вызывает `acknowledge()` для каждой записи). Explicit режим даёт три типа подтверждения:
+
+| AcknowledgeType | Семантика | Применение |
+|---|---|---|
+| `ACCEPT` | Успешно обработано → Acknowledged | штатный happy path |
+| `RELEASE` | Транзиентная ошибка → обратно в Available | timeout, retryable downstream failure |
+| `REJECT` | Невосстановимая ошибка → Archived | poison message, schema corruption |
+
+В Kafka 4.2 (KIP-1222) добавлен четвёртый — `RENEW`, продление acquisition lock без изменения состояния записи. Полезно для долгих обработок, где 30-секундного дефолта не хватает, но и поднимать `share.record.lock.duration.ms` глобально не хочется.
+
+<Callout type="warning">
+Каждый `RELEASE` инкрементирует `delivery_count` на стороне broker'а. После достижения `group.share.delivery.attempt.limit` (по умолчанию 5) broker сам архивирует запись — даже если consumer продолжает звать `release()`. Это встроенная защита от poison message: бесконечный retry-loop невозможен в принципе.
+</Callout>
+
+---
+
+## Partition assignment: несколько consumer'ов на одну partition
+
+В consumer groups действует жёсткое правило: **одна partition — один consumer**. В share groups оно отменено. Координатор может назначить одну и ту же partition нескольким consumer'ам того же share group — они будут разбирать её записи кооперативно, через acquisition lock.
+
+<DiagramContainer title="Распределение партиций: consumer group vs share group" color="emerald">
+  <div className="space-y-4 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="cluster"
+        size="lg"
+        tooltip="Consumer group: 4 партиции, 4 consumer'а — каждый получает по одной. Если consumer'ов 8 — половина простаивает. Параллелизм жёстко ограничен числом партиций."
+      >
+        Consumer group: P0 → C0, P1 → C1, P2 → C2, P3 → C3 (1:1)
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="cluster"
+        size="lg"
+        tooltip="Share group: 4 партиции, 8 consumer'ов. Broker распределяет partition'ы между ВСЕМИ — несколько consumer'ов могут читать одну partition. Acquisition lock на стороне broker гарантирует, что одна запись не будет обработана дважды одновременно."
+      >
+        Share group: P0 → C0,C1; P1 → C2,C3; P2 → C4,C5; P3 → C6,C7 (M:N)
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="monitoring"
+        size="md"
+        tooltip="Scale-out без rebalancing'а в классическом смысле: новый consumer присоединяется и сразу начинает забирать записи из общего пула. Никакой stop-the-world паузы — координатор просто перераспределяет назначения. Это отличается от KIP-848 cooperative rebalancing — там всё ещё есть пересдача partition'ов."
+      >
+        Scale-out: новый consumer мгновенно подключается к пулу
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+Это меняет правила игры для масштабирования: количество worker'ов больше не привязано к количеству партиций. У тебя топик с 8 партициями и 100 worker'ов — все 100 будут активны, разбирая записи через broker-managed lock.
+
+---
+
+## Версии и конфигурация
+
+| Версия Kafka | Дата | Статус share groups |
+|---|---|---|
+| 4.0 | март 2025 | early access (только для тестирования) |
+| 4.1 | сентябрь 2025 | preview (включается флагом, не для prod) |
+| 4.2 | февраль 2026 | **GA, production-ready** |
+
+<Callout type="warning">
+Кластеры с включёнными share groups в 4.0 нельзя обновить до 4.1 и выше из-за изменений формата `__share_group_state`. Конфиг 4.0 был объявлен как «не upgrade-safe» — его явно использовали только для evaluation.
+</Callout>
+
+Минимальная конфигурация broker'а (Kafka 4.2):
+
+```properties
+# server.properties
+group.coordinator.rebalance.protocols=classic,consumer,share
+share.coordinator.state.topic.replication.factor=3
+share.coordinator.state.topic.min.isr=2
+```
+
+Группа создаётся как share при подписке через `KafkaShareConsumer` — никакого ручного создания не нужно, broker сам распознаёт тип по протоколу запроса.
+
+Ключевые tuning-параметры:
+
+- `share.record.lock.duration.ms` — длительность acquisition lock (по умолчанию 30000, диапазон 1000–60000);
+- `group.share.record.lock.partition.limit` — лимит in-flight записей на share-partition (по умолчанию 200);
+- `group.share.delivery.attempt.limit` — максимум попыток до архивирования (по умолчанию 5);
+- `share.auto.offset.reset` — стартовая позиция для новой share group (`latest` / `earliest`).
+
+---
+
+## Code example: KafkaShareConsumer
+
+```java
+import org.apache.kafka.clients.consumer.AcknowledgeType;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaShareConsumer;
+
+import java.time.Duration;
+import java.util.List;
+import java.util.Properties;
+
+public class TaskQueueWorker {
+    public static void main(String[] args) {
+        Properties props = new Properties();
+        props.put("bootstrap.servers", "localhost:9092");
+        props.put("group.id", "image-processing-workers");
+        props.put("key.deserializer",
+            "org.apache.kafka.common.serialization.StringDeserializer");
+        props.put("value.deserializer",
+            "org.apache.kafka.common.serialization.StringDeserializer");
+        // Explicit acknowledgment: per-record control
+        props.put("share.acknowledgement.mode", "explicit");
+
+        try (KafkaShareConsumer<String, String> consumer =
+                 new KafkaShareConsumer<>(props)) {
+            consumer.subscribe(List.of("image-processing-tasks"));
+
+            while (true) {
+                ConsumerRecords<String, String> records =
+                    consumer.poll(Duration.ofMillis(500));
+
+                for (ConsumerRecord<String, String> record : records) {
+                    try {
+                        ImageJob job = parseJob(record.value());
+                        processImage(job);  // долгая ML обработка
+                        // Успех: подтверждаем конкретную запись
+                        consumer.acknowledge(record, AcknowledgeType.ACCEPT);
+                    } catch (TransientDownstreamException e) {
+                        // Retry: запись вернётся в Available и достанется кому-то ещё
+                        consumer.acknowledge(record, AcknowledgeType.RELEASE);
+                    } catch (PoisonMessageException e) {
+                        // Невосстановимо: сразу в Archived
+                        consumer.acknowledge(record, AcknowledgeType.REJECT);
+                    }
+                }
+                // Коммит acknowledgments на broker одним батчем
+                consumer.commitSync();
+            }
+        }
+    }
+}
+```
+
+Несколько ключевых отличий от обычного KafkaConsumer:
+
+- Нет вызова `assign()` или `seek()` — share consumer не управляет offset'ами; он только подтверждает записи.
+- `acknowledge(record, type)` принимает конкретную запись, а не batch — это per-record acknowledgment.
+- `commitSync()` отправляет все накопленные подтверждения на broker одной операцией, чтобы не делать round-trip на каждую запись.
+
+<Callout type="tip">
+В implicit mode код проще: убираешь `share.acknowledgement.mode=explicit`, и каждый следующий `poll()` автоматически акает все записи предыдущего как ACCEPT. Если бросил исключение — записи освободятся по lock timeout. Подходит для простых сценариев, где ты ок терять детали ошибки.
+</Callout>
+
+---
+
+## Когда выбирать share groups
+
+<DiagramContainer title="Дерево решений: share group или consumer group" color="purple">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="input"
+        size="md"
+        tooltip="Нужен ли строгий порядок обработки записей по ключу или per-partition? Если да — только consumer group. Share group НЕ даёт ordering: внутри одной partition записи разбираются параллельно несколькими consumer'ами."
+      >
+        Нужен порядок?
+      </FlowNode>
+      <Arrow direction="right" label="да" />
+      <FlowNode
+        variant="cluster"
+        size="md"
+        tooltip="Consumer group: stream processing, event sourcing, CDC, аудит, любая ситуация, где порядок событий критичен (например, обновления балансов счёта)."
+      >
+        Consumer group
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="input"
+        size="md"
+        tooltip="Параллелизм нужно скейлить выше, чем число partition'ов в топике? Тогда consumer group не подходит — потолок параллелизма = число партиций."
+      >
+        Параллелизм > partition count?
+      </FlowNode>
+      <Arrow direction="right" label="да" />
+      <FlowNode
+        variant="cluster"
+        size="md"
+        tooltip="Share group: task queue, work distribution, ML inference, image/video processing — задачи независимы, важна пропускная способность, а не порядок."
+      >
+        Share group
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="input"
+        size="md"
+        tooltip="Нужен per-record retry с DLQ? В consumer group приходится строить custom DLQ-логику с ручным offset-управлением. Share group даёт это из коробки через REJECT/lock-timeout/delivery_count."
+      >
+        Нужен per-record retry?
+      </FlowNode>
+      <Arrow direction="right" label="да" />
+      <FlowNode
+        variant="cluster"
+        size="md"
+        tooltip="Share group: каждый record можно ACCEPT/RELEASE/REJECT независимо. Poison message protection через delivery_attempt_limit встроена в broker."
+      >
+        Share group
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+Типичные use case'ы под share groups:
+
+- **Task queues** — обработка независимых job'ов (image resize, PDF generation, ML inference);
+- **Notification fan-out** — рассылка уведомлений с retry на флэйки backend;
+- **Webhook delivery** — outbound HTTP с retry и DLQ через REJECT;
+- **Background processing** — всё, что раньше тащили в RabbitMQ или SQS «потому что Kafka так не умеет».
+
+---
+
+## Limitations
+
+Share groups — мощный инструмент, но у него есть цена.
+
+<DiagramContainer title="Ограничения share groups" color="amber">
+  <div className="space-y-3 p-2">
+    <FlowRow>
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Нет ordering guarantees. Внутри одной partition несколько consumer'ов разбирают записи параллельно — порядок обработки не определён. Все use case'ы, где порядок важен (event sourcing, CDC, баланс счёта), под share group НЕ подходят."
+      >
+        Нет ordering
+      </FlowNode>
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Share groups существуют параллельно с consumer groups: они не делят offset'ы. Один и тот же топик может читаться share group и consumer group одновременно — позиции независимы. Это не миграция: переключение нагрузки требует копирования логики."
+      >
+        Offset не общий с consumer groups
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Усложнение retention. Share-partition start offset продвигается ТОЛЬКО когда все записи до этой границы Acknowledged или Archived. Если один consumer завис на середине окна — SPSO не двигается, и retention по этим offset'ам не отрабатывает (хотя время-based retention работает как обычно)."
+      >
+        SPSO влияет на retention-семантику
+      </FlowNode>
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Дополнительная нагрузка на broker. Share Coordinator поддерживает in-memory state in-flight записей, пишет ShareSnapshot/ShareUpdate в __share_group_state. Для топиков с большим количеством share-partition'ов и высоким QPS это заметно."
+      >
+        Нагрузка на broker (state на каждой записи)
+      </FlowNode>
+    </FlowRow>
+    <FlowRow>
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Транзакции и Kafka Streams в share groups не поддерживаются (по крайней мере в 4.2 GA). Если нужен exactly-once или DSL Streams — это всё ещё consumer group territory."
+      >
+        Нет транзакций и Streams
+      </FlowNode>
+      <FlowNode
+        variant="error"
+        size="md"
+        tooltip="Lock duration (30 сек по умолчанию) задаёт нижнюю границу latency повторной доставки при падении consumer'а. Если ваша задача обрабатывается 50ms, а consumer умер с записью в Acquired — следующая попытка только через 30 секунд. RENEW (KIP-1222) помогает только продлевать lock, а не сокращать."
+      >
+        Latency повторной доставки = lock duration
+      </FlowNode>
+    </FlowRow>
+  </div>
+</DiagramContainer>
+
+<Callout type="warning">
+Share groups не заменяют consumer groups, а дополняют их. Stream processing, event sourcing, CDC, любые ordering-sensitive нагрузки остаются за consumer groups. Share groups — про задачи, где порядок неважен, а важна elastic пропускная способность с per-record retry.
+</Callout>
+
+---
+
+## RabbitMQ-like patterns в Kafka
+
+С share groups Kafka впервые становится разумной заменой RabbitMQ для типичных queue use case'ов. Сравнение:
+
+| Что нужно | RabbitMQ | Kafka до 4.2 | Kafka 4.2+ share groups |
+|---|---|---|---|
+| Per-message ack/nack | да (basic.ack/nack) | нет (только offset commit) | да (ACCEPT/RELEASE/REJECT) |
+| Параллелизм > потребителей-на-очередь | да | нет (1 partition = 1 consumer) | да (M:N) |
+| Poison message protection | через DLQ exchange | ручная реализация | встроенная (delivery_attempt_limit) |
+| Retention сообщений после ack | нет (удаляются) | да (offset commit, лог остаётся) | да (запись архивируется логически, но физически в логе) |
+| Replay сообщений | сложно | штатно | штатно (новая share group с earliest) |
+| Ordering | per-queue только при 1 consumer | per-partition | **нет** |
+
+Для команд, где Kafka уже стоит как event backbone, share groups убирают главный аргумент в пользу RabbitMQ — «нам нужны очереди». Не нужно тащить второй брокер с отдельной operational нагрузкой.
+
+---
+
+## Итог
+
+Share groups (KIP-932) — крупнейшее изменение consumer-модели Kafka за десятилетие. Broker берёт на себя отслеживание delivery state каждой записи в скользящем окне; партиции назначаются нескольким consumer'ам кооперативно; per-record acknowledgment даёт ACCEPT/RELEASE/REJECT с встроенной poison message protection. Это закрывает целый класс queue use-case'ов — task queues, work distribution, retry с DLQ — для которых раньше приходилось ставить рядом RabbitMQ. Цена — отказ от ordering, дополнительная нагрузка на broker и независимость offset-пространства от обычных consumer groups. В Kafka 4.2 (февраль 2026) фича объявлена production-ready.
+
+<KnowledgeCheck
+  question="Топик `payments-events` имеет 4 партиции, по нему читает share group из 16 consumer'ов. Один из consumer'ов вызывает release() на запись из-за timeout downstream-сервиса. Что произойдёт дальше с этой записью?"
+  answer="Запись вернётся из состояния Acquired в состояние Available, broker инкрементирует её delivery_count на единицу. Запись снова станет доступной для доставки — её может получить ЛЮБОЙ из 16 consumer'ов share group (включая того же, который её release'нул, но с большой вероятностью — другой, так как координатор балансирует распределение). Если delivery_count в итоге достигнет group.share.delivery.attempt.limit (по умолчанию 5), broker автоматически переведёт запись в состояние Archived и больше не будет её доставлять — это встроенная защита от poison message, не требующая ручной DLQ-логики."
+/>
+
+<KnowledgeCheck
+  question="Команда хочет мигрировать обработку webhook-доставки с RabbitMQ на Kafka share groups. У них 8 партиций в топике webhook-deliveries и они планируют запустить 200 worker'ов. Какие три ключевых момента нужно учесть при таком переходе?"
+  answer="Во-первых, share group даёт M:N распределение — 200 worker'ов смогут читать с 8 партиций одновременно (несколько consumer'ов на partition), параллелизм больше не привязан к числу партиций. Во-вторых, нет ordering guarantees: если для конкретного эндпойнта нужен порядок доставки webhook'ов — share group не подходит, придётся либо использовать consumer group, либо обеспечить идемпотентность на стороне получателя. В-третьих, default lock duration 30 секунд задаёт минимальный delay повторной доставки при падении worker'а с in-flight записью; если webhook-вызов обычно занимает 2-5 секунд, при сбое worker'а очередная попытка пойдёт только через 30 сек — нужно либо настроить share.record.lock.duration.ms ниже, либо использовать explicit acknowledgement с быстрым RELEASE при ошибках."
+/>
+
+<KnowledgeCheck
+  question="В чём принципиальное отличие хранения delivery state в share groups по сравнению с consumer groups, и как это связано с топиком __share_group_state?"
+  answer="В consumer groups state в основном клиентский: клиенты сами отслеживают свой position, broker хранит только commit offset в __consumer_offsets — одно число на (group, topic, partition). В share groups broker отслеживает состояние КАЖДОЙ in-flight записи (Available, Acquired, Acknowledged, Archived), её delivery_count и acquisition lock — это per-record state. Этот state персистится в новый внутренний топик __share_group_state в виде записей ShareSnapshot (полный снапшот состояния share-partition) и ShareUpdate (инкрементальные изменения). Share Coordinator — broker, который ведёт партицию __share_group_state для конкретной share-partition — при перезапуске проигрывает свою партицию и восстанавливает in-memory state. Назначения consumer'ов на partition'ы при этом НЕ персистятся, только эпохи — это оптимизация, чтобы уменьшить объём записываемых данных."
+/>

@@ -1,7 +1,7 @@
 ---
 title: "Итоги модуля: Consumers"
-description: "Обзор ключевых концепций — Consumer API, offsets, groups, ребалансировка, static membership"
-order: 6
+description: "Обзор ключевых концепций — Consumer API, offsets, groups, ребалансировка, static membership, share groups"
+order: 7
 difficulty: "intermediate"
 estimatedTime: 10
 topics: ["Summary", "Review"]
@@ -9,7 +9,7 @@ topics: ["Summary", "Review"]
 
 # Итоги модуля: Consumers
 
-Этот модуль охватил полный цикл работы с consumer-стороной Kafka: от базового API и управления offset до advanced механизмов ребалансировки и static membership. Ключевой акцент — KIP-848 как современный стандарт протокола ребалансировки в Kafka 4.0.
+Этот модуль охватил полный цикл работы с consumer-стороной Kafka: от базового API и управления offset до advanced механизмов ребалансировки, static membership и share groups. Ключевые акценты — KIP-848 как современный стандарт протокола ребалансировки в Kafka 4.0 и KIP-932 как production-ready queue semantics в Kafka 4.2.
 
 ---
 
@@ -60,6 +60,14 @@ topics: ["Summary", "Review"]
         tooltip="Static Membership (Урок 05): group.instance.id — стабильный ID вместо эфемерного. Reconnect без ребалансировки при рестарте меньше session.timeout.ms. Идеально для Kubernetes StatefulSet. max.poll.interval.ms — отдельный таймаут для poll()."
       >
         Static Membership
+      </FlowNode>
+      <Arrow direction="right" />
+      <FlowNode
+        variant="cluster"
+        size="md"
+        tooltip="Share Groups KIP-932 (Урок 06): queue semantics в Kafka 4.2. Несколько consumer'ов читают одну partition кооперативно через acquisition lock. Per-record ACCEPT/RELEASE/REJECT. Встроенный poison message protection через delivery_attempt_limit. Replaces RabbitMQ для task queue use case'ов."
+      >
+        Share Groups (KIP-932)
       </FlowNode>
     </FlowRow>
   </div>
