@@ -1,6 +1,6 @@
 {
   "id": "kafka-course",
-  "title": "Apache Kafka Deep-Dive",
+  "title": "Apache Kafka",
   "description": "Ультимативный курс по Apache Kafka — от архитектуры KRaft до production operations и design patterns",
   "author": "Lev Neganov",
   "difficulty": "advanced",
